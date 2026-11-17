@@ -6,7 +6,7 @@ import type { Trump } from './cards.ts';
 test('deck contains exactly 36 unique cards', () => {
   const deck = createDeck();
   assert.equal(deck.length, 36);
-  assert.equal(new Set(deck.map(card => `${card.suit}:${card.rank}`)).size, 36);
+  assert.equal(new Set(deck.map((card) => `${card.suit}:${card.rank}`)).size, 36);
   assert.notEqual(createDeck(), deck);
 });
 

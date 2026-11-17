@@ -4,12 +4,23 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test src/game/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "test": "node --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "eslint src",
+    "format": "prettier --write \"src/**/*.ts\" \"*.json\" \"*.mjs\" \".github/**/*.yml\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"*.json\" \"*.mjs\" \".github/**/*.yml\"",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build"
   },
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^24.0.0",
-    "typescript": "^5.9.0"
+    "eslint": "^10.15.0",
+    "prettier": "^3.10.1",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.73.0"
   }
 }

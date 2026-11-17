@@ -7,7 +7,7 @@ export type Trump = Exclude<Suit, 'spades'> | null;
 export type Card = Readonly<{ suit: Suit; rank: Rank }>;
 
 export function createDeck(): Card[] {
-  return SUITS.flatMap(suit => RANKS.map(rank => ({ suit, rank })));
+  return SUITS.flatMap((suit) => RANKS.map((rank) => ({ suit, rank })));
 }
 
 export function trumpFromLastCard(card: Card): Trump {

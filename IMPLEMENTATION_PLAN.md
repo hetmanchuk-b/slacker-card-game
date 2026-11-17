@@ -16,7 +16,19 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - Node.js 24+, npm, strict TypeScript, and a minimal test command are configured.
 - `src/game/cards.ts` implements deck construction, trump selection, and card comparison.
 - `src/game/cards.test.ts` covers deck uniqueness and rank/suit combinations.
-- The complete game engine, server, client, persistence, and bots are not implemented.
+- The complete game engine, server, client, durable persistence, and bots are not implemented.
+
+### Progress — increment 1
+
+- **Stage 1: complete.** Tooling/CI, domain contracts, rule-to-test matrix, and architecture decisions are in place.
+- **Stage 2: complete for the initial executable engine.** Creation, replay, invariants, atomic in-memory history, version checks, and duplicate protection are tested. Extend phase-specific checks alongside each later behavior.
+- **Stage 3: in progress.** All supported player counts deal correctly, invalid draws reinsert randomly and defer punishment, and the reveal deadline chooses the first leader. Spoken claims and actual deferred penalty execution still require Stage 5 handlers.
+- **Stages 4–12: not started.** No server or browser application is claimed to exist.
+- Verification: `npm run check` passes, with **27 passing tests**. A smoke test importing `dist/game/engine.js` successfully creates and replays a game.
+- Red/green checks were run for creation, history append, draw, illegal draw, reveal expiry, history integrity, and replay/state validation.
+- See `docs/architecture.md`, `docs/rule-test-matrix.md`, and `README.md` for current interfaces, scope, and commands.
+
+**Dependency clarification:** Stage 3 originally included full dealing-time claims and penalty execution, while their handlers are assigned to Stage 5. Those cross-stage integration checks remain open until Stage 5; they must not be marked complete or replaced with pretend handlers. Basic dealing is independently executable in the meantime.
 
 ### Execution rules
 
@@ -68,22 +80,22 @@ src/
   bot/           # Observation memory and legal strategy
   client/        # React application and Three.js table
 tests/           # Integration, property-based, and browser tests
- docs/           # Rules, scenarios, architecture decisions, operations
+docs/            # Rules, scenarios, architecture decisions, operations
 ```
 
 ## Stage 1 — Foundation and executable rule map
 
 **Depends on:** existing baseline.
 
-- [ ] Re-run the existing tests and TypeScript checks; preserve their coverage.
-- [ ] Add consistent formatting, linting, build commands, and continuous integration.
-- [ ] Create a rule-to-test matrix referencing the numbered specification sections and all 18 scenarios.
-- [ ] Define stable identifiers for cards, seats, games, commands, events, claims, procedures, and history branches.
-- [ ] Define discriminated state types for dealing, last-card reveal, pre-game penalties, between-round play, active rounds, and finished games.
-- [ ] Model disconnect suspension separately from the underlying gameplay procedure; do not flatten all pauses into one flag.
-- [ ] Define the engine interface: command decision, event application, and invariant validation.
-- [ ] Define injected clock/randomness inputs. Production randomness must use a suitable server-side source; tests use controlled outcomes.
-- [ ] Record the storage and guest-session decisions, including secure reconnect and lobby ownership.
+- [x] Re-run the existing tests and TypeScript checks; preserve their coverage.
+- [x] Add consistent formatting, linting, build commands, and continuous integration.
+- [x] Create a rule-to-test matrix referencing the numbered specification sections and all 18 scenarios.
+- [x] Define stable identifiers for cards, seats, games, commands, events, claims, procedures, and history branches.
+- [x] Define discriminated state types for dealing, last-card reveal, pre-game penalties, between-round play, active rounds, and finished games.
+- [x] Model disconnect suspension separately from the underlying gameplay procedure; do not flatten all pauses into one flag.
+- [x] Define the engine interface: command decision, event application, and invariant validation.
+- [x] Define injected clock/randomness inputs. Production randomness must use a suitable server-side source; tests use controlled outcomes.
+- [x] Record the storage and guest-session decisions, including secure reconnect and lobby ownership.
 
 **Exit criteria:** the baseline remains green; domain types and the test matrix cover every agreed rule without importing rendering or transport dependencies.
 
@@ -91,12 +103,12 @@ tests/           # Integration, property-based, and browser tests
 
 **Depends on:** Stage 1.
 
-- [ ] Implement command results that distinguish accepted play, accepted rule-breaking attempts, and rejected malformed/unauthorized input.
-- [ ] Implement event application without consulting wall-clock time, sockets, or fresh randomness.
-- [ ] Record random outcomes in events, including shuffle order, initial recipient, and random reinsertion positions.
-- [ ] Represent a command's resulting event batch as one atomic decision; internal events must not become arbitrary rollback points.
-- [ ] Add branch/version metadata and replay fixtures using the in-memory persistence adapter.
-- [ ] Implement card-conservation and structural state invariants.
+- [x] Implement command results that distinguish accepted play, accepted rule-breaking attempts, and rejected malformed/unauthorized input.
+- [x] Implement event application without consulting wall-clock time, sockets, or fresh randomness.
+- [x] Record random outcomes in events, including shuffle order, initial recipient, and random reinsertion positions.
+- [x] Represent a command's resulting event batch as one atomic decision; internal events must not become arbitrary rollback points.
+- [x] Add branch/version metadata and replay fixtures using the in-memory persistence adapter.
+- [x] Implement card-conservation and structural state invariants.
 
 **Exit criteria:** replaying the same committed event sequence produces the same state; invalid transport-like commands cannot become arbitrary penalties.
 
@@ -104,14 +116,14 @@ tests/           # Integration, property-based, and browser tests
 
 **Depends on:** Stage 2.
 
-- [ ] Implement random first recipient and clockwise one-card dealing.
-- [ ] Deal two face-down stumps per seat over two full passes, then distribute all remaining cards to hands.
-- [ ] Make deck click and drag represent the same draw command; input handling comes later.
-- [ ] For out-of-order draws, return the card to a recorded random deck position, preserve the correct recipient, and queue a penalty.
+- [x] Implement random first recipient and clockwise one-card dealing.
+- [x] Deal two face-down stumps per seat over two full passes, then distribute all remaining cards to hands.
+- [x] Make deck click and drag represent the same draw command; input handling comes later.
+- [x] For out-of-order draws, return the card to a recorded random deck position, preserve the correct recipient, and queue a penalty.
 - [ ] Support claims during dealing and defer resulting penalties until before the first round.
-- [ ] Implement the 10-second final-card reveal, trump/no-trump selection, and last-recipient first move.
+- [x] Implement the 10-second final-card reveal, trump/no-trump selection, and last-recipient first move.
 - [ ] Drain pending procedures and deferred penalties before accepting the first lead.
-- [ ] Test every player count from 2 through 8, including uneven hand distributions.
+- [x] Test every player count from 2 through 8, including uneven hand distributions.
 
 **Exit criteria:** scenario 1 and the dealing parts of scenario 12 pass; all 36 cards are accounted for; no persistent draw-turn or trump hint is required.
 

@@ -101,6 +101,9 @@ export type GameState = Readonly<{
   gameId: GameId;
   ownerId: SeatId;
   createdAtMs: number;
+  clock:
+    | Readonly<{ type: 'running' }>
+    | Readonly<{ type: 'suspended'; timerIds: readonly ProcedureId[] }>;
   cards: readonly GameCard[];
   players: readonly Player[];
   deck: readonly CardId[];

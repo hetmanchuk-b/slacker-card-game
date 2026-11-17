@@ -176,6 +176,18 @@ export function validateState(state: GameState): readonly string[] {
     state.pendingPenalties.length
   )
     errors.push('Duplicate pending incident');
+  if (state.clock.type === 'suspended') {
+    const timers = [
+      state.procedure?.timer,
+      state.phase.type === 'trump-reveal' ? state.phase.timer : undefined,
+    ].filter((timer): timer is Timer => timer !== undefined);
+    if (timers.some((timer) => timer.startedAtMs !== null))
+      errors.push('A gameplay timer is running during suspension');
+    if (new Set(state.clock.timerIds).size !== state.clock.timerIds.length)
+      errors.push('Duplicate suspended timer');
+    if (state.clock.timerIds.some((id) => !timers.some((timer) => timer.id === id)))
+      errors.push('Unknown suspended timer');
+  }
   if (state.procedure !== null) errors.push(...validateTimer(state.procedure.timer));
   if (state.procedure?.type === 'penalty') {
     const procedure = state.procedure;

@@ -23,9 +23,9 @@ Tests cross these interfaces. No tests against private helper call order are req
 
 ## Timer and pause model
 
-Gameplay phase, claim/penalty procedure, and live connection suspension are separate concepts. A disconnected player does not erase the procedure being interrupted. Timer values use injected milliseconds; future runtime scheduling must turn elapsed deadlines into serialized system commands.
+Gameplay phase, claim/penalty procedure, and live connection suspension are separate concepts. A disconnected player does not erase the procedure being interrupted. `GameRuntime` turns injected clock deadlines into serialized system commands. The engine records logical clock suspension and the IDs of timers that were running; nested timers already paused by a claim/withdrawal remain paused.
 
-Live socket/presence information is not part of rollbackable game state. Recompute disconnection suspension after a rollback. A replacement vote belongs to runtime pause management and can run while gameplay timers are frozen.
+Live socket/presence information is not part of rollbackable game state. Recompute disconnection suspension after a rollback. A replacement vote belongs to runtime pause management and runs while gameplay timers are frozen. Runtime checkpoints capture presence/controllers, accepted receipts and control audit records separately from engine history; old sockets are disconnected on recovery. See `docs/runtime.md`.
 
 ## Storage decision
 
@@ -42,7 +42,7 @@ Use PostgreSQL with the `pg` driver and explicit SQL migrations when durable per
 
 ## Current implementation scope
 
-Creation, dealing, round play, stump handling, penalties, scoped claims, voting, and withdrawal are executable. Timer expiration is still delivered through explicit commands; live scheduling and connection suspension are Stage 6 work. No running multiplayer server or browser application is claimed. Stage checklists and the rule-to-test matrix identify the verified scope.
+The engine and serialized runtime are executable: scheduling, connection suspension, replacement control, and checkpoint recovery now drive the existing game/claim procedures. PostgreSQL persistence, administrative rollback, authenticated transport, bot decisions, and browser rendering remain later stages. No running multiplayer server or browser application is claimed.
 
 ## Atomic automatic consequences
 
@@ -60,7 +60,7 @@ Private stump peek knowledge is stored separately from the card's physical locat
 - Engine commands carry a canonical evidence reference and scope. These are **trusted internal inputs**: Stage 8 must resolve chat/action IDs, authors, original scope, and active-branch provenance from server-owned history. A browser must not be allowed to relabel an old message as a current episode.
 - Spoken episodes use explicit stable keys; equivalent prose is not machine-deduplicated. Players settle disputed spoken identity socially, as specified.
 - Automatic violations are immediately recorded as handled action incidents. Reporting one again does not create a second punishment. Reusing a resolved, tied, withdrawn, or still-pending claim's incident key is rejected.
-- A claim vote includes active seats except the accused. Withdrawal consent includes active seats except the claimant, including the accused. Stage 6 must block ordinary commands during absence and freeze timers; the engine does not infer live socket presence.
+- A claim vote includes active seats except the accused. Withdrawal consent includes active seats except the claimant, including the accused. The runtime blocks ordinary commands during absence and records timer suspension; the engine does not infer live socket presence.
 - Withdrawal pauses an active ballot with its exact remaining milliseconds. A denial or timeout restores those ballots and that remaining duration; a queued claim whose vote has not started gets a fresh timer only when it actually starts.
 - A deferred dealing verdict can still be withdrawn before its punishment starts. A request queued behind another procedure is honored before the matching deferred punishment; other punishments are not interrupted.
 - During the last-card reveal, accepted claims freeze the reveal timer until the full claim queue is drained. Resumption is an explicit event; replay never obtains fresh time.

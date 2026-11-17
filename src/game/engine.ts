@@ -1,5 +1,6 @@
 import { createDeck, trumpFromLastCard } from './cards.ts';
 import { id } from './ids.ts';
+import { applyClock, decideClock } from './clock.ts';
 import { applyClaimEvent, automaticClaimEvent, decideClaimCommand, incidentKey } from './claims.ts';
 import { automaticRepetitionEvent, recordRepetition } from './repetition.ts';
 import { validateState } from './invariants.ts';
@@ -42,6 +43,7 @@ export function decide(
 }
 
 function automaticEvent(state: GameState, commandId: CommandId, index: number): DomainEvent | null {
+  if (state.clock.type === 'suspended') return null;
   return (
     automaticPenaltyEvent(state, id('procedure', `${commandId}:${index}:penalty`)) ??
     automaticClaimEvent(state, id('procedure', `${commandId}:${index}:claim`)) ??
@@ -58,6 +60,9 @@ function decideCommand(
   if (!Number.isSafeInteger(context.nowMs) || context.nowMs < (state?.createdAtMs ?? 0)) {
     return { type: 'rejected', code: 'invalid-time' };
   }
+  if (command.type === 'suspend-clock' || command.type === 'resume-clock')
+    return decideClock(state, command, context);
+  if (state?.clock.type === 'suspended') return { type: 'rejected', code: 'game-suspended' };
   if (
     command.type === 'submit-claim' ||
     command.type === 'cast-vote' ||
@@ -213,7 +218,19 @@ export function applyAction(state: GameState | null, action: ActionBatch): GameS
   }
   let next = state;
   for (const { event } of action.events) {
+    if (
+      next?.clock.type === 'suspended' &&
+      event.type !== 'clock-resumed' &&
+      event.type !== 'clock-suspended'
+    )
+      throw new Error('Gameplay event during runtime suspension');
     switch (event.type) {
+      case 'clock-suspended':
+      case 'clock-resumed': {
+        if (next === null) throw new Error('Clock transition before creation');
+        next = applyClock(next, event.type, action.occurredAtMs);
+        break;
+      }
       case 'reveal-resumed':
       case 'withdrawal-requested':
       case 'withdrawal-started':
@@ -356,6 +373,7 @@ export function applyAction(state: GameState | null, action: ActionBatch): GameS
           gameId: event.gameId,
           ownerId: event.ownerId,
           createdAtMs: action.occurredAtMs,
+          clock: { type: 'running' },
           cards: structuredClone(event.cards),
           players: event.seatIds.map((seatId) => ({
             id: seatId,

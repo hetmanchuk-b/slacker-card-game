@@ -74,8 +74,11 @@ export type ClaimCommand =
       vote: Vote;
     }>
   | Readonly<{ type: 'expire-claim-vote'; id: CommandId; timerId: ProcedureId }>;
+export type ClockCommand =
+  | Readonly<{ type: 'suspend-clock'; id: CommandId }>
+  | Readonly<{ type: 'resume-clock'; id: CommandId }>;
 export type GameCommand =
-  StartGame | DrawCard | ExpireReveal | RoundCommand | PenaltyCommand | ClaimCommand;
+  StartGame | DrawCard | ExpireReveal | RoundCommand | PenaltyCommand | ClaimCommand | ClockCommand;
 
 export type WithdrawalEvent =
   | Readonly<{ type: 'withdrawal-requested'; claimId: ClaimId; seatId: SeatId }>
@@ -120,6 +123,8 @@ export type PenaltyEvent =
   | Readonly<{ type: 'penalty-completed'; procedureId: ProcedureId }>;
 
 export type DomainEvent =
+  | Readonly<{ type: 'clock-suspended' }>
+  | Readonly<{ type: 'clock-resumed' }>
   | ClaimEvent
   | Readonly<{ type: 'repetition-checked' }>
   | PenaltyEvent
@@ -157,6 +162,7 @@ export type ActionBatch = Readonly<{
 export type RejectionCode =
   | 'already-started'
   | 'not-started'
+  | 'game-suspended'
   | 'unknown-seat'
   | 'inactive-seat'
   | 'invalid-claim'

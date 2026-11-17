@@ -40,6 +40,7 @@ export function scenario(input: {
     gameId: id('game', 'scenario'),
     ownerId: seat(0),
     createdAtMs: 0,
+    clock: { type: 'running' },
     cards,
     players,
     deck: [],

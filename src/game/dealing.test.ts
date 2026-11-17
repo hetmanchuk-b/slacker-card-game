@@ -127,7 +127,64 @@ test('dealing violations remain pending after the reveal instead of starting pla
   if (result.type !== 'accepted') throw new Error('Expected reveal completion');
   const next = applyAction(revealed, result.action);
   assert.deepEqual(next.phase, { type: 'pre-game-penalties', firstLeaderId: 'seat-2' });
-  assert.equal(next.pendingPenalties.length, 1);
+  assert.equal(next.pendingPenalties.length, 0);
+  assert.equal(next.procedure?.type, 'penalty');
+  if (next.procedure?.type === 'penalty')
+    assert.equal(next.procedure.penalty.reason, 'draw-out-of-turn');
+});
+
+test('multiple dealing punishments are executed sequentially before the first leader is released', () => {
+  let state = newGame(4);
+  for (const offender of [0, 1]) {
+    const result = decide(
+      state,
+      {
+        type: 'draw-card',
+        id: id('command', `wrong-${offender}`),
+        actorId: id('seat', `seat-${offender}`),
+      },
+      context,
+    );
+    if (result.type !== 'accepted') throw new Error('Expected violation');
+    state = applyAction(state, result.action);
+  }
+  state = dealAll(state);
+  if (state.phase.type !== 'trump-reveal') throw new Error('Expected reveal');
+  const expiry = decide(
+    state,
+    { type: 'expire-reveal', id: id('command', 'end-reveal'), timerId: state.phase.timer.id },
+    { ...context, nowMs: 11035 },
+  );
+  if (expiry.type !== 'accepted') throw new Error('Expected reveal expiry');
+  state = applyAction(state, expiry.action);
+  const recipients: string[] = [];
+  let responses = 0;
+  while (state.procedure?.type === 'penalty') {
+    const procedure = state.procedure;
+    const recipient = procedure.penalty.recipientId;
+    if (!recipients.includes(recipient)) recipients.push(recipient);
+    const donor = procedure.eligibleSeatIds.find(
+      (seatId) => !Object.hasOwn(procedure.responses, seatId),
+    )!;
+    const result = decide(
+      state,
+      {
+        type: 'penalty-response',
+        id: id('command', `refusal-${responses}`),
+        actorId: donor,
+        procedureId: procedure.timer.id,
+        cardId: null,
+      },
+      { ...context, nowMs: 11035 + responses++ },
+    );
+    if (result.type !== 'accepted') throw new Error('Expected refusal');
+    state = applyAction(state, result.action);
+  }
+  assert.deepEqual(recipients, ['seat-0', 'seat-1']);
+  assert.equal(responses, 6);
+  assert.equal(state.pendingPenalties.length, 0);
+  assert.deepEqual(state.phase, { type: 'between-rounds', leaderId: 'seat-2', nextRoundNumber: 1 });
+  assert.deepEqual(Object.values(state.repetitions), [1]);
 });
 
 test('unknown seats, stale timers and draws outside dealing are technical rejections', () => {

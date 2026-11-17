@@ -10,31 +10,31 @@ The engine command/event/invariant interface, runtime clock/ordering interface, 
 
 | Specification | Behavior | Test location / planned stage | Status |
 | --- | --- | --- | --- |
-| 1 | Clockwise seats, stable identities, stack order | `engine.test.ts`, `dealing.test.ts`; stack play in stage 4 | Partial: creation/dealing passing |
+| 1 | Clockwise seats, stable identities, stack order | `engine.test.ts`, `dealing.test.ts`, `rounds.test.ts` | Engine passing |
 | 2 | Lobby rules, owner edits, readiness reset, chat | Transport/client, stages 8–9 | Planned |
 | 3.1, 4 | 36 unique cards, trump, rank and suit comparisons | `src/game/cards.test.ts` | Passing |
 | 3.2 | Random recipient, two stump passes, uneven hands | `src/game/engine.test.ts`, `src/game/dealing.test.ts` | Engine passing for 2–8 seats; UI pending |
 | 3.3 | One-time 10-second reveal, last recipient leads | `src/game/dealing.test.ts`; runtime/projections stages 6, 8 | Engine deadline/trump/leader passing; UI pending |
-| 3.4 | Out-of-turn draw, random reinsertion, deferred penalties | `src/game/dealing.test.ts`; execution in stage 5 | Reinsertion/queuing/pre-game gate passing; claims/execution pending |
-| 5 | Fixed N, beat top, take bottom, two completion paths | Engine, stage 4 | Planned |
-| 6.1 | One-use rights, hand obstruction, entitlement expiry | Engine, stage 4 | Planned |
-| 6.2 | Mandatory opening and penalty-updated retry | Engine, stages 4–5 | Planned |
-| 6.3 | Automatic pickup for empty participant | Engine, stage 4 | Planned |
-| 6.4 | Own-stump peek; no access to others | Engine/projections, stages 4, 8 | Planned |
-| 7, 13.1 | Round-bound exits, one loser, simultaneous victory | Engine, stage 4 | Planned |
-| 8.1 | Illegal action consequences and repeated attempts | Engine, stages 3–5 | Planned |
+| 3.4 | Out-of-turn draw, random reinsertion, deferred penalties | `src/game/dealing.test.ts` | Automatic queuing/execution passing; spoken claims pending |
+| 5 | Fixed N, beat top, take bottom, two completion paths | `rounds.test.ts` | Engine passing |
+| 6.1 | One-use rights, hand obstruction, entitlement expiry | `stumps.test.ts` | Engine passing |
+| 6.2 | Mandatory opening and penalty-updated retry | `stumps.test.ts`, `penalties.test.ts` | Engine passing |
+| 6.3 | Automatic pickup for empty participant | `rounds.test.ts` | Engine passing, including pickup chains |
+| 6.4 | Own-stump peek; no access to others | `stumps.test.ts`; projections stage 8 | Engine passing; wire privacy pending |
+| 7, 13.1 | Round-bound exits, one loser, simultaneous victory | `rounds.test.ts`, `stumps.test.ts` | Engine passing |
+| 8.1 | Illegal action consequences and repeated attempts | `dealing.test.ts`, `rounds.test.ts`, `stumps.test.ts`, `penalties.test.ts` | Automatic consequences and distinct repeat attempts passing |
 | 8.2, 13.2 | Scoped claims, server ordering, sequential queue | Engine/runtime, stages 5–6 | Planned |
 | 8.3 | Eligible voters, abstention, ties, false claim | Engine/runtime, stages 5–6 | Planned |
 | 8.4, 13.4 | Withdrawal, unanimity, suspended timer | Engine/runtime, stages 5–6 | Planned |
 | 8.4, 13.5 | Incident deduplication; spoken dispute remains social | Engine, stage 5; manual social-rule check | Planned |
-| 9 | Optional private transfer, never last card, timeout refusal | Engine/runtime/projections, stages 5–8 | Planned |
+| 9 | Optional private transfer, never last card, timeout refusal | `penalties.test.ts`; runtime/projections stages 6–8 | Engine passing; scheduling/wire privacy pending |
 | 10.1, 13.8 | Suspension priority, multiple absences, departed winners | Runtime, stage 6 | Planned |
 | 10.2 | 30-second wait, replacement vote, reconnection | Runtime/client, stages 6, 9 | Planned |
 | 10.3, 13.6 | Bot observation limits and atomic handover | Bot/runtime/projections, stage 10 | Planned |
 | 11, 15.1 | No secrets in player views or owner history | Projections/transport, stage 8 | Planned |
-| 12 | Conservation, structural validity, deterministic replay | `engine.test.ts`, `dealing.test.ts`, `memory-history.test.ts` | Initial phase/replay checks passing; later phases/generated tests pending |
-| 13.3 | Unused stump right survives temporary cards | Engine, stage 4 | Planned |
-| 13.7 | Third repeated meaningful state, prior wins retained | Engine, stage 4 | Planned |
+| 12 | Conservation, structural validity, deterministic replay | `engine.test.ts`, `invariants.test.ts`, scenario helpers, `memory-history.test.ts` | Current engine phases passing; generated tests pending |
+| 13.3 | Unused stump right survives temporary cards | `stumps.test.ts` | Passing |
+| 13.7 | Third repeated meaningful state, prior wins retained | `repetition.test.ts`, `match.test.ts` | Passing at settled action checkpoints, including in-round cycles (D001 resolved) |
 | 15.2–15.5 | Owner rollback, branches, timers, chat, knowledge warning | History/runtime/client, stages 7–9 | Planned |
 
 ## Scenario coverage
@@ -59,14 +59,21 @@ The engine command/event/invariant interface, runtime clock/ordering interface, 
 | 16. Repetition draw | Third meaningful occurrence after the 12-round cycle | 4 |
 | 17. Administrative rollback | Restore cards/turn/N, retain abandoned branch and chat | 7–9 |
 | 18. Rollback result and timers | Restore procedure/remaining time; live absence still pauses | 7–9 |
+| 19. In-round cycle (D001) | Third state occurrence draws; table/discard preserved | 4 (passing) |
 
 ## Current executable coverage
 
 - `src/game/cards.test.ts`: 4 tests for the full deck and card-comparison combinations.
 - `src/game/engine.test.ts`: 8 tests for creation, configuration validation, random-source contracts, replay integrity, time, and input/state isolation.
-- `src/game/dealing.test.ts`: 8 tests for all seat counts, stump passes, trump reveal, deferred violations, technical rejections, and invariants.
+- `src/game/dealing.test.ts`: 9 tests, including sequential deferred penalty execution.
+- `src/game/rounds.test.ts`: 7 tests for two/four/eight seats, round transitions, exits, automatic pickup chains, and out-of-turn actions.
+- `src/game/stumps.test.ts`: 7 tests for opening rights, illegal peeking, mandatory opening, preserved/expired entitlement, and foreign-card rejection.
+- `src/game/penalties.test.ts`: 6 tests for immediate/repeated penalties, optional contributions, timeouts, validation, and safe response dictionaries.
+- `src/game/repetition.test.ts`: 4 tests for boundary/in-round draws, unchanged punishment procedures, and retained winners.
+- `src/game/match.test.ts`: 7 full deterministic engine matches (2–8 seats), including complete replay and the formerly looping five-seat match.
+- `src/game/invariants.test.ts`: 4 tests for round, rights, terminal-result, and reserved-contribution consistency.
 - `src/persistence/memory-history.test.ts`: 7 tests for atomic commits, retries, branch/version checks, detached snapshots, full-deal replay, and chronology/event identity.
-- **Total: 27 passing tests.** Scenario 1's engine dealing is covered. Scenario 12's draw violation and deferral are covered; its spoken-claim and penalty-execution steps remain pending. No complete browser scenario is claimed yet.
+- **Total: 63 passing tests.** Core engine paths in scenarios 1–10, 15, 16, and 19 are exercised; scenario 12's spoken-claim portion remains pending. Social-incident deduplication and runtime scheduling are not implemented. No complete browser scenario is claimed yet.
 
 ## Verification commands
 

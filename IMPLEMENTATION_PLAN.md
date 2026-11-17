@@ -6,7 +6,7 @@ Implement a multiplayer card game for 2–8 players using TypeScript and Three.j
 
 Authoritative product documents:
 
-- [Game rules, revision 1.2](docs/game-rules.md)
+- [Game rules, revision 1.3](docs/game-rules.md)
 - [Step-by-step scenarios](docs/game-scenarios.md)
 
 This plan describes implementation, not changes to agreed rules. If implementation reveals an unresolved gameplay decision, record it and obtain agreement before inventing behavior.
@@ -18,14 +18,18 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - `src/game/cards.test.ts` covers deck uniqueness and rank/suit combinations.
 - The complete game engine, server, client, durable persistence, and bots are not implemented.
 
-### Progress — increment 1
+### Progress — increment 3
 
-- **Stage 1: complete.** Tooling/CI, domain contracts, rule-to-test matrix, and architecture decisions are in place.
-- **Stage 2: complete for the initial executable engine.** Creation, replay, invariants, atomic in-memory history, version checks, and duplicate protection are tested. Extend phase-specific checks alongside each later behavior.
-- **Stage 3: in progress.** All supported player counts deal correctly, invalid draws reinsert randomly and defer punishment, and the reveal deadline chooses the first leader. Spoken claims and actual deferred penalty execution still require Stage 5 handlers.
-- **Stages 4–12: not started.** No server or browser application is claimed to exist.
-- Verification: `npm run check` passes, with **27 passing tests**. A smoke test importing `dist/game/engine.js` successfully creates and replays a game.
-- Red/green checks were run for creation, history append, draw, illegal draw, reveal expiry, history integrity, and replay/state validation.
+- **Stage 1: complete.** Tooling/CI, domain contracts, rule-to-test matrix, and architecture decisions are in place. `.gitattributes` enforces LF on Windows/Linux checkouts.
+- **Stage 2: complete for the executable engine.** Creation, replay, invariants, atomic in-memory history, version checks, and duplicate protection are tested.
+- **Stage 3: integration pending.** Dealing and sequential execution of deferred automatic penalties work. Dealing-time spoken claims still need Stage 5.
+- **Stage 4: complete for the agreed engine scope.** Rounds, automatic pickups, stumps, exits, and settled-action repetition work. D001 was approved and resolved: both in-round and boundary cycles draw at the third occurrence.
+- **Stage 5: in progress.** Automatic violations, contribution/refusal, timeout completion, and penalty-updated retries are implemented. Claims, voting, withdrawal, and social-incident deduplication remain pending.
+- **Stages 6–12: not started.** No server or browser application is claimed to exist.
+- Verification: `npm run check` passes, with **63 passing tests**. D001 is now a draw regression test, not a known-limitation assertion. Automatic pickup chains contribute one settled occurrence; no-op punishment procedures contribute none.
+- Full deterministic engine matches for every seat count from 2 through 8 finish and replay identically in `src/game/match.test.ts`. The formerly looping 5-seat match now draws. This is engine integration coverage, not browser/online coverage.
+- Red/green checks covered creation, history, dealing, round play, automatic pickup, immediate punishment, contribution/expiry, stumps, repetition, and expanded invariants.
+- Increment 1 was committed and pushed as `17d2c96` before increment 2 work began.
 - See `docs/architecture.md`, `docs/rule-test-matrix.md`, and `README.md` for current interfaces, scope, and commands.
 
 **Dependency clarification:** Stage 3 originally included full dealing-time claims and penalty execution, while their handlers are assigned to Stage 5. Those cross-stage integration checks remain open until Stage 5; they must not be marked complete or replaced with pretend handlers. Basic dealing is independently executable in the meantime.
@@ -89,7 +93,7 @@ docs/            # Rules, scenarios, architecture decisions, operations
 
 - [x] Re-run the existing tests and TypeScript checks; preserve their coverage.
 - [x] Add consistent formatting, linting, build commands, and continuous integration.
-- [x] Create a rule-to-test matrix referencing the numbered specification sections and all 18 scenarios.
+- [x] Create a rule-to-test matrix referencing the numbered specification sections and all 19 scenarios.
 - [x] Define stable identifiers for cards, seats, games, commands, events, claims, procedures, and history branches.
 - [x] Define discriminated state types for dealing, last-card reveal, pre-game penalties, between-round play, active rounds, and finished games.
 - [x] Model disconnect suspension separately from the underlying gameplay procedure; do not flatten all pauses into one flag.
@@ -122,7 +126,7 @@ docs/            # Rules, scenarios, architecture decisions, operations
 - [x] For out-of-order draws, return the card to a recorded random deck position, preserve the correct recipient, and queue a penalty.
 - [ ] Support claims during dealing and defer resulting penalties until before the first round.
 - [x] Implement the 10-second final-card reveal, trump/no-trump selection, and last-recipient first move.
-- [ ] Drain pending procedures and deferred penalties before accepting the first lead.
+- [ ] Complete all pending-procedure integration before the first lead (automatic deferred penalties are implemented; dealing claims remain pending).
 - [x] Test every player count from 2 through 8, including uneven hand distributions.
 
 **Exit criteria:** scenario 1 and the dealing parts of scenario 12 pass; all 36 cards are accounted for; no persistent draw-turn or trump hint is required.
@@ -131,18 +135,19 @@ docs/            # Rules, scenarios, architecture decisions, operations
 
 **Depends on:** Stage 3; use explicit test fixtures for procedures not implemented until Stage 5.
 
-- [ ] Implement lead, beat-top, and take-bottom commands.
-- [ ] Fix the round target N at round start; count table cards, not turns or seat rotations.
-- [ ] End a round on N table cards or an empty table; select the correct next leader.
-- [ ] Keep empty-handed seats in the round and perform the specified automatic bottom pickup when they have no stump-opening entitlement.
-- [ ] Model one-use stump-opening entitlement across the between-round period and following round.
-- [ ] Preserve unused entitlement while the hand is temporarily nonempty; expire/renew it at the correct round transition.
-- [ ] Allow entitled opening outside the owner's turn without blocking other players from starting the round.
-- [ ] Require opening before the entitled empty-handed player's action; produce a violation for taking instead.
-- [ ] Implement premature own-stump peeking as private knowledge plus a violation, without moving the card to the hand.
-- [ ] Finalize exits only at round end; support one loser and simultaneous all-player victory.
-- [ ] Implement canonical between-round state comparison and threefold repetition, preserving previous winners.
-- [ ] Exclude hand order, timestamps, chat, and event/round identifiers from repetition equality.
+- [x] Implement lead, beat-top, and take-bottom commands.
+- [x] Fix the round target N at round start; count table cards, not turns or seat rotations.
+- [x] End a round on N table cards or an empty table; select the correct next leader.
+- [x] Keep empty-handed seats in the round and perform the specified automatic bottom pickup when they have no stump-opening entitlement.
+- [x] Model one-use stump-opening entitlement across the between-round period and following round.
+- [x] Preserve unused entitlement while the hand is temporarily nonempty; expire/renew it at the correct round transition.
+- [x] Allow entitled opening outside the owner's turn without blocking other players from starting the round.
+- [x] Require opening before the entitled empty-handed player's action; produce a violation for taking instead.
+- [x] Implement premature own-stump peeking as private knowledge plus a violation, without moving the card to the hand.
+- [x] Finalize exits only at round end; support one loser and simultaneous all-player victory.
+- [x] Implement canonical settled-action state comparison and threefold repetition, preserving previous winners.
+- [x] Exclude hand order, timestamps, chat, and event/round identifiers from repetition equality.
+- [x] Resolve D001: detect repetition inside a round as well as between rounds, after all automatic consequences settle.
 
 **Exit criteria:** scenarios 2–10, 15, and 16 pass; the six-round cycle draws at its third state occurrence, not merely after three similar clicks.
 
@@ -150,16 +155,16 @@ docs/            # Rules, scenarios, architecture decisions, operations
 
 **Depends on:** Stage 4.
 
-- [ ] Implement all automatic violations and their exact rollback-of-action/turn consequences.
+- [x] Implement all automatic violations and their exact rollback-of-action/turn consequences.
 - [ ] Implement round, dealing, and between-round claim scopes with server-ordered deadlines.
 - [ ] Queue accepted claims sequentially; drain them before ordinary play resumes.
 - [ ] Link technical incidents to action IDs and chat incidents to message IDs; do not attempt to infer identical spoken incidents from arbitrary text.
 - [ ] Implement voting by all participants except the accused, including the claimant.
 - [ ] Apply 10-second timeout abstention, majority among yes/no votes, and no-punishment ties.
 - [ ] Implement unanimous withdrawal with a separate 10-second procedure that suspends/resumes the original vote.
-- [ ] Implement penalty contribution or refusal with a 10-second timer; never transfer a contributor's last hand card or a stump.
-- [ ] Treat zero-card penalties as completed, not pending forever.
-- [ ] Restore the interrupted turn after penalties using the updated hands, not stale pre-penalty assumptions.
+- [x] Implement penalty contribution or refusal with a 10-second timer; never transfer a contributor's last hand card or a stump.
+- [x] Treat zero-card penalties as completed, not pending forever.
+- [x] Restore the interrupted turn after penalties using the updated hands, not stale pre-penalty assumptions.
 - [ ] Ensure one incident is punished once, while distinct repeated illegal attempts remain punishable.
 
 **Exit criteria:** scenarios 9–12 and 14 pass; voting outcomes, claim scope transitions, and empty penalties have explicit tests.

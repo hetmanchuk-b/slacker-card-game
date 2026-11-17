@@ -1,5 +1,5 @@
 import type { BranchId, CardId, CommandId, EventId, GameId, ProcedureId, SeatId } from './ids.ts';
-import type { GameCard, GameState } from './model.ts';
+import type { GameCard, GameState, Penalty } from './model.ts';
 
 /** Internal commands. Transport must bind trusted identity before constructing these. */
 export type StartGame = Readonly<{
@@ -13,9 +13,42 @@ export type StartGame = Readonly<{
 
 export type DrawCard = Readonly<{ type: 'draw-card'; id: CommandId; actorId: SeatId }>;
 export type ExpireReveal = Readonly<{ type: 'expire-reveal'; id: CommandId; timerId: ProcedureId }>;
-export type GameCommand = StartGame | DrawCard | ExpireReveal;
+export type RoundCommand =
+  | Readonly<{ type: 'play-card'; id: CommandId; actorId: SeatId; cardId: CardId }>
+  | Readonly<{ type: 'take-bottom'; id: CommandId; actorId: SeatId }>
+  | Readonly<{ type: 'open-stump'; id: CommandId; actorId: SeatId; cardId: CardId }>;
+export type PenaltyCommand =
+  | Readonly<{
+      type: 'penalty-response';
+      id: CommandId;
+      actorId: SeatId;
+      procedureId: ProcedureId;
+      cardId: CardId | null;
+    }>
+  | Readonly<{ type: 'expire-penalty'; id: CommandId; timerId: ProcedureId }>;
+export type GameCommand = StartGame | DrawCard | ExpireReveal | RoundCommand | PenaltyCommand;
+
+export type RoundEvent =
+  | Readonly<{ type: 'card-played'; seatId: SeatId; cardId: CardId }>
+  | Readonly<{ type: 'bottom-taken'; seatId: SeatId; cardId: CardId; automatic: boolean }>
+  | Readonly<{ type: 'stump-opened'; seatId: SeatId; cardId: CardId }>
+  | Readonly<{ type: 'violation-detected'; penalty: Penalty; peekedCardId?: CardId }>;
+
+export type PenaltyEvent =
+  | Readonly<{ type: 'penalty-started'; procedureId: ProcedureId }>
+  | Readonly<{
+      type: 'penalty-answered';
+      procedureId: ProcedureId;
+      seatId: SeatId;
+      cardId: CardId | null;
+    }>
+  | Readonly<{ type: 'penalty-expired'; procedureId: ProcedureId }>
+  | Readonly<{ type: 'penalty-completed'; procedureId: ProcedureId }>;
 
 export type DomainEvent =
+  | Readonly<{ type: 'repetition-checked' }>
+  | PenaltyEvent
+  | RoundEvent
   | Readonly<{ type: 'reveal-finished'; timerId: ProcedureId }>
   | Readonly<{
       type: 'out-of-turn-draw';
@@ -50,6 +83,13 @@ export type RejectionCode =
   | 'already-started'
   | 'not-started'
   | 'unknown-seat'
+  | 'inactive-seat'
+  | 'card-not-owned'
+  | 'empty-table'
+  | 'not-eligible'
+  | 'already-answered'
+  | 'last-card-protected'
+  | 'timer-expired'
   | 'wrong-phase'
   | 'procedure-active'
   | 'stale-timer'

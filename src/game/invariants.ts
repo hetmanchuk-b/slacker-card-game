@@ -85,6 +85,89 @@ export function validateState(state: GameState): readonly string[] {
       errors.push('Invalid next round number');
     if (state.table.length !== 0) errors.push('Table must be empty between rounds');
   }
+  const activeIds = state.players
+    .filter((player) => player.status === 'active')
+    .map((player) => player.id);
+  if (state.phase.type === 'round') {
+    const phase = state.phase;
+    if (
+      phase.targetSize !== phase.participantIds.length ||
+      phase.targetSize < 2 ||
+      phase.targetSize > 8
+    )
+      errors.push('Round target disagrees with participants');
+    if (JSON.stringify(phase.participantIds) !== JSON.stringify(activeIds))
+      errors.push('Round participants disagree with active seats');
+    if (!phase.participantIds.includes(phase.turnSeatId)) errors.push('Unknown round turn');
+    if (phase.number !== state.completedRounds + 1) errors.push('Invalid active round number');
+    if (state.table.length < 1 || state.table.length >= phase.targetSize)
+      errors.push('Unsettled round table size');
+  }
+  if (
+    state.phase.type === 'between-rounds' &&
+    state.players.some(
+      (player) =>
+        player.status === 'active' && player.hand.length === 0 && player.stumps.length === 0,
+    )
+  )
+    errors.push('Empty participant not finalized at boundary');
+  if (state.phase.type === 'finished') {
+    const result = state.phase.result;
+    if (result.type === 'all-won' && activeIds.length !== 0)
+      errors.push('All-won result still has participants');
+    if (
+      result.type === 'last-player' &&
+      (activeIds.length !== 1 || activeIds[0] !== result.loserId)
+    )
+      errors.push('Last-player result disagrees with participants');
+    if (
+      result.type === 'draw' &&
+      (activeIds.length < 2 ||
+        JSON.stringify(result.remainingSeatIds) !== JSON.stringify(activeIds))
+    )
+      errors.push('Draw result disagrees with participants');
+    if (
+      (result.type !== 'draw' && state.table.length !== 0) ||
+      state.procedure !== null ||
+      state.pendingPenalties.length !== 0
+    )
+      errors.push('Finished game still has pending play');
+    if (result.type === 'draw' && state.table.length >= activeIds.length)
+      errors.push('Unsettled draw table size');
+  }
+  if (new Set(state.openingRights.map((right) => right.seatId)).size !== state.openingRights.length)
+    errors.push('Duplicate opening right');
+  for (const right of state.openingRights) {
+    if (
+      !state.players.some(
+        (player) =>
+          player.id === right.seatId && player.status === 'active' && player.stumps.length > 0,
+      )
+    )
+      errors.push('Opening right without an active stump owner');
+    if (
+      (state.phase.type !== 'between-rounds' &&
+        state.phase.type !== 'round' &&
+        !(state.phase.type === 'finished' && state.phase.result.type === 'draw')) ||
+      right.throughRound !== state.completedRounds + 1
+    )
+      errors.push('Expired or invalid opening right');
+  }
+  if (
+    state.peekedStumps.some((peek) => !seatIds.includes(peek.seatId) || !catalog.has(peek.cardId))
+  )
+    errors.push('Unknown private peek seat/card');
+  if (
+    Object.values(state.repetitions).some(
+      (count) => !Number.isSafeInteger(count) || count < 1 || count > 3,
+    )
+  )
+    errors.push('Invalid repetition count');
+  if (
+    state.lastRepetitionKey !== null &&
+    !Object.hasOwn(state.repetitions, state.lastRepetitionKey)
+  )
+    errors.push('Last repetition state has no occurrence');
   if (state.pendingPenalties.some((penalty) => !seatIds.includes(penalty.recipientId)))
     errors.push('Unknown penalty recipient');
   if (
@@ -93,6 +176,22 @@ export function validateState(state: GameState): readonly string[] {
   )
     errors.push('Duplicate pending incident');
   if (state.procedure !== null) errors.push(...validateTimer(state.procedure.timer));
+  if (state.procedure?.type === 'penalty') {
+    const procedure = state.procedure;
+    const donors = activeIds.filter((seat) => seat !== procedure.penalty.recipientId);
+    if (!activeIds.includes(procedure.penalty.recipientId))
+      errors.push('Invalid penalty recipient');
+    if (JSON.stringify(procedure.eligibleSeatIds) !== JSON.stringify(donors))
+      errors.push('Invalid penalty donors');
+    if (Object.keys(procedure.responses).some((seat) => !donors.some((donor) => donor === seat)))
+      errors.push('Unknown penalty response seat');
+    for (const [seatId, response] of Object.entries(procedure.responses)) {
+      if (response === undefined || response === 'refuse') continue;
+      const player = state.players.find((player) => player.id === seatId);
+      if (!player || player.hand.length < 2 || !player.hand.includes(response))
+        errors.push('Invalid reserved penalty card');
+    }
+  }
   return errors;
 }
 

@@ -98,6 +98,8 @@ export type GameState = Readonly<{
   completedRounds: number;
   openingRights: readonly Readonly<{ seatId: SeatId; throughRound: number }>[];
   repetitions: Readonly<Record<string, number>>;
+  lastRepetitionKey: string | null;
+  peekedStumps: readonly Readonly<{ seatId: SeatId; cardId: CardId }>[];
 }>;
 
 /** Live presence is external to rollbackable GameState. */

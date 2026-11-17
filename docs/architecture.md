@@ -42,4 +42,22 @@ Use PostgreSQL with the `pg` driver and explicit SQL migrations when durable per
 
 ## Current implementation scope
 
-Initial engine commands are introduced incrementally. A type describing a future phase/procedure is not an implementation of that feature. Stage checklists and the rule-to-test matrix identify what is actually executable.
+Engine commands are introduced incrementally. Creation, dealing, round play, stump handling, and automatic penalty procedures are executable. A type describing future claim voting/withdrawal is not an implementation of that feature. Stage checklists and the rule-to-test matrix identify what is actually executable.
+
+## Atomic automatic consequences
+
+`decide` expands a user command into one action batch containing its automatic consequences. Empty-handed pickup chains, penalty start, and penalty completion are recorded as events in that batch. The runtime must commit and broadcast the complete batch, never an intermediate state or an independent rollback point inside it.
+
+Round completion and finalized exits are deterministic consequences of the completing card event. Stump-opening rights use the eligible round number internally, but repetition equality normalizes entitlement availability instead of hashing absolute round numbers.
+
+Penalty choices reserve a donor's selected card until the procedure completes; then transfers are applied together. Normal play is suspended throughout, so cards cannot be spent concurrently. Responses use own-property lookups: a valid opaque seat identifier must not be confused with an inherited JavaScript property.
+
+Private stump peek knowledge is stored separately from the card's physical location. Illegal peeking does not transfer the stump into the hand. Raw peek data and repetition keys remain server-only.
+
+## Settled-action repetition (D001 resolved)
+
+Repetition is checked after all automatic consequences of an accepted gameplay action settle, including states inside a round. The explicit `repetition-checked` event is part of the same atomic batch; intermediate pickups, pending procedures, and retries are not extra occurrences.
+
+The key includes phase, ordered table, participants, fixed round target, current turn/next leader, cards, trump, and normalized opening rights. It excludes time, hand order, absolute round numbers, chat, and history metadata. The rollbackable occurrence map and `lastRepetitionKey` prevent unchanged no-op procedures from counting again.
+
+An in-round draw preserves the physical card locations, opening-right metadata, and completed-round count. Terminal-state invariants therefore permit a nonempty table only for a draw. The six-action reproducer and the previously looping five-seat match are now passing regression tests. See `docs/open-decisions.md` for the approved decision.

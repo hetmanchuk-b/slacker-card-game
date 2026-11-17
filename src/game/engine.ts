@@ -1,7 +1,22 @@
 import { createDeck, trumpFromLastCard } from './cards.ts';
 import { id } from './ids.ts';
+import { automaticRepetitionEvent, recordRepetition } from './repetition.ts';
 import { validateState } from './invariants.ts';
-import type { ActionBatch, Decision, DecisionContext, GameCommand } from './contracts.ts';
+import {
+  applyRoundEvent,
+  automaticRoundEvent,
+  decideRoundCommand,
+  enterBetweenRounds,
+} from './rounds.ts';
+import { applyPenaltyEvent, automaticPenaltyEvent, decidePenaltyCommand } from './penalties.ts';
+import type {
+  ActionBatch,
+  Decision,
+  DecisionContext,
+  DomainEvent,
+  GameCommand,
+} from './contracts.ts';
+import type { CommandId } from './ids.ts';
 import type { GameState } from './model.ts';
 
 export { validateState } from './invariants.ts';
@@ -11,8 +26,45 @@ export function decide(
   command: GameCommand,
   context: DecisionContext,
 ): Decision {
+  const decision = decideCommand(state, command, context);
+  if (decision.type === 'rejected') return decision;
+  const events = [...decision.action.events];
+  let next = applyAction(state, decision.action);
+  let automatic = automaticEvent(next, command.id, events.length);
+  while (automatic !== null) {
+    const envelope = { id: id('event', `${command.id}:${events.length}`), event: automatic };
+    events.push(envelope);
+    next = applyAction(next, { ...decision.action, events: [envelope] });
+    automatic = automaticEvent(next, command.id, events.length);
+  }
+  return { ...decision, action: { ...decision.action, events } };
+}
+
+function automaticEvent(state: GameState, commandId: CommandId, index: number): DomainEvent | null {
+  return (
+    automaticPenaltyEvent(state, id('procedure', `${commandId}:${index}:penalty`)) ??
+    automaticRoundEvent(state) ??
+    automaticRepetitionEvent(state)
+  );
+}
+
+function decideCommand(
+  state: GameState | null,
+  command: GameCommand,
+  context: DecisionContext,
+): Decision {
   if (!Number.isSafeInteger(context.nowMs) || context.nowMs < (state?.createdAtMs ?? 0)) {
     return { type: 'rejected', code: 'invalid-time' };
+  }
+  if (command.type === 'penalty-response' || command.type === 'expire-penalty') {
+    return decidePenaltyCommand(state, command, context);
+  }
+  if (
+    command.type === 'play-card' ||
+    command.type === 'take-bottom' ||
+    command.type === 'open-stump'
+  ) {
+    return decideRoundCommand(state, command, context);
   }
   if (command.type === 'expire-reveal') {
     if (state === null) return { type: 'rejected', code: 'not-started' };
@@ -151,6 +203,27 @@ export function applyAction(state: GameState | null, action: ActionBatch): GameS
   let next = state;
   for (const { event } of action.events) {
     switch (event.type) {
+      case 'repetition-checked': {
+        if (next === null) throw new Error('Repetition before game creation');
+        next = recordRepetition(next);
+        break;
+      }
+      case 'penalty-started':
+      case 'penalty-answered':
+      case 'penalty-expired':
+      case 'penalty-completed': {
+        if (next === null) throw new Error('Penalty before game creation');
+        next = applyPenaltyEvent(next, event, action.occurredAtMs);
+        break;
+      }
+      case 'card-played':
+      case 'stump-opened':
+      case 'bottom-taken':
+      case 'violation-detected': {
+        if (next === null) throw new Error('Round event before game creation');
+        next = applyRoundEvent(next, event);
+        break;
+      }
       case 'reveal-finished': {
         if (next === null || next.phase.type !== 'trump-reveal')
           throw new Error('Reveal completion outside reveal');
@@ -162,13 +235,13 @@ export function applyAction(state: GameState | null, action: ActionBatch): GameS
         ) {
           throw new Error('Reveal timer is not due');
         }
-        next = {
-          ...next,
-          phase:
-            next.pendingPenalties.length > 0
-              ? { type: 'pre-game-penalties', firstLeaderId: next.phase.recipientId }
-              : { type: 'between-rounds', leaderId: next.phase.recipientId, nextRoundNumber: 1 },
-        };
+        next =
+          next.pendingPenalties.length > 0
+            ? {
+                ...next,
+                phase: { type: 'pre-game-penalties', firstLeaderId: next.phase.recipientId },
+              }
+            : enterBetweenRounds(next, next.phase.recipientId);
         break;
       }
       case 'out-of-turn-draw': {
@@ -268,6 +341,8 @@ export function applyAction(state: GameState | null, action: ActionBatch): GameS
           completedRounds: 0,
           openingRights: [],
           repetitions: {},
+          lastRepetitionKey: null,
+          peekedStumps: [],
         };
         break;
       }

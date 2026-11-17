@@ -17,14 +17,29 @@ export type Timer = Readonly<{
 }>;
 
 export type Vote = 'yes' | 'no' | 'abstain';
+export type IncidentReference =
+  | Readonly<{ type: 'spoken'; key: string }>
+  | Readonly<{ type: 'chat'; messageId: string }>
+  | Readonly<{ type: 'action'; commandId: CommandId }>;
+
 export type Claim = Readonly<{
   id: ClaimId;
+  commandId: CommandId;
+  incident: IncidentReference;
   claimantId: SeatId;
   accusedId: SeatId;
   reason: string;
   scope: 'dealing' | 'between-rounds' | 'round';
   scopeNumber: number;
   incidentKey: string;
+}>;
+
+export type ClaimResolution = 'pending' | 'upheld' | 'rejected' | 'tied' | 'withdrawn';
+export type ClaimRecord = Readonly<{
+  claim: Claim;
+  resolution: ClaimResolution;
+  withdrawalRequested: boolean;
+  punishmentStarted: boolean;
 }>;
 
 export type ClaimVote = Readonly<{
@@ -42,7 +57,7 @@ export type Penalty = Readonly<{
     'draw-out-of-turn' | 'invalid-beat' | 'play-out-of-turn' | 'peek' | 'must-open-stump' | 'claim';
 }>;
 
-/** Future procedure contracts; handlers are added in the claims/penalties stage. */
+/** Nested procedures preserve the gameplay phase they interrupt. */
 export type Procedure =
   | ClaimVote
   | Readonly<{
@@ -50,7 +65,7 @@ export type Procedure =
       claim: Claim;
       eligibleSeatIds: readonly SeatId[];
       approvals: Readonly<Partial<Record<SeatId, boolean>>>;
-      suspendedVote: ClaimVote;
+      suspendedVote: ClaimVote | null;
       timer: Timer;
     }>
   | Readonly<{
@@ -95,6 +110,8 @@ export type GameState = Readonly<{
   phase: Phase;
   procedure: Procedure | null;
   pendingPenalties: readonly Penalty[];
+  claims: readonly ClaimRecord[];
+  automaticIncidents: readonly string[];
   completedRounds: number;
   openingRights: readonly Readonly<{ seatId: SeatId; throughRound: number }>[];
   repetitions: Readonly<Record<string, number>>;

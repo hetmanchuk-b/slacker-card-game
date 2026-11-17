@@ -60,6 +60,8 @@ export function scenario(input: {
         : { type: 'between-rounds', leaderId: seat(input.leader ?? 0), nextRoundNumber: 2 },
     procedure: null,
     pendingPenalties: [],
+    claims: [],
+    automaticIncidents: [],
     completedRounds: 1,
     openingRights: (input.openingSeats ?? []).map((index) => ({
       seatId: seat(index),
@@ -92,7 +94,7 @@ export function step(state: GameState, command: GameCommand, nowMs = 1000): Game
   return next;
 }
 
-export function refusePenalty(initial: GameState, label: string): GameState {
+export function refusePenalty(initial: GameState, label: string, nowMs = 1000): GameState {
   let state = initial;
   let response = 0;
   while (state.procedure?.type === 'penalty') {
@@ -101,13 +103,17 @@ export function refusePenalty(initial: GameState, label: string): GameState {
       (seatId) => !Object.hasOwn(procedure.responses, seatId),
     );
     if (!seatId) throw new Error('Expected an unanswered penalty donor');
-    state = step(state, {
-      type: 'penalty-response',
-      id: id('command', `${label}-${response++}`),
-      actorId: seatId,
-      procedureId: procedure.timer.id,
-      cardId: null,
-    });
+    state = step(
+      state,
+      {
+        type: 'penalty-response',
+        id: id('command', `${label}-${response++}`),
+        actorId: seatId,
+        procedureId: procedure.timer.id,
+        cardId: null,
+      },
+      nowMs,
+    );
   }
   return state;
 }

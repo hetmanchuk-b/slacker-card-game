@@ -31,6 +31,14 @@ export function automaticPenaltyEvent(
     state.phase.type === 'finished'
   )
     return null;
+  const pending = state.pendingPenalties[0]!;
+  if (
+    pending.reason === 'claim' &&
+    state.claims.some(
+      (record) => record.claim.commandId === pending.incidentId && record.withdrawalRequested,
+    )
+  )
+    return null;
   return { type: 'penalty-started', procedureId };
 }
 
@@ -111,6 +119,11 @@ export function applyPenaltyEvent(state: GameState, event: PenaltyEvent, nowMs: 
     return {
       ...state,
       pendingPenalties: state.pendingPenalties.slice(1),
+      claims: state.claims.map((record) =>
+        penalty.reason === 'claim' && record.claim.commandId === penalty.incidentId
+          ? { ...record, punishmentStarted: true }
+          : record,
+      ),
       procedure: {
         type: 'penalty',
         penalty: { ...penalty },

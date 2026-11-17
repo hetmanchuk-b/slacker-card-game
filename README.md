@@ -4,7 +4,7 @@ A TypeScript multiplayer card game with a planned Three.js table. Agreed rule-br
 
 ## Status
 
-The third engine increment is implemented:
+The fourth engine increment is implemented:
 
 - 36-card deck and suit/rank comparison, including spade isolation and six-over-ace.
 - Deterministic game creation and event replay.
@@ -15,10 +15,13 @@ The third engine increment is implemented:
 - Round play with a frozen target, top-card beating, bottom-card pickup, and atomic automatic pickups.
 - One-use stump-opening rights, preserved rights after temporary hand obstruction, and punishable own-stump peeking.
 - Automatic penalties with optional card contributions/refusals, last-card protection, and 10-second timeout commands.
+- Scoped spoken/chat/action claims, sequential voting, majority verdicts, timeout abstention, false-claim punishment, and incident-key deduplication.
+- Unanimous withdrawal with suspended vote timers, queued requests, and cancellation of dealing punishments that have not started.
+- Reveal-timer suspension across claims and full event replay of nested procedures.
 - Round-bound exits, simultaneous victory, and threefold repetition after settled gameplay actions, including cycles inside one round, with previous winners retained.
 - Atomic in-memory action history, optimistic version checks, duplicate protection, and replay recovery.
 
-**Not playable online yet:** spoken-rule claims/voting/withdrawal, connection management, durable rollback, server, bots, and browser/Three.js client are still planned. Timer deadlines are implemented in engine commands; real-time scheduling comes with the runtime.
+**Not playable online yet:** connection management, durable rollback, server, bots, and browser/Three.js client are still planned. Timer deadlines are implemented in engine commands; real-time scheduling and disconnection priority come with the runtime. Chat/action evidence references are trusted internal inputs until authenticated transport adapters resolve them against server history.
 
 **D001 resolved:** the approved repetition extension detects cycles inside a round without forcing discard or moving cards. See [decision record](docs/open-decisions.md). Full deterministic engine matches for all supported seat counts are covered by regression tests.
 

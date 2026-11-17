@@ -1,5 +1,22 @@
-import type { BranchId, CardId, CommandId, EventId, GameId, ProcedureId, SeatId } from './ids.ts';
-import type { GameCard, GameState, Penalty } from './model.ts';
+import type {
+  BranchId,
+  CardId,
+  ClaimId,
+  CommandId,
+  EventId,
+  GameId,
+  ProcedureId,
+  SeatId,
+} from './ids.ts';
+import type {
+  Claim,
+  ClaimResolution,
+  GameCard,
+  GameState,
+  IncidentReference,
+  Penalty,
+  Vote,
+} from './model.ts';
 
 /** Internal commands. Transport must bind trusted identity before constructing these. */
 export type StartGame = Readonly<{
@@ -26,7 +43,64 @@ export type PenaltyCommand =
       cardId: CardId | null;
     }>
   | Readonly<{ type: 'expire-penalty'; id: CommandId; timerId: ProcedureId }>;
-export type GameCommand = StartGame | DrawCard | ExpireReveal | RoundCommand | PenaltyCommand;
+export type SubmitClaim = Readonly<{
+  type: 'submit-claim';
+  id: CommandId;
+  actorId: SeatId;
+  accusedId: SeatId;
+  reason: string;
+  incident: IncidentReference;
+  scope: Claim['scope'];
+  scopeNumber: number;
+}>;
+export type WithdrawalCommand =
+  | Readonly<{ type: 'request-withdrawal'; id: CommandId; actorId: SeatId; claimId: ClaimId }>
+  | Readonly<{
+      type: 'withdrawal-response';
+      id: CommandId;
+      actorId: SeatId;
+      procedureId: ProcedureId;
+      approve: boolean;
+    }>
+  | Readonly<{ type: 'expire-withdrawal'; id: CommandId; timerId: ProcedureId }>;
+export type ClaimCommand =
+  | SubmitClaim
+  | WithdrawalCommand
+  | Readonly<{
+      type: 'cast-vote';
+      id: CommandId;
+      actorId: SeatId;
+      procedureId: ProcedureId;
+      vote: Vote;
+    }>
+  | Readonly<{ type: 'expire-claim-vote'; id: CommandId; timerId: ProcedureId }>;
+export type GameCommand =
+  StartGame | DrawCard | ExpireReveal | RoundCommand | PenaltyCommand | ClaimCommand;
+
+export type WithdrawalEvent =
+  | Readonly<{ type: 'withdrawal-requested'; claimId: ClaimId; seatId: SeatId }>
+  | Readonly<{ type: 'withdrawal-started'; claimId: ClaimId; procedureId: ProcedureId }>
+  | Readonly<{
+      type: 'withdrawal-answered';
+      procedureId: ProcedureId;
+      seatId: SeatId;
+      approve: boolean;
+    }>
+  | Readonly<{ type: 'withdrawal-expired'; procedureId: ProcedureId }>
+  | Readonly<{ type: 'withdrawal-resolved'; claimId: ClaimId; approved: boolean }>;
+
+export type ClaimEvent =
+  | Readonly<{ type: 'reveal-resumed'; timerId: ProcedureId }>
+  | WithdrawalEvent
+  | Readonly<{ type: 'claim-submitted'; claim: Claim }>
+  | Readonly<{ type: 'claim-vote-started'; claimId: ClaimId; procedureId: ProcedureId }>
+  | Readonly<{ type: 'claim-vote-cast'; procedureId: ProcedureId; seatId: SeatId; vote: Vote }>
+  | Readonly<{ type: 'claim-vote-expired'; procedureId: ProcedureId }>
+  | Readonly<{
+      type: 'claim-vote-resolved';
+      claimId: ClaimId;
+      resolution: Exclude<ClaimResolution, 'pending' | 'withdrawn'>;
+    }>;
 
 export type RoundEvent =
   | Readonly<{ type: 'card-played'; seatId: SeatId; cardId: CardId }>
@@ -46,6 +120,7 @@ export type PenaltyEvent =
   | Readonly<{ type: 'penalty-completed'; procedureId: ProcedureId }>;
 
 export type DomainEvent =
+  | ClaimEvent
   | Readonly<{ type: 'repetition-checked' }>
   | PenaltyEvent
   | RoundEvent
@@ -84,6 +159,14 @@ export type RejectionCode =
   | 'not-started'
   | 'unknown-seat'
   | 'inactive-seat'
+  | 'invalid-claim'
+  | 'invalid-vote'
+  | 'unknown-claim'
+  | 'claim-closed'
+  | 'punishment-started'
+  | 'already-requested'
+  | 'scope-closed'
+  | 'incident-already-handled'
   | 'card-not-owned'
   | 'empty-table'
   | 'not-eligible'

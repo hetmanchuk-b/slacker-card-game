@@ -42,7 +42,7 @@ Use PostgreSQL with the `pg` driver and explicit SQL migrations when durable per
 
 ## Current implementation scope
 
-Engine commands are introduced incrementally. Creation, dealing, round play, stump handling, and automatic penalty procedures are executable. A type describing future claim voting/withdrawal is not an implementation of that feature. Stage checklists and the rule-to-test matrix identify what is actually executable.
+Creation, dealing, round play, stump handling, penalties, scoped claims, voting, and withdrawal are executable. Timer expiration is still delivered through explicit commands; live scheduling and connection suspension are Stage 6 work. No running multiplayer server or browser application is claimed. Stage checklists and the rule-to-test matrix identify the verified scope.
 
 ## Atomic automatic consequences
 
@@ -53,6 +53,18 @@ Round completion and finalized exits are deterministic consequences of the compl
 Penalty choices reserve a donor's selected card until the procedure completes; then transfers are applied together. Normal play is suspended throughout, so cards cannot be spent concurrently. Responses use own-property lookups: a valid opaque seat identifier must not be confused with an inherited JavaScript property.
 
 Private stump peek knowledge is stored separately from the card's physical location. Illegal peeking does not transfer the stump into the hand. Raw peek data and repetition keys remain server-only.
+
+## Claims, evidence references, and withdrawal
+
+- Claim records form an ordered ledger. The first unresolved record starts a vote; later accepted records wait without restarting the current timer. Penalties caused by a verdict finish before the next claim vote starts.
+- Engine commands carry a canonical evidence reference and scope. These are **trusted internal inputs**: Stage 8 must resolve chat/action IDs, authors, original scope, and active-branch provenance from server-owned history. A browser must not be allowed to relabel an old message as a current episode.
+- Spoken episodes use explicit stable keys; equivalent prose is not machine-deduplicated. Players settle disputed spoken identity socially, as specified.
+- Automatic violations are immediately recorded as handled action incidents. Reporting one again does not create a second punishment. Reusing a resolved, tied, withdrawn, or still-pending claim's incident key is rejected.
+- A claim vote includes active seats except the accused. Withdrawal consent includes active seats except the claimant, including the accused. Stage 6 must block ordinary commands during absence and freeze timers; the engine does not infer live socket presence.
+- Withdrawal pauses an active ballot with its exact remaining milliseconds. A denial or timeout restores those ballots and that remaining duration; a queued claim whose vote has not started gets a fresh timer only when it actually starts.
+- A deferred dealing verdict can still be withdrawn before its punishment starts. A request queued behind another procedure is honored before the matching deferred punishment; other punishments are not interrupted.
+- During the last-card reveal, accepted claims freeze the reveal timer until the full claim queue is drained. Resumption is an explicit event; replay never obtains fresh time.
+- Claim ledgers, automatic incident keys, and punishment-start markers are rollbackable state. The separately persisted chat itself must remain retained when Stage 7 implements rollback.
 
 ## Settled-action repetition (D001 resolved)
 

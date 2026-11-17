@@ -1,5 +1,6 @@
 import { canBeat } from './cards.ts';
 import { id } from './ids.ts';
+import { incidentKey } from './claims.ts';
 import type { Decision, DecisionContext, RoundCommand, RoundEvent } from './contracts.ts';
 import type { CardId, SeatId } from './ids.ts';
 import type { GameState } from './model.ts';
@@ -147,6 +148,12 @@ export function applyRoundEvent(state: GameState, event: RoundEvent): GameState 
     return {
       ...state,
       peekedStumps,
+      automaticIncidents: [
+        ...new Set([
+          ...state.automaticIncidents,
+          incidentKey({ type: 'action', commandId: event.penalty.incidentId }),
+        ]),
+      ],
       pendingPenalties: [...state.pendingPenalties, { ...event.penalty }],
     };
   }

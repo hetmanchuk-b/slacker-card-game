@@ -1,9 +1,10 @@
 import { RANKS, SUITS, trumpFromLastCard } from './cards.ts';
+import { validateClaims } from './claim-invariants.ts';
 import type { GameState, Timer } from './model.ts';
 
 /** Diagnostics are server-only: they may identify private card locations. */
 export function validateState(state: GameState): readonly string[] {
-  const errors: string[] = [];
+  const errors: string[] = [...validateClaims(state)];
   if (state.schemaVersion !== 1) errors.push('Unsupported state schema');
   const seatIds = state.players.map((player) => player.id);
   if (seatIds.length < 2 || seatIds.length > 8) errors.push('Expected 2–8 seats');

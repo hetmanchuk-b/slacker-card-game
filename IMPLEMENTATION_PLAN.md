@@ -18,21 +18,21 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - `src/game/cards.test.ts` covers deck uniqueness and rank/suit combinations.
 - The complete game engine, server, client, durable persistence, and bots are not implemented.
 
-### Progress — increment 3
+### Progress — increment 4
 
 - **Stage 1: complete.** Tooling/CI, domain contracts, rule-to-test matrix, and architecture decisions are in place. `.gitattributes` enforces LF on Windows/Linux checkouts.
 - **Stage 2: complete for the executable engine.** Creation, replay, invariants, atomic in-memory history, version checks, and duplicate protection are tested.
-- **Stage 3: integration pending.** Dealing and sequential execution of deferred automatic penalties work. Dealing-time spoken claims still need Stage 5.
+- **Stage 3: complete for the engine scope.** Dealing-time claims vote immediately, defer punishments correctly, and drain before the first lead. The reveal timer pauses and resumes across queued claims.
 - **Stage 4: complete for the agreed engine scope.** Rounds, automatic pickups, stumps, exits, and settled-action repetition work. D001 was approved and resolved: both in-round and boundary cycles draw at the third occurrence.
-- **Stage 5: in progress.** Automatic violations, contribution/refusal, timeout completion, and penalty-updated retries are implemented. Claims, voting, withdrawal, and social-incident deduplication remain pending.
+- **Stage 5: complete for the trusted engine interface.** Scoped claims, FIFO voting, false-claim punishments, timeout abstentions, unanimous withdrawal, deferred-punishment cancellation, and episode-key deduplication are implemented. Binding chat/action references to authoritative evidence remains transport work in Stage 8; live presence and scheduling remain Stage 6.
 - **Stages 6–12: not started.** No server or browser application is claimed to exist.
-- Verification: `npm run check` passes, with **63 passing tests**. D001 is now a draw regression test, not a known-limitation assertion. Automatic pickup chains contribute one settled occurrence; no-op punishment procedures contribute none.
+- Verification: `npm run check` passes, with **95 passing tests**. Claim timers, queued withdrawals, delayed dealing punishments, before/after-final-play ordering, and full claim-history replay are covered alongside the existing D001 regression.
 - Full deterministic engine matches for every seat count from 2 through 8 finish and replay identically in `src/game/match.test.ts`. The formerly looping 5-seat match now draws. This is engine integration coverage, not browser/online coverage.
-- Red/green checks covered creation, history, dealing, round play, automatic pickup, immediate punishment, contribution/expiry, stumps, repetition, and expanded invariants.
+- Red/green checks covered creation, history, dealing, round play, automatic pickup, penalties, stumps, repetition, claim submission/voting/expiry, withdrawal, reveal suspension, ledger validation, and expanded invariants.
 - Increment 1 was committed and pushed as `17d2c96` before increment 2 work began.
 - See `docs/architecture.md`, `docs/rule-test-matrix.md`, and `README.md` for current interfaces, scope, and commands.
 
-**Dependency clarification:** Stage 3 originally included full dealing-time claims and penalty execution, while their handlers are assigned to Stage 5. Those cross-stage integration checks remain open until Stage 5; they must not be marked complete or replaced with pretend handlers. Basic dealing is independently executable in the meantime.
+**Dependency clarification:** Stage 3 originally depended on the claim handlers assigned to Stage 5. That cross-stage integration is now implemented and tested with real procedures, not placeholder handlers. Engine milestone A is complete; online/runtime milestones are not.
 
 ### Execution rules
 
@@ -124,9 +124,9 @@ docs/            # Rules, scenarios, architecture decisions, operations
 - [x] Deal two face-down stumps per seat over two full passes, then distribute all remaining cards to hands.
 - [x] Make deck click and drag represent the same draw command; input handling comes later.
 - [x] For out-of-order draws, return the card to a recorded random deck position, preserve the correct recipient, and queue a penalty.
-- [ ] Support claims during dealing and defer resulting penalties until before the first round.
+- [x] Support claims during dealing and defer resulting penalties until before the first round.
 - [x] Implement the 10-second final-card reveal, trump/no-trump selection, and last-recipient first move.
-- [ ] Complete all pending-procedure integration before the first lead (automatic deferred penalties are implemented; dealing claims remain pending).
+- [x] Complete all pending-procedure integration before the first lead, including dealing claims and deferred punishments.
 - [x] Test every player count from 2 through 8, including uneven hand distributions.
 
 **Exit criteria:** scenario 1 and the dealing parts of scenario 12 pass; all 36 cards are accounted for; no persistent draw-turn or trump hint is required.
@@ -156,16 +156,16 @@ docs/            # Rules, scenarios, architecture decisions, operations
 **Depends on:** Stage 4.
 
 - [x] Implement all automatic violations and their exact rollback-of-action/turn consequences.
-- [ ] Implement round, dealing, and between-round claim scopes with server-ordered deadlines.
-- [ ] Queue accepted claims sequentially; drain them before ordinary play resumes.
-- [ ] Link technical incidents to action IDs and chat incidents to message IDs; do not attempt to infer identical spoken incidents from arbitrary text.
-- [ ] Implement voting by all participants except the accused, including the claimant.
-- [ ] Apply 10-second timeout abstention, majority among yes/no votes, and no-punishment ties.
-- [ ] Implement unanimous withdrawal with a separate 10-second procedure that suspends/resumes the original vote.
+- [x] Implement round, dealing, and between-round claim scopes with server-ordered deadlines.
+- [x] Queue accepted claims sequentially; drain them before ordinary play resumes.
+- [x] Link technical incidents to action IDs and chat incidents to message IDs; do not attempt to infer identical spoken incidents from arbitrary text. Resolve referenced evidence and authenticate authors in Stage 8.
+- [x] Implement voting by all participants except the accused, including the claimant.
+- [x] Apply 10-second timeout abstention, majority among yes/no votes, and no-punishment ties.
+- [x] Implement unanimous withdrawal with a separate 10-second procedure that suspends/resumes the original vote.
 - [x] Implement penalty contribution or refusal with a 10-second timer; never transfer a contributor's last hand card or a stump.
 - [x] Treat zero-card penalties as completed, not pending forever.
 - [x] Restore the interrupted turn after penalties using the updated hands, not stale pre-penalty assumptions.
-- [ ] Ensure one incident is punished once, while distinct repeated illegal attempts remain punishable.
+- [x] Ensure one incident is punished once, while distinct repeated illegal attempts remain punishable.
 
 **Exit criteria:** scenarios 9–12 and 14 pass; voting outcomes, claim scope transitions, and empty penalties have explicit tests.
 

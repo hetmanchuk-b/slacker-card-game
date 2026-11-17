@@ -1,5 +1,6 @@
 import { createDeck, trumpFromLastCard } from './cards.ts';
 import { id } from './ids.ts';
+import { applyClaimEvent, automaticClaimEvent, decideClaimCommand, incidentKey } from './claims.ts';
 import { automaticRepetitionEvent, recordRepetition } from './repetition.ts';
 import { validateState } from './invariants.ts';
 import {
@@ -43,6 +44,7 @@ export function decide(
 function automaticEvent(state: GameState, commandId: CommandId, index: number): DomainEvent | null {
   return (
     automaticPenaltyEvent(state, id('procedure', `${commandId}:${index}:penalty`)) ??
+    automaticClaimEvent(state, id('procedure', `${commandId}:${index}:claim`)) ??
     automaticRoundEvent(state) ??
     automaticRepetitionEvent(state)
   );
@@ -56,6 +58,15 @@ function decideCommand(
   if (!Number.isSafeInteger(context.nowMs) || context.nowMs < (state?.createdAtMs ?? 0)) {
     return { type: 'rejected', code: 'invalid-time' };
   }
+  if (
+    command.type === 'submit-claim' ||
+    command.type === 'cast-vote' ||
+    command.type === 'expire-claim-vote' ||
+    command.type === 'request-withdrawal' ||
+    command.type === 'withdrawal-response' ||
+    command.type === 'expire-withdrawal'
+  )
+    return decideClaimCommand(state, command, context);
   if (command.type === 'penalty-response' || command.type === 'expire-penalty') {
     return decidePenaltyCommand(state, command, context);
   }
@@ -203,6 +214,21 @@ export function applyAction(state: GameState | null, action: ActionBatch): GameS
   let next = state;
   for (const { event } of action.events) {
     switch (event.type) {
+      case 'reveal-resumed':
+      case 'withdrawal-requested':
+      case 'withdrawal-started':
+      case 'withdrawal-answered':
+      case 'withdrawal-expired':
+      case 'withdrawal-resolved':
+      case 'claim-submitted':
+      case 'claim-vote-started':
+      case 'claim-vote-cast':
+      case 'claim-vote-expired':
+      case 'claim-vote-resolved': {
+        if (next === null) throw new Error('Claim before game creation');
+        next = applyClaimEvent(next, event, action.occurredAtMs);
+        break;
+      }
       case 'repetition-checked': {
         if (next === null) throw new Error('Repetition before game creation');
         next = recordRepetition(next);
@@ -266,6 +292,12 @@ export function applyAction(state: GameState | null, action: ActionBatch): GameS
         next = {
           ...next,
           deck,
+          automaticIncidents: [
+            ...new Set([
+              ...next.automaticIncidents,
+              incidentKey({ type: 'action', commandId: action.commandId }),
+            ]),
+          ],
           pendingPenalties: [
             ...next.pendingPenalties,
             {
@@ -338,6 +370,8 @@ export function applyAction(state: GameState | null, action: ActionBatch): GameS
           phase: { type: 'dealing', nextSeatId: event.firstRecipientId, drawCount: 0 },
           procedure: null,
           pendingPenalties: [],
+          claims: [],
+          automaticIncidents: [],
           completedRounds: 0,
           openingRights: [],
           repetitions: {},

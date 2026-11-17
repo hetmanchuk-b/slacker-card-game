@@ -18,7 +18,9 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - `src/game/cards.test.ts` covers deck uniqueness and rank/suit combinations.
 - The complete game engine, server, client, durable persistence, and bots are not implemented.
 
-### Progress — increment 5
+### Progress — increment 7
+
+**New approved direction, documentation only:** rules revision 1.4 adds a post-game little-finger/deck minigame and treats all participants remaining at a repetition draw as losers, preserving earlier winners. The current implementation still follows revision 1.3 for this outcome. No minigame or result changes have been implemented. Resolve §16.5 before implementing the affected behavior; planned work is tracked in Stage 11a below.
 
 - **Stage 1: complete.** Tooling/CI, domain contracts, rule-to-test matrix, and architecture decisions are in place. `.gitattributes` enforces LF on Windows/Linux checkouts.
 - **Stage 2: complete for the executable engine.** Creation, replay, invariants, atomic in-memory history, version checks, and duplicate protection are tested.
@@ -26,12 +28,13 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - **Stage 4: complete for the agreed engine scope.** Rounds, automatic pickups, stumps, exits, and settled-action repetition work. D001 was approved and resolved: both in-round and boundary cycles draw at the third occurrence.
 - **Stage 5: complete for the trusted engine interface.** Scoped claims, FIFO voting, false-claim punishments, timeout abstentions, unanimous withdrawal, deferred-punishment cancellation, and episode-key deduplication are implemented. Binding chat/action references to authoritative evidence remains transport work in Stage 8.
 - **Stage 6: complete for the runtime interface.** Serialized dispatch, automatic deadlines, nested timer suspension, multiple absences, replacement voting, controller handover, idempotent receipts, and checkpoint recovery are implemented. Bot decisions remain Stage 10; durable checkpoint storage remains Stage 7.
-- **Stages 7–12: not started.** No HTTP/Socket.IO server or browser application is claimed to exist.
-- Verification: `npm run check` passes on **Node 24.22.1 and 26.13.1**, with **121 passing tests**. Runtime deadline, disconnect, replacement, stale-callback, recovery, and controller-authorization tests extend the existing engine coverage. CI is configured for Node 24/26 on Windows/Linux.
+- **Stage 7: in progress.** PostgreSQL migrations and transactional versioned frames now persist the operation archive, state snapshot, receipts, branch/audit metadata, controllers and timers. Runtime publication/acknowledgment waits for the complete commit; writer leases and optimistic revisions prevent conflicting writes. Real PostgreSQL tests include separate-process recovery and injected failures. Snapshot-assisted recovery now loads validated materialized branch/index caches and replays only the tail; an independent full-replay mode verifies equivalence. Lobby-scoped chat and actual next-match/lobby transition integration remain pending.
+- **Stages 8–12 (including 11a): not started.** No HTTP/Socket.IO server or browser application is claimed to exist.
+- Verification: `npm run check` passes on **Node 24.22.1 and 26.13.1**, with **172 passing checks when PostgreSQL is enabled** (158 non-database tests plus the integration suite and its parent test). Normal checks without the database explicitly skip the PostgreSQL suite. CI provisions PostgreSQL 18 on Linux for both Node versions. `npm audit --omit=dev` is clean; the pre-existing dev-toolchain advisory is documented in `docs/postgres.md`. CI is configured for Node 24/26 on Windows/Linux.
 - Full deterministic engine matches for every seat count from 2 through 8 finish and replay identically in `src/game/match.test.ts`. The formerly looping 5-seat match now draws. This is engine integration coverage, not browser/online coverage.
 - Red/green checks cover the engine behaviors plus runtime scheduling, logical clock suspension, presence reconciliation, bot-replacement control, checkpoint restoration, recovery-metadata validation, and native system adapters.
 - Increment 1 was committed and pushed as `17d2c96` before increment 2 work began.
-- See `docs/architecture.md`, `docs/rule-test-matrix.md`, and `README.md` for current interfaces, scope, and commands.
+- See `docs/architecture.md`, `docs/history.md`, `docs/postgres.md`, `docs/rule-test-matrix.md`, and `README.md` for current interfaces, scope, and commands.
 
 **Dependency clarification:** Stage 3 originally depended on the claim handlers assigned to Stage 5. That cross-stage integration is now implemented and tested with real procedures, not placeholder handlers. Engine milestone A and runtime Stage 6 are complete; milestone B still requires durable history and rollback in Stage 7.
 
@@ -189,17 +192,19 @@ docs/            # Rules, scenarios, architecture decisions, operations
 
 **Depends on:** Stage 6; event recording starts in Stage 2.
 
-- [ ] Implement PostgreSQL migrations and atomic persistence of command results, events, and branch-head versions.
-- [ ] Add versioned snapshots and prove snapshot-assisted recovery equals replay from the beginning.
-- [ ] Store branch ancestry and a mapping from completed server actions to valid pre-action rollback points.
-- [ ] Implement owner-only rollback with explicit target validation and an all-player notification.
-- [ ] Restore game state, procedures, pending penalties, remaining timers, outcomes, and repetition counts.
-- [ ] Keep live connections external to restored game state and recompute disconnection suspension after rollback.
-- [ ] Retain abandoned futures as labeled branches and retain chat; never count abandoned state occurrences toward a draw.
-- [ ] Invalidate outstanding old-branch commands and timer callbacks when branch/version changes.
-- [ ] Permit post-result rollback only until the next match starts.
-- [ ] Record the rollback itself in an administrative audit trail; warn that human knowledge cannot be undone.
-- [ ] Test rollback from every phase, not only ordinary card play, including reveal and random dealing outcomes.
+- [x] Implement PostgreSQL migrations and atomic persistence of command results, events, branch-head versions and runtime metadata. Entire queue jobs commit before acknowledgment/publication.
+- [x] Implement versioned snapshot-assisted recovery with integrity/prefix binding, validated branch/index restoration and tail replay. Compare it with independent full replay, including nested timers, empty states, rollback metadata and PostgreSQL revisions.
+- [x] Persist branch ancestry and completed-action/pre-action mappings through the versioned operation archive.
+- [x] Implement trusted owner-only runtime rollback with target/version validation and a notification record; authenticated all-player delivery remains Stage 8.
+- [x] Restore game state, procedures, pending penalties, remaining timers, outcomes, and repetition counts through the in-memory interface.
+- [x] Keep live connections/controllers external to restored game state and recompute suspension after rollback.
+- [x] Retain abandoned futures as separately identified in-memory branches; exclude abandoned occurrences from the restored repetition ledger.
+- [x] Persist retained branches, rollback audit and command receipts durably; verify fresh-process recovery and duplicate delivery.
+- [ ] Persist lobby-scoped retained chat; chat storage is not implemented yet.
+- [x] Invalidate old-branch gameplay deliveries and timer callbacks; cancel obsolete replacement votes.
+- [ ] Integrate the post-result rollback window with actual next-match creation. `closeForNextMatch()` is serialized and tested against concurrent rollback; durable lobby-transition integration is still required.
+- [x] Persist the administrative rollback audit and require acknowledgment that human knowledge cannot be undone; owner UI remains Stage 9.
+- [ ] Complete phase-by-phase/generated rollback coverage, including random dealing outcomes. Current tests cover creation/dealing, reveal, nested claim/withdrawal, penalty transfers, live pause restoration, completed matches and repetition results. PostgreSQL recovery verifies recorded random dealing outcomes without rerolling; rollback before random reinsertion also restores the original deck and removes the abandoned punishment.
 
 **Exit criteria:** scenarios 17–18 pass; restart and rollback recover equivalent authoritative states without deleting history, duplicating cards, or restoring obsolete sockets.
 
@@ -267,9 +272,38 @@ docs/            # Rules, scenarios, architecture decisions, operations
 
 **Exit criteria:** all previously working browser flows still pass; 2-, 4-, and 8-seat layouts are usable without secret leakage, duplicated commands, or animation-driven rules.
 
+## Stage 11a — Post-game deck-strike minigame
+
+**Status:** documented idea only; no implementation authorized by this update.
+
+**Depends on:** the functional online game and Stage 11 for final 3D presentation. Resolve `docs/game-rules.md` §16.5 before implementing unresolved mechanics.
+
+- [x] Confirm card counting: final hand cards plus closed stumps; table/discard cards do not count. This is documentation approval, not implementation.
+- [x] Confirm participation and accounting: only winners strike losers; bots do not participate; a miss consumes a strike, while a dodge repeats the attempt without consuming it.
+- [x] Confirm player-controlled force, aim, and finger position; accidental dodges come from player movement rather than automatic random displacement.
+- [x] Confirm finger holding until struck and skipping the minigame when there are no winners or every winner is a bot.
+- [x] Approve initial parameters in rules §16.6: force 1–100, visible force-dependent aim oscillation (amplitude 4–36, frequency 0.8–2.5 Hz, linear interpolation), a normalized 120 × 120 holding square, 500 ms windup, and a final 200 ms holding check.
+- [x] Confirm connection/lifecycle rules: wait for a disconnected loser to return; skip the entire remaining current strike series when its striker disconnects; finish the minigame before starting the next match.
+- [ ] Confirm striker/target ordering, the no-human-loser case, and any dodge consequences beyond the agreed retry.
+- [ ] Agree on hitboxes, boundary handling, input methods, and network timing.
+- [x] Confirm that striker disconnection skips the entire remaining current series, not just one attempt.
+- [ ] Clarify how disconnect interacts with an already-started strike. Confirm returning from bot control and post-result rollback.
+- [ ] Add failing tests before changing outcomes: a repetition draw makes every remaining participant a loser while preserving earlier winners; simultaneous all-player victory creates no loser.
+- [ ] Preserve the exact final card layout and distinguish the repetition termination reason from the newly agreed loser outcome; update result contracts, projections, history/replay, and existing draw regressions consistently.
+- [ ] Derive each human winner's strike count against each eligible human loser from that loser's final hand-plus-stump count. Include earlier winners; exclude bots.
+- [ ] Implement an authoritative post-game procedure with serialized commands and reproducible input/timing outcomes, separate from ordinary card-play turns. Do not introduce random misses or dodges without approval.
+- [ ] Implement adjustable strike force with increased miss risk at higher force, using the agreed model.
+- [ ] Implement finger holding within the allowed square and accidental dodging. Leaving the square during the strike must be classified as the target's dodge, not the striker's miss.
+- [ ] Implement loser-disconnect waiting, disconnected-striker whole-series skipping, no-human-winner minigame skipping, and the next-match gate according to the confirmed rules.
+- [ ] Test hit, miss, dodge, force/accuracy behavior, strike accounting, multiple losers, retries, no-human-winner skipping, loser reconnection, striker whole-series skipping, next-match gating, and the agreed rollback behavior.
+- [ ] Build a functional minigame UI before final Three.js animation; clearly distinguish hit, miss, and dodge without exposing hidden card identities.
+- [ ] Update scenarios, rule-to-test coverage, and shipped-behavior documentation after implementation.
+
+**Exit criteria:** the agreed post-game sequence works after normal losses and repetition losses, uses the confirmed strike counts, and distinguishes misses from dodges authoritatively. No unspecified retry, extra-punishment, or control mechanic is introduced implicitly.
+
 ## Stage 12 — End-to-end hardening and release
 
-**Depends on:** Stage 11.
+**Depends on:** Stages 11 and 11a.
 
 - [ ] Automate all documented scenarios through the engine and critical flows through the browser.
 - [ ] Add generated command sequences checking conservation of all 36 cards, correct turn ownership, fixed N, and replay determinism.
@@ -291,7 +325,7 @@ docs/            # Rules, scenarios, architecture decisions, operations
 | A — Rules engine | 1–5 | Deterministic game with all core rules and punishments |
 | B — Recoverable runtime | 6–7 | Correct timers, durable branches, restart, owner rollback |
 | C — Functional online game | 8–10 | Full multiplayer table, chat, history, reconnection, bots |
-| D — Three.js game | 11 | 3D presentation over the verified multiplayer implementation |
+| D — Three.js game and post-game minigame | 11, 11a | 3D multiplayer presentation and the agreed deck-strike minigame |
 | E — Release candidate | 12 | Tested, deployable, observable complete game |
 
 ## 4. Completion checklist
@@ -302,4 +336,5 @@ docs/            # Rules, scenarios, architecture decisions, operations
 - [ ] Intended illegal actions are possible and receive the agreed consequences.
 - [ ] Replay, rollback, random outcomes, timers, and repetition counts behave consistently.
 - [ ] Full matches work at every supported seat count, not only 2 and 4.
+- [ ] The post-game minigame follows the confirmed strike, dodge, card-count, and multiple-loser rules; revision 1.4 outcomes are covered by tests.
 - [ ] Documentation matches shipped behavior; no unapproved gameplay changes were introduced.

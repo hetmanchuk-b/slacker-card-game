@@ -5,11 +5,15 @@
   "type": "module",
   "scripts": {
     "test": "node --test \"src/**/*.test.ts\"",
+    "test:postgres": "node src/persistence/testing/run-postgres.ts",
+    "db:test:up": "docker compose -f compose.test.yml up -d --wait",
+    "db:test:down": "docker compose -f compose.test.yml down --volumes",
+    "db:migrate": "node src/persistence/cli/migrate.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "lint": "eslint src",
-    "format": "prettier --write \"src/**/*.ts\" \"*.json\" \"*.mjs\" \".github/**/*.yml\"",
-    "format:check": "prettier --check \"src/**/*.ts\" \"*.json\" \"*.mjs\" \".github/**/*.yml\"",
+    "format": "prettier --write \"src/**/*.ts\" \"*.json\" \"*.mjs\" \"*.yml\" \".github/**/*.yml\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"*.json\" \"*.mjs\" \"*.yml\" \".github/**/*.yml\"",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build"
   },
   "engines": {
@@ -18,9 +22,13 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
     "eslint": "^10.15.0",
     "prettier": "^3.10.1",
     "typescript": "^5.9.0",
     "typescript-eslint": "^8.73.0"
+  },
+  "dependencies": {
+    "pg": "^8.23.1"
   }
 }

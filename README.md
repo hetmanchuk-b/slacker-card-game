@@ -4,7 +4,7 @@ A TypeScript multiplayer card game with a planned Three.js table. Agreed rule-br
 
 ## Status
 
-The fifth engine/runtime increment is implemented:
+The seventh engine/runtime increment is implemented; Stage 7 is partially complete:
 
 - 36-card deck and suit/rank comparison, including spade isolation and six-over-ace.
 - Deterministic game creation and event replay.
@@ -23,8 +23,15 @@ The fifth engine/runtime increment is implemented:
 - A serialized runtime with automatic deadlines, disconnect suspension, multiple-absence handling, and nested timer preservation.
 - Bot-replacement voting after more than 30 seconds, human/controller handover, and no bot-only continuation without a connected human participant.
 - Checkpoint recovery that preserves remaining gameplay time, accepted receipts, controller metadata, and live replacement deadlines.
+- History branches and trusted owner rollback with pre-action timer restoration, retained abandoned futures, warning acknowledgment, and administrative records.
+- PostgreSQL migrations and transactional frames persisting history, snapshots, receipts and runtime metadata before state/acknowledgment publication.
+- Single-writer leases, optimistic revisions, and verified recovery in a fresh Node process; failed storage commits fault the runtime rather than accept unpersisted actions.
+- Integrity-checked materialized snapshots with tail replay, verified against independent full archive replay.
+- Old-branch command/deadline invalidation and a serialized next-match rollback-window guard (actual lobby integration is still pending).
 
-**Not playable online yet:** PostgreSQL history/rollback, authenticated Socket.IO transport, bot decisions, and the browser/Three.js client are still planned. Scheduling and presence rules are implemented in a server-side runtime library, not a running network application. Checkpoints currently require host-managed storage. Chat/action evidence references remain trusted internal inputs until transport adapters resolve them against server history.
+**Not playable online yet:** lobby-scoped chat retention, actual next-match lifecycle integration, authenticated Socket.IO transport, bot decisions, and the browser/Three.js client are still planned. Scheduling, persistence and presence rules are server-side libraries, not a running network application. Chat/action evidence references remain trusted internal inputs until transport adapters resolve them against server history.
+
+**New rules, not implemented yet:** revision 1.4 adds a post-game deck-strike minigame and makes remaining participants losers when repetition ends a match. These approved changes are tracked in Stage 11a; current result contracts still follow revision 1.3.
 
 **D001 resolved:** the approved repetition extension detects cycles inside a round without forcing discard or moving cards. See [decision record](docs/open-decisions.md). Full deterministic engine matches for all supported seat counts are covered by regression tests.
 
@@ -49,7 +56,16 @@ npm run format           # Format source and configuration files
 npm run build            # JavaScript, declarations and source maps in dist/
 ```
 
-The build currently contains engine and runtime libraries, not a running web application. No database is needed for the current increment.
+The build contains server-side libraries and a migration CLI, not a running web application. Non-database tests need no PostgreSQL. For real persistence tests, see [PostgreSQL setup](docs/postgres.md):
+
+```sh
+npm run db:test:up
+# Set PENKY_TEST_DATABASE_URL to the disposable test database (see the setup guide).
+npm run test:postgres
+npm run db:test:down
+```
+
+The integration suite injects database faults; never point it at a shared database.
 
 ## Documents
 
@@ -58,6 +74,8 @@ The build currently contains engine and runtime libraries, not a running web app
 - [Worked scenarios](docs/game-scenarios.md)
 - [Architecture decisions](docs/architecture.md)
 - [Runtime interface and recovery policy](docs/runtime.md)
+- [Branch history and rollback](docs/history.md)
+- [PostgreSQL setup, storage and recovery](docs/postgres.md)
 - [Rule-to-test coverage](docs/rule-test-matrix.md)
 - [Open implementation decisions](docs/open-decisions.md)
 

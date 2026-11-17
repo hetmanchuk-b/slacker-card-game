@@ -29,7 +29,7 @@ Live socket/presence information is not part of rollbackable game state. Recompu
 
 ## Storage decision
 
-Use PostgreSQL with the `pg` driver and explicit SQL migrations when durable persistence is implemented. No ORM is required for the initial schema. Store versioned action batches, branch ancestry, snapshots, chat, and ownership metadata. Commit branch-head checks and appends transactionally. Start Stage 2 with an in-memory adapter satisfying the same atomic history semantics; do not add the database dependency until Stage 7 needs it.
+Stage 7 now uses PostgreSQL with `pg` and explicit checksum-checked SQL migrations. No ORM is required. Versioned private frames store the operation archive (action batches, ancestry, ownership and rollback audit), active snapshot and runtime checkpoint, including accepted command receipts. An optimistic head update and frame insert commit together on one leased connection. `History` is the synchronous private staging interface; the runtime's awaited commit adapter is the durability seam. Public state/acknowledgment publication waits for it. Real PostgreSQL tests cover faults and separate-process recovery. Recovery can load a validated materialized history cache and replay its operation tail; independent full replay remains available for auditing. Lobby-scoped chat remains pending. See `docs/postgres.md`.
 
 ## Guest sessions and ownership
 
@@ -42,7 +42,7 @@ Use PostgreSQL with the `pg` driver and explicit SQL migrations when durable per
 
 ## Current implementation scope
 
-The engine and serialized runtime are executable: scheduling, connection suspension, replacement control, and checkpoint recovery now drive the existing game/claim procedures. PostgreSQL persistence, administrative rollback, authenticated transport, bot decisions, and browser rendering remain later stages. No running multiplayer server or browser application is claimed.
+The engine and serialized runtime are executable: scheduling, connection suspension, replacement control, and checkpoint recovery now drive the existing game/claim procedures. In-memory branch history and trusted owner rollback are also executable, including pre-action timer rebasing and branch invalidation. PostgreSQL persistence and durable rollback/recovery are executable. Retained lobby chat, authenticated transport, bot decisions, and browser rendering remain later work. See `docs/history.md`. No running multiplayer server or browser application is claimed.
 
 ## Atomic automatic consequences
 

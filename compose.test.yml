@@ -1,0 +1,17 @@
+name: penky-test
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: penky_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: penky-local-test
+    ports:
+      - '127.0.0.1:55432:5432'
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d penky_test']
+      interval: 1s
+      timeout: 3s
+      retries: 30

@@ -6,9 +6,13 @@ import { FakeClock } from './fake-clock.ts';
 import type { GameCommand } from '../../game/contracts.ts';
 import type { GameState } from '../../game/model.ts';
 
-export function fixture(phase: 'reveal' | 'vote' | 'penalty' | 'withdrawal', count = 2) {
+export function fixture(
+  phase: 'reveal' | 'vote' | 'penalty' | 'withdrawal',
+  count = 2,
+  gameId = id('game', 'runtime-game'),
+) {
   const seats = Array.from({ length: count }, (_, index) => id('seat', `seat-${index}`));
-  const history = new MemoryHistory(id('game', 'runtime-game'), id('branch', 'main'));
+  const history = new MemoryHistory(gameId, id('branch', 'main'));
   let nowMs = 1000;
   function run(command: GameCommand) {
     const snapshot = history.read();
@@ -24,7 +28,7 @@ export function fixture(phase: 'reveal' | 'vote' | 'penalty' | 'withdrawal', cou
   run({
     type: 'start-game',
     id: id('command', 'start'),
-    gameId: id('game', 'runtime-game'),
+    gameId,
     ownerId: seats[0]!,
     seatIds: seats,
     cardIds: Array.from({ length: 36 }, (_, index) => id('card', `opaque-${index}`)),

@@ -221,10 +221,25 @@ export function applyAction(state: GameState | null, action: ActionBatch): GameS
     if (
       next?.clock.type === 'suspended' &&
       event.type !== 'clock-resumed' &&
-      event.type !== 'clock-suspended'
+      event.type !== 'clock-suspended' &&
+      event.type !== 'clock-rebased'
     )
       throw new Error('Gameplay event during runtime suspension');
     switch (event.type) {
+      case 'clock-rebased': {
+        if (
+          next === null ||
+          !Number.isSafeInteger(event.capturedAtMs) ||
+          event.capturedAtMs < next.createdAtMs ||
+          event.capturedAtMs > action.occurredAtMs ||
+          typeof event.suspended !== 'boolean'
+        )
+          throw new Error('Invalid clock rebase');
+        if (next.clock.type === 'running')
+          next = applyClock(next, 'clock-suspended', event.capturedAtMs);
+        if (!event.suspended) next = applyClock(next, 'clock-resumed', action.occurredAtMs);
+        break;
+      }
       case 'clock-suspended':
       case 'clock-resumed': {
         if (next === null) throw new Error('Clock transition before creation');

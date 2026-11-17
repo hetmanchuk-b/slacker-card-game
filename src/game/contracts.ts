@@ -125,6 +125,7 @@ export type PenaltyEvent =
 export type DomainEvent =
   | Readonly<{ type: 'clock-suspended' }>
   | Readonly<{ type: 'clock-resumed' }>
+  | Readonly<{ type: 'clock-rebased'; capturedAtMs: number; suspended: boolean }>
   | ClaimEvent
   | Readonly<{ type: 'repetition-checked' }>
   | PenaltyEvent

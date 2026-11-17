@@ -4,7 +4,7 @@ import { id } from '../game/ids.ts';
 import type { BranchHead, GameCommand, RejectionCode } from '../game/contracts.ts';
 import type { BranchId, CommandId, ProcedureId, SeatId } from '../game/ids.ts';
 import type { GameState, Timer, Vote } from '../game/model.ts';
-import type { History } from '../persistence/history.ts';
+import type { ForkResult, History, RollbackAudit } from '../persistence/history.ts';
 import type { CancelTask, Clock } from './clock.ts';
 
 export type RuntimeOptions = Readonly<{
@@ -13,6 +13,17 @@ export type RuntimeOptions = Readonly<{
   connectedSeatIds: readonly SeatId[];
   randomInt: (upperExclusive: number) => number;
   nextCommandId: () => CommandId;
+  /** Atomically store history and this checkpoint before publication/acknowledgment. */
+  commit?: (checkpoint: RuntimeCheckpoint) => Promise<void>;
+}>;
+
+export type RuntimeSnapshot = Readonly<{
+  head: BranchHead;
+  state: GameState | null;
+  connections: readonly SeatPresence[];
+  paused: boolean;
+  replacementVote: ReplacementVote | null;
+  controlEvents: readonly ControlEvent[];
 }>;
 
 export type RuntimeResult =
@@ -26,6 +37,7 @@ export type RuntimeResult =
       type: 'rejected';
       code:
         | RejectionCode
+        | Extract<ForkResult, { type: 'rejected' }>['code']
         | 'closed'
         | 'not-connected'
         | 'wrong-controller'
@@ -50,7 +62,15 @@ export type ReplacementCommand =
       procedureId: ProcedureId;
       vote: Vote;
     }>;
-export type RuntimeCommand = GameCommand | ConnectionCommand | ReplacementCommand;
+export type RollbackCommand = Readonly<{
+  type: 'rollback';
+  id: CommandId;
+  actorId: SeatId;
+  expected: BranchHead;
+  beforeCommandId: CommandId;
+  knowledgeWarningAcknowledged: boolean;
+}>;
+export type RuntimeCommand = GameCommand | ConnectionCommand | ReplacementCommand | RollbackCommand;
 export type ReplacementVote = Readonly<{
   absentSeatId: SeatId;
   eligibleSeatIds: readonly SeatId[];
@@ -63,9 +83,15 @@ export type ControlEvent = Readonly<{ commandId: CommandId; atMs: number }> &
     | Readonly<{ type: 'replacement-started'; vote: ReplacementVote }>
     | Readonly<{ type: 'replacement-ballot'; procedureId: ProcedureId; seatId: SeatId; vote: Vote }>
     | Readonly<{ type: 'replacement-resolved'; vote: ReplacementVote; replaced: boolean }>
-    | Readonly<{ type: 'replacement-canceled'; procedureId: ProcedureId; seatId: SeatId }>
+    | Readonly<{
+        type: 'replacement-canceled';
+        procedureId: ProcedureId;
+        seatId: SeatId;
+        reason?: 'reconnected' | 'rollback';
+      }>
     | Readonly<{ type: 'human-control-restored'; seatId: SeatId }>
     | Readonly<{ type: 'runtime-restored'; capturedAtMs: number }>
+    | Readonly<{ type: 'rollback-completed'; rollback: RollbackAudit }>
   );
 export type DispatchOptions = Readonly<{ branchId?: BranchId; controller?: 'human' | 'bot' }>;
 export type SeatPresence = Readonly<{
@@ -97,6 +123,9 @@ export class GameRuntime {
   #generation = 0;
   #closed = false;
   #fault: unknown = null;
+  #published: RuntimeSnapshot | null = null;
+  #schedulePending = false;
+  #requiresBranch: boolean;
   #connections: SeatPresence[];
   #replacement: ReplacementVote | null = null;
   #controlEvents: ControlEvent[] = [];
@@ -104,6 +133,7 @@ export class GameRuntime {
 
   private constructor(options: RuntimeOptions) {
     this.#options = options;
+    this.#requiresBranch = options.history.branches().length > 1;
     this.#connections = options.connectedSeatIds.map((seatId) => ({
       seatId,
       connected: true,
@@ -164,10 +194,15 @@ export class GameRuntime {
           !['human', 'bot'].includes(receipt.controller) ||
           receipt.result.type !== 'accepted' ||
           receipt.result.head.gameId !== checkpoint.head.gameId ||
-          receipt.result.head.branchId !== checkpoint.head.branchId ||
-          !Number.isSafeInteger(receipt.result.head.version) ||
-          receipt.result.head.version < 0 ||
-          receipt.result.head.version > checkpoint.head.version,
+          !options.history
+            .branches()
+            .some(
+              (branch) =>
+                branch.head.branchId === receipt.result.head.branchId &&
+                Number.isSafeInteger(receipt.result.head.version) &&
+                receipt.result.head.version >= 0 &&
+                receipt.result.head.version <= branch.head.version,
+            ),
       )
     )
       throw new Error('Invalid checkpoint receipt');
@@ -230,33 +265,36 @@ export class GameRuntime {
   checkpoint(): Promise<RuntimeCheckpoint> {
     return this.#enqueue(() => {
       if (this.#closed) throw new Error('Cannot checkpoint a closed runtime');
-      const snapshot = this.read();
-      const capturedAtMs = this.#options.clock.now();
-      if (
-        !Number.isSafeInteger(capturedAtMs) ||
-        capturedAtMs < (this.#options.history.read().actions.at(-1)?.occurredAtMs ?? 0)
-      )
-        throw new Error('Invalid checkpoint clock');
-      return structuredClone({
-        schemaVersion: 1,
-        capturedAtMs,
-        head: snapshot.head,
-        connections: this.#connections,
-        replacementVote: this.#replacement,
-        controlEvents: this.#controlEvents,
-        receipts: [...this.#receipts.values()],
-      });
+      return this.#capture();
     });
   }
 
-  read(): Readonly<{
-    head: BranchHead;
-    state: GameState | null;
-    connections: readonly SeatPresence[];
-    paused: boolean;
-    replacementVote: ReplacementVote | null;
-    controlEvents: readonly ControlEvent[];
-  }> {
+  #capture(): RuntimeCheckpoint {
+    const snapshot = this.#view();
+    const capturedAtMs = this.#options.clock.now();
+    if (
+      !Number.isSafeInteger(capturedAtMs) ||
+      capturedAtMs < (this.#options.history.read().actions.at(-1)?.occurredAtMs ?? 0)
+    )
+      throw new Error('Invalid checkpoint clock');
+    return structuredClone({
+      schemaVersion: 1,
+      capturedAtMs,
+      head: snapshot.head,
+      connections: this.#connections,
+      replacementVote: this.#replacement,
+      controlEvents: this.#controlEvents,
+      receipts: [...this.#receipts.values()],
+    });
+  }
+
+  read(): RuntimeSnapshot {
+    if (this.#fault !== null) throw new Error('Runtime scheduling failed', { cause: this.#fault });
+    if (this.#published === null) throw new Error('Runtime is not initialized');
+    return structuredClone(this.#published);
+  }
+
+  #view(): RuntimeSnapshot {
     if (this.#fault !== null) throw new Error('Runtime scheduling failed', { cause: this.#fault });
     const { head, state } = this.#options.history.read();
     return {
@@ -273,15 +311,30 @@ export class GameRuntime {
     const input = structuredClone(command);
     const origin = { ...options };
     return this.#enqueue(() => {
-      const snapshot = this.read();
+      const snapshot = this.#view();
       const reject = (
         code: Extract<RuntimeResult, { type: 'rejected' }>['code'],
       ): RuntimeResult => ({ type: 'rejected', code, head: snapshot.head });
       if (this.#closed) return reject('closed');
       if (origin.branchId !== undefined && origin.branchId !== snapshot.head.branchId)
         return reject('wrong-branch');
+      const connection = input.type === 'disconnect' || input.type === 'reconnect';
+      if (
+        this.#requiresBranch &&
+        !connection &&
+        input.type !== 'rollback' &&
+        origin.branchId === undefined
+      )
+        return reject('wrong-branch');
       const controller = origin.controller ?? 'human';
       const cached = this.#receipts.get(input.id);
+      if (
+        cached &&
+        cached.result.head.branchId !== snapshot.head.branchId &&
+        !connection &&
+        input.type !== 'rollback'
+      )
+        return reject('wrong-branch');
       if (cached)
         return isDeepStrictEqual(cached.command, input) && cached.controller === controller
           ? { ...structuredClone(cached.result), duplicate: true }
@@ -292,7 +345,13 @@ export class GameRuntime {
       )
         return reject('command-id-reused');
       let result: RuntimeResult;
-      if (input.type === 'propose-bot' || input.type === 'replacement-vote') {
+      if (input.type === 'rollback') {
+        if (controller !== 'human') return reject('wrong-controller');
+        const presence = this.#connections.find((item) => item.seatId === input.actorId);
+        if (!presence?.connected) return reject('not-connected');
+        if (presence.controller !== 'human') return reject('wrong-controller');
+        result = this.#rollback(input);
+      } else if (input.type === 'propose-bot' || input.type === 'replacement-vote') {
         if (controller !== 'human') return reject('wrong-controller');
         result = this.#replacementCommand(input);
       } else if (input.type === 'disconnect' || input.type === 'reconnect') {
@@ -317,7 +376,7 @@ export class GameRuntime {
       }
       this.#reschedule();
       if (result.type === 'accepted') {
-        result = { ...result, head: this.read().head };
+        result = { ...result, head: this.#view().head };
         this.#receipts.set(input.id, structuredClone({ command: input, controller, result }));
       }
       return structuredClone(result);
@@ -326,6 +385,49 @@ export class GameRuntime {
       this.#cancelTasks();
       throw error;
     });
+  }
+
+  #rollback(command: RollbackCommand): RuntimeResult {
+    const point = this.#options.history.rollbackPoint(command.beforeCommandId);
+    const result = this.#options.history.fork(command.expected, {
+      id: command.id,
+      actorId: command.actorId,
+      beforeCommandId: command.beforeCommandId,
+      branchId: id('branch', `${command.id}:branch`),
+      nowMs: this.#options.clock.now(),
+      resumeClock: !this.#shouldSuspend(point?.state ?? null, this.#connections),
+      knowledgeWarningAcknowledged: command.knowledgeWarningAcknowledged,
+    });
+    if (result.type === 'rejected') return result;
+    if (result.type === 'committed') {
+      this.#requiresBranch = true;
+      if (this.#replacement) {
+        this.#controlEvents.push({
+          type: 'replacement-canceled',
+          commandId: command.id,
+          atMs: this.#options.clock.now(),
+          procedureId: this.#replacement.timer.id,
+          seatId: this.#replacement.absentSeatId,
+          reason: 'rollback',
+        });
+        this.#replacement = null;
+      }
+      const rollback = this.#options.history.audit().find((item) => item.commandId === command.id)!;
+      this.#controlEvents.push({
+        type: 'rollback-completed',
+        commandId: command.id,
+        atMs: this.#options.clock.now(),
+        rollback,
+      });
+      this.#ensureRoster();
+      this.#reconcile();
+    }
+    return {
+      type: 'accepted',
+      outcome: 'control',
+      head: result.head,
+      duplicate: result.type === 'duplicate',
+    };
   }
 
   #ensureRoster() {
@@ -370,7 +472,7 @@ export class GameRuntime {
   }
 
   #connection(command: ConnectionCommand): RuntimeResult {
-    const snapshot = this.read();
+    const snapshot = this.#view();
     const current = this.#connections.find((item) => item.seatId === command.seatId);
     if (!current) return { type: 'rejected', code: 'unknown-seat', head: snapshot.head };
     const nowMs = this.#options.clock.now();
@@ -404,10 +506,11 @@ export class GameRuntime {
         atMs: nowMs,
         seatId: command.seatId,
         procedureId: this.#replacement.timer.id,
+        reason: 'reconnected',
       });
       this.#replacement = null;
     }
-    return { type: 'accepted', outcome: 'control', head: this.read().head, duplicate: false };
+    return { type: 'accepted', outcome: 'control', head: this.#view().head, duplicate: false };
   }
 
   #humanError(seatId: SeatId): Extract<RuntimeResult, { type: 'rejected' }>['code'] | null {
@@ -426,7 +529,7 @@ export class GameRuntime {
     const reject = (code: Extract<RuntimeResult, { type: 'rejected' }>['code']): RuntimeResult => ({
       type: 'rejected',
       code,
-      head: this.read().head,
+      head: this.#view().head,
     });
     const error = this.#humanError(command.actorId);
     if (error) return reject(error);
@@ -436,7 +539,7 @@ export class GameRuntime {
       const target = this.#connections.find((item) => item.seatId === command.seatId);
       if (!target) return reject('unknown-seat');
       if (
-        !this.read().state!.players.some(
+        !this.#view().state!.players.some(
           (player) => player.id === target.seatId && player.status === 'active',
         )
       )
@@ -487,7 +590,7 @@ export class GameRuntime {
         this.#controlEvents.push(event);
       }
     }
-    return { type: 'accepted', outcome: 'control', head: this.read().head, duplicate: false };
+    return { type: 'accepted', outcome: 'control', head: this.#view().head, duplicate: false };
   }
 
   #finishReplacement(
@@ -523,20 +626,51 @@ export class GameRuntime {
     });
   }
 
+  /** Trusted host hook; does not itself create the next match. */
+  closeForNextMatch(): Promise<boolean> {
+    return this.#enqueue(() => {
+      if (this.#closed || this.#view().state?.phase.type !== 'finished') return false;
+      this.#options.history.closeRollback();
+      return true;
+    });
+  }
+
   dispose(): Promise<void> {
     return this.#enqueue(() => {
       this.#closed = true;
       this.#cancelTasks();
-    });
+    }, false);
   }
 
-  #enqueue<T>(job: () => T | Promise<T>): Promise<T> {
-    const result = this.#tail.then(job);
+  #enqueue<T>(job: () => T | Promise<T>, persist = true): Promise<T> {
+    const result = this.#tail.then(async () => {
+      if (persist && this.#fault !== null)
+        throw new Error('Runtime is faulted', { cause: this.#fault });
+      try {
+        const value = await job();
+        if (persist) await this.#publish();
+        if (this.#schedulePending) {
+          this.#schedulePending = false;
+          this.#armSchedule();
+        }
+        return value;
+      } catch (error) {
+        this.#fault = error;
+        this.#cancelTasks();
+        throw error;
+      }
+    });
     this.#tail = result.then(
       () => undefined,
       () => undefined,
     );
     return result;
+  }
+
+  async #publish(): Promise<void> {
+    const view = this.#view();
+    if (this.#options.commit) await this.#options.commit(this.#capture());
+    this.#published = view;
   }
 
   #commit(command: GameCommand, nowMs: number): RuntimeResult {
@@ -561,6 +695,10 @@ export class GameRuntime {
   }
 
   #reschedule() {
+    this.#schedulePending = true;
+  }
+
+  #armSchedule() {
     this.#cancelTasks();
     if (this.#closed || this.#fault !== null) return;
     const { state, head } = this.#options.history.read();
@@ -604,20 +742,22 @@ export class GameRuntime {
     const generation = this.#generation;
     this.#cancel.push(
       this.#options.clock.scheduleAt(deadlineMs, () =>
-        this.#enqueue(() => {
+        this.#enqueue(async () => {
           if (this.#closed || generation !== this.#generation) return;
           const current = this.#options.history.read().head;
           if (current.branchId !== head.branchId || current.version !== head.version) {
             this.#ensureRoster();
             this.#reconcile();
             this.#reschedule();
+            await this.#publish();
             return;
           }
           task();
           this.#ensureRoster();
           this.#reconcile();
           this.#reschedule();
-        }).catch((error) => {
+          await this.#publish();
+        }, false).catch((error) => {
           this.#fault = error;
           this.#cancelTasks();
         }),

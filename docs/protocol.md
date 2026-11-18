@@ -1,6 +1,6 @@
 # External protocol — Stage 8.4
 
-This is a transport-independent contract/validation library, **not a running HTTP/Socket.IO server**. Engine/runtime commands, persistence records and projection inputs remain trusted server interfaces. A decoded intent is neither authenticated nor an accepted game action.
+This is a transport-independent contract/validation library, **not itself an HTTP/Socket.IO server**. Stages 8.8–8.9's separate `PenkyTransport` consumes `resync` and a bounded gameplay subset with safe state/error/command-ack envelopes; see `transport.md`. Claim submission, rollback, chat/start/history and live publication remain unimplemented transport operations. Engine/runtime commands, persistence records and projection inputs remain trusted server interfaces. A decoded intent is neither authenticated nor an accepted game action.
 
 ## Incoming messages
 
@@ -43,6 +43,16 @@ All keys are exact, own data properties; nested extra keys, accessors, inherited
 Procedure replies return the exact visible `timer.id` as `procedureId`; withdrawal requests use the visible claim ID. The decoder never silently retargets a stale procedure. Rollback `branch` is a positive **display ordinal**, not a runtime branch ID; `beforeActionVersion` selects a completed action to roll back before, must be positive and cannot exceed the displayed expected version. A false warning acknowledgment is well-shaped input but does not authorize rollback.
 
 Evidence is one of `{ type: 'spoken', key }`, `{ type: 'chat', messageId }`, `{ type: 'action', commandId }`. Action references can name opaque IDs from authorized fresh action views; this does not add a generic player history or guarantee reference availability. Neither evidence authorship/provenance nor current scope is established by decoding. Client `scope`, `scopeNumber`, incident keys and author fields are forbidden. The later queued resolver must establish original author/actor, accused consistency, lobby/game, original scope and active-branch provenance from server-owned history. Spoken episode identity retains the existing explicit-key/social rules.
+
+### Initial resync transport — Stage 8.8
+
+`PenkyTransport` accepts exactly one protocol object on `client-message` and emits existing state/error envelopes on `server-message`. It reauthenticates cookie membership, checks actual current-match participation, and projects a fresh baseline synchronously with emission after final credential validation. No pending authentication can replay an expired reveal. Writer/socket epochs and per-socket sequences are allocated for baselines only, not reliable live/action publication. No current match yields `unavailable`; nonparticipant membership yields `unauthorized`, never implicit spectator access. Deferred well-shaped intents yield `unavailable` without gameplay dispatch. Stage 8.9 adds the bounded routing below; the pure decoder/envelopes remain unchanged. See `transport.md` for TLS/origin/limits/cancellation and real network coverage.
+
+### Authenticated gameplay subset — Stage 8.9
+
+After resync establishes a socket's lobby, `PenkyTransport` accepts draw/play/take/open, penalty responses, vote/withdrawal responses and bot-replacement controls (ten explicit intent types). Server membership supplies the actor, `absentSeatId` is only a target, and card/procedure/claim references remain exact. Claim submission (even spoken), rollback, chat/start and history stay disabled. No client identity/controller/configuration field or ordinary-play version/turn gate is introduced.
+
+An approved optional runtime admission guard checks fresh credentials and current socket/roster/human control inside the queue before receipt lookup. Headless denial is `unauthorized`; infrastructure failure is fixed `unavailable`, without faulting the runtime. Wrong-game intent routing is a headless `wrong-game`; authorized old branches/stale procedures preserve existing command rejection codes. Accepted IDs keep the existing per-runtime namespace: changed/cross-seat payload collisions reject; duplicates retain their original head and never become current-state cursors. Acknowledgments come only from committed dispatch and expose no private observations. Live/action publication and full external claim/admin flows remain deferred.
 
 ### Technical bounds
 

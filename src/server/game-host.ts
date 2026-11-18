@@ -74,11 +74,15 @@ export class PostgresGameHost {
    * Returned handle belongs to exactly this connection; repeated detach is safe.
    * Lobby-only members are tracked but do not join an existing game's roster.
    */
-  attach(binding: GuestMembership): Promise<() => Promise<void>> {
+  attach(binding: GuestMembership, signal?: AbortSignal): Promise<() => Promise<void>> {
     const connection: Connection = { lobbyId: binding.lobbyId, seatId: binding.seatId };
     const expected = binding.currentGameId;
     return this.#enqueue(async () => {
+      // Cancellation is checked inside admission, not only by a transport after
+      // awaiting its detach handle. Already-admitted atomic commits still drain.
+      signal?.throwIfAborted();
       const entry = await this.#current(connection.lobbyId, expected);
+      signal?.throwIfAborted();
       this.#connections.add(connection);
       try {
         if (entry) await this.#presence(entry);

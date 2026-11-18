@@ -117,7 +117,26 @@ export type ControlEvent = Readonly<{ commandId: CommandId; atMs: number }> &
     | Readonly<{ type: 'runtime-restored'; capturedAtMs: number }>
     | Readonly<{ type: 'rollback-completed'; rollback: RollbackAudit }>
   );
-export type DispatchOptions = Readonly<{ branchId?: BranchId; controller?: 'human' | 'bot' }>;
+/** Technical admission denial, not an engine rejection or runtime fault.
+ * No game head, private guard error or authorization context is exposed.
+ */
+export class RuntimeAdmissionError extends Error {
+  readonly code: 'unauthorized' | 'unavailable';
+  constructor(code: 'unauthorized' | 'unavailable' = 'unauthorized') {
+    super('Runtime admission denied');
+    this.name = 'RuntimeAdmissionError';
+    this.code = code;
+  }
+}
+export type DispatchOptions = Readonly<{
+  branchId?: BranchId;
+  controller?: 'human' | 'bot';
+  /** Trusted, bounded, non-reentrant authorization at queue admission, before
+   * receipts/rules. Receives a detached snapshot; only true permits dispatch.
+   * False/throw/rejection changes no state/receipts/storage/scheduling.
+   */
+  admit?: (snapshot: RuntimeSnapshot) => boolean | Promise<boolean>;
+}>;
 export type SeatPresence = Readonly<{
   seatId: SeatId;
   connected: boolean;
@@ -390,79 +409,98 @@ export class GameRuntime {
   dispatch(command: RuntimeCommand, options: DispatchOptions = {}): Promise<RuntimeResult> {
     const input = structuredClone(command);
     const origin = { ...options };
-    return this.#enqueue(() => {
-      const snapshot = this.#view();
-      const reject = (
-        code: Extract<RuntimeResult, { type: 'rejected' }>['code'],
-      ): RuntimeResult => ({ type: 'rejected', code, head: snapshot.head });
-      if (this.#closed) return reject('closed');
-      if (origin.branchId !== undefined && origin.branchId !== snapshot.head.branchId)
-        return reject('wrong-branch');
-      const connection = input.type === 'disconnect' || input.type === 'reconnect';
-      if (
-        this.#requiresBranch &&
-        !connection &&
-        input.type !== 'rollback' &&
-        origin.branchId === undefined
-      )
-        return reject('wrong-branch');
-      const controller = origin.controller ?? 'human';
-      const cached = this.#receipts.get(input.id);
-      if (
-        cached &&
-        cached.result.head.branchId !== snapshot.head.branchId &&
-        !connection &&
-        input.type !== 'rollback'
-      )
-        return reject('wrong-branch');
-      if (cached)
-        return isDeepStrictEqual(cached.command, input) && cached.controller === controller
-          ? { ...structuredClone(cached.result), duplicate: true }
-          : reject('command-id-reused');
-      if (
-        this.#options.history.read().actions.some((action) => action.commandId === input.id) ||
-        this.#controlEvents.some((event) => event.commandId === input.id)
-      )
-        return reject('command-id-reused');
-      let result: RuntimeResult;
-      if (input.type === 'rollback') {
-        if (controller !== 'human') return reject('wrong-controller');
-        const presence = this.#connections.find((item) => item.seatId === input.actorId);
-        if (!presence?.connected) return reject('not-connected');
-        if (presence.controller !== 'human') return reject('wrong-controller');
-        result = this.#rollback(input);
-      } else if (input.type === 'propose-bot' || input.type === 'replacement-vote') {
-        if (controller !== 'human') return reject('wrong-controller');
-        result = this.#replacementCommand(input);
-      } else if (input.type === 'disconnect' || input.type === 'reconnect') {
-        result = this.#connection(input);
-      } else {
+    return this.#enqueue(
+      () => {
+        const snapshot = this.#view();
+        const reject = (
+          code: Extract<RuntimeResult, { type: 'rejected' }>['code'],
+        ): RuntimeResult => ({ type: 'rejected', code, head: snapshot.head });
+        if (this.#closed) return reject('closed');
+        if (origin.branchId !== undefined && origin.branchId !== snapshot.head.branchId)
+          return reject('wrong-branch');
+        const connection = input.type === 'disconnect' || input.type === 'reconnect';
         if (
-          input.type === 'suspend-clock' ||
-          input.type === 'resume-clock' ||
-          input.type.startsWith('expire-')
+          this.#requiresBranch &&
+          !connection &&
+          input.type !== 'rollback' &&
+          origin.branchId === undefined
         )
-          return reject('system-command');
-        if (snapshot.paused) return reject('game-suspended');
-        if ('actorId' in input) {
+          return reject('wrong-branch');
+        const controller = origin.controller ?? 'human';
+        const cached = this.#receipts.get(input.id);
+        if (
+          cached &&
+          cached.result.head.branchId !== snapshot.head.branchId &&
+          !connection &&
+          input.type !== 'rollback'
+        )
+          return reject('wrong-branch');
+        if (cached)
+          return isDeepStrictEqual(cached.command, input) && cached.controller === controller
+            ? { ...structuredClone(cached.result), duplicate: true }
+            : reject('command-id-reused');
+        if (
+          this.#options.history.read().actions.some((action) => action.commandId === input.id) ||
+          this.#controlEvents.some((event) => event.commandId === input.id)
+        )
+          return reject('command-id-reused');
+        let result: RuntimeResult;
+        if (input.type === 'rollback') {
+          if (controller !== 'human') return reject('wrong-controller');
           const presence = this.#connections.find((item) => item.seatId === input.actorId);
-          if (!presence) return reject('unknown-seat');
-          if (presence.controller !== controller) return reject('wrong-controller');
-          if (controller === 'human' && !presence.connected) return reject('not-connected');
+          if (!presence?.connected) return reject('not-connected');
+          if (presence.controller !== 'human') return reject('wrong-controller');
+          result = this.#rollback(input);
+        } else if (input.type === 'propose-bot' || input.type === 'replacement-vote') {
+          if (controller !== 'human') return reject('wrong-controller');
+          result = this.#replacementCommand(input);
+        } else if (input.type === 'disconnect' || input.type === 'reconnect') {
+          result = this.#connection(input);
+        } else {
+          if (
+            input.type === 'suspend-clock' ||
+            input.type === 'resume-clock' ||
+            input.type.startsWith('expire-')
+          )
+            return reject('system-command');
+          if (snapshot.paused) return reject('game-suspended');
+          if ('actorId' in input) {
+            const presence = this.#connections.find((item) => item.seatId === input.actorId);
+            if (!presence) return reject('unknown-seat');
+            if (presence.controller !== controller) return reject('wrong-controller');
+            if (controller === 'human' && !presence.connected) return reject('not-connected');
+          }
+          result = this.#commit(input, this.#options.clock.now());
+          this.#ensureRoster();
+          this.#reconcile();
         }
-        result = this.#commit(input, this.#options.clock.now());
-        this.#ensureRoster();
-        this.#reconcile();
+        this.#reschedule();
+        if (result.type === 'accepted') {
+          result = { ...result, head: this.#view().head };
+          this.#receipts.set(input.id, structuredClone({ command: input, controller, result }));
+        }
+        return structuredClone(result);
+      },
+      true,
+      true,
+      origin.admit
+        ? async () => {
+            let permitted: boolean;
+            try {
+              permitted = (await origin.admit!(this.read())) === true;
+            } catch {
+              // Infrastructure/guard failure is not proof of invalid identity.
+              // Sanitize it without entering the mutation/fault path.
+              throw new RuntimeAdmissionError('unavailable');
+            }
+            if (!permitted) throw new RuntimeAdmissionError();
+          }
+        : undefined,
+    ).catch((error) => {
+      if (!(error instanceof RuntimeAdmissionError)) {
+        this.#fault = error;
+        this.#cancelTasks();
       }
-      this.#reschedule();
-      if (result.type === 'accepted') {
-        result = { ...result, head: this.#view().head };
-        this.#receipts.set(input.id, structuredClone({ command: input, controller, result }));
-      }
-      return structuredClone(result);
-    }).catch((error) => {
-      this.#fault = error;
-      this.#cancelTasks();
       throw error;
     });
   }
@@ -767,10 +805,17 @@ export class GameRuntime {
     }, false);
   }
 
-  #enqueue<T>(job: () => T | Promise<T>, persist = true, faultOnFailure = true): Promise<T> {
+  #enqueue<T>(
+    job: () => T | Promise<T>,
+    persist = true,
+    faultOnFailure = true,
+    admit?: () => Promise<void>,
+  ): Promise<T> {
     const result = this.#tail.then(async () => {
       if (persist && this.#fault !== null)
         throw new Error('Runtime is faulted', { cause: this.#fault });
+      // Outside the mutation/fault/publication path: denial is a technical gate.
+      if (admit) await admit();
       this.#pendingActions = [];
       this.#pendingPublication = null;
       this.#pendingClosure = false;

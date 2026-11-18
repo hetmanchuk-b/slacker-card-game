@@ -87,6 +87,26 @@ export class PostgresGuestAccess {
     }
   }
 
+  /** Non-refreshing credential check for live-connection expiry/revocation.
+   * It grants no persistent authorization and never keeps an idle guest alive.
+   */
+  async inspect(token: unknown, nowMs: number): Promise<GuestSession | null> {
+    time(nowMs);
+    const hash = guestTokenHash(token);
+    if (hash === null) return null;
+    try {
+      const result = await this.#pool.query<{ session_id: SessionId; expires_at_ms: string }>(
+        `SELECT session_id,expires_at_ms::text FROM penky_guest_sessions
+         WHERE token_hash=$1 AND revoked_at_ms IS NULL AND created_at_ms <= $2 AND expires_at_ms > $2`,
+        [hash, nowMs],
+      );
+      const row = result.rows[0];
+      return row ? { sessionId: row.session_id, expiresAtMs: Number(row.expires_at_ms) } : null;
+    } catch {
+      throw new GuestAccessError('storage-unavailable');
+    }
+  }
+
   async revoke(token: unknown, nowMs: number): Promise<boolean> {
     time(nowMs);
     const hash = guestTokenHash(token);

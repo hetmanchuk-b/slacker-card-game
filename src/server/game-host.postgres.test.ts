@@ -147,6 +147,43 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   );
 
   await t.test(
+    'an aborted attachment queued behind other host work never enters the connection ledger',
+    async (t) => {
+      const context = await setup(t);
+      const binding = await access.membership(context.owner.token, context.member.lobbyId, 1000);
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const waiting = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const blocked = context.host.withCurrent(
+        context.member.lobbyId,
+        context.request.gameId,
+        async () => {
+          entered();
+          await gate;
+        },
+      );
+      await waiting;
+      const controller = new AbortController();
+      const attachment = context.host.attach(binding, controller.signal);
+      controller.abort();
+      release();
+      await blocked;
+      await assert.rejects(attachment, { name: 'AbortError' });
+      await context.leaveOwner();
+      assert.equal(
+        (await context.host.read(context.member.lobbyId))!.snapshot.paused,
+        true,
+        'no ghost connection remains after the original departs',
+      );
+    },
+  );
+
+  await t.test(
     'presence counts connections, ignores duplicate detach and reconnects only on transitions',
     async (t) => {
       const context = await setup(t);

@@ -38,7 +38,9 @@ The eighth engine/runtime increment completes Stage 7 for the trusted server/sto
 
 **Durable local game host implemented:** one leased runtime per game, current-lobby routing, consolidated seat connections, durable fault recovery and atomic successor adoption. Fourteen real PostgreSQL scenarios cover ownership, lifecycle and fault paths. This is a private server library, not network authentication or delivery.
 
-**Not playable online yet:** actual HTTP/Socket.IO authentication/routing, committed network history/update delivery, rollback selector resolution, bot decisions, and the browser/Three.js client are still planned. Scheduling, persistence and presence rules are server-side libraries, not a running network application. Chat/action evidence references remain trusted internal inputs until transport adapters resolve them against server history.
+**Authenticated transport slices implemented:** `PenkyTransport` provides HTTPS guest sessions, authenticated presence/private resync, and ten explicitly bound card/procedure/replacement intents with durable, allowlisted command acknowledgments. Thirty-three real TLS/PostgreSQL scenarios cover 2/4/8-seat card interactions, punishable attempts, retries/branches, queue cancellation, credential/controller checks, privacy, limits, delayed reveals and recovery. Claim submission, admin/chat/start/history routing and live/action publication remain disabled.
+
+**Not a complete online game yet:** lobby creation/join endpoints, canonical chat/start retries, claim-evidence/rollback-selector resolution, committed live/action/history delivery, bot decisions, and the browser/Three.js client are still planned. Commands currently return acknowledgments, not fresh private peek observations or automatic state updates; clients must request resync. A TLS transport component exists, but there is no application CLI or browser application. Chat/action evidence references remain trusted internal inputs until transport adapters resolve them against server history.
 
 **New rules, not implemented yet:** revision 1.4 adds a post-game deck-strike minigame and makes remaining participants losers when repetition ends a match. These approved changes are tracked in Stage 11a; current result contracts still follow revision 1.3.
 
@@ -65,7 +67,7 @@ npm run format           # Format source and configuration files
 npm run build            # JavaScript, declarations and source maps in dist/
 ```
 
-The build contains server-side libraries and a migration CLI, not a running web application. Non-database tests need no PostgreSQL. For real persistence tests, see [PostgreSQL setup](docs/postgres.md):
+The build contains server-side libraries, an instantiable TLS transport component and a migration CLI, not a browser application or game-server CLI. Non-database tests need no PostgreSQL. For real persistence tests, see [PostgreSQL setup](docs/postgres.md):
 
 ```sh
 npm run db:test:up
@@ -86,6 +88,7 @@ The integration suite injects database faults; never point it at a shared databa
 - [Guest credentials, cookies and durable membership](docs/guest-access.md)
 - [Runtime interface and recovery policy](docs/runtime.md)
 - [Durable local game host](docs/game-host.md)
+- [Authenticated HTTPS / Socket.IO resync](docs/transport.md)
 - [Branch history and rollback](docs/history.md)
 - [PostgreSQL setup, storage and recovery](docs/postgres.md)
 - [Lobby chat and atomic match transitions](docs/lobby-persistence.md)
@@ -100,4 +103,4 @@ The integration suite injects database faults; never point it at a shared databa
 
 Time and bounded randomness are injected into command decisions. Their outcomes are captured in events for deterministic replay. Card IDs must be opaque and independent of card faces.
 
-Raw engine state, events, and history snapshots contain private information. They are not network payloads and must not be exposed to players or bots. `projectGame`, `projectLiveGame` and `projectAction` are allowlisted server-side projection APIs, not network endpoints or bot memory. Their caller authenticates viewers, supplies committed snapshots/action pairs and trusted time, and suppresses duplicate action delivery. `projectOwnerHistory` separately projects a trusted committed history capture into metadata-only owner timelines. Its display selectors must be resolved against fresh server history; they do not authorize rollback. `decodeClientMessage` validates untrusted shapes without authenticating or constructing trusted commands. `PostgresGuestAccess` provides server-private credential/membership gates, not network endpoints or permanent authorization capabilities. `GameRuntime.subscribe` supplies a private committed publication seam; consumers must authorize/project its data and order their own network delivery, not serialize raw notices. `PostgresGameHost` owns local writer lifecycles and aggregates trusted connection bindings; transport authentication/routing, game-participation checks and evidence/selector resolution must still be integrated before a browser client is connected.
+Raw engine state, events, and history snapshots contain private information. They are not network payloads and must not be exposed to players or bots. `projectGame`, `projectLiveGame` and `projectAction` are allowlisted server-side projection APIs, not network endpoints or bot memory. Their caller authenticates viewers, supplies committed snapshots/action pairs and trusted time, and suppresses duplicate action delivery. `projectOwnerHistory` separately projects a trusted committed history capture into metadata-only owner timelines. Its display selectors must be resolved against fresh server history; they do not authorize rollback. `decodeClientMessage` validates untrusted shapes without authenticating or constructing trusted commands. `PostgresGuestAccess` provides server-private credential/membership gates, not network endpoints or permanent authorization capabilities. `GameRuntime.subscribe` supplies a private committed publication seam; consumers must authorize/project its data and order their own network delivery, not serialize raw notices. `PostgresGameHost` owns local writer lifecycles and aggregates trusted connection bindings; `PenkyTransport` binds cookie-authenticated membership and match participation for resync and its explicit gameplay subset. Its approved runtime admission guard rechecks credential/liveness/controller permissions inside the queue before receipt lookup. Evidence/selector resolution and live projected publication must still be integrated before a complete browser game is connected.

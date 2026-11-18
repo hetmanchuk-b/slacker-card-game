@@ -20,6 +20,14 @@ The optional awaited `commit(checkpoint)` adapter atomically stores staged histo
 
 Use `systemInputs(onError)` for a monotonic process clock, cryptographic bounded randomness, and UUID command IDs. Tests use `FakeClock` instead. The host must keep exactly one runtime writer per game and dispose the old instance before creating its replacement. `PostgresGameHost` now owns this local writer lifecycle and consolidates trusted seat connections; see `game-host.md`. Socket adapters must authenticate/revalidate bindings before attaching and detach revoked/expired connections. They must not independently report per-socket disconnects to a shared seat.
 
+## Optional authenticated queue admission — Stage 8.9
+
+The operator approved additive `DispatchOptions.admit(snapshot): boolean | Promise<boolean>`. It runs inside the serialized runtime queue, **before receipt lookup, branch/rule processing or mutation**. Its detached snapshot is private server data. Only `true` admits the command; false produces a headless `RuntimeAdmissionError` with fixed code `unauthorized`. A thrown/rejected guard produces the same fixed exception with code `unavailable`, without retaining its diagnostic/cause. Infrastructure failure is not reported as invalid identity.
+
+Admission denial changes no actions, receipts, persistence, publications or scheduling and does not fault the runtime. A caller can retry the original ID after successful authorization. Existing unguarded internal callers retain their behavior; the guard is not stored in receipts, checkpoints or frames. Once admitted, an atomic decision/commit drains even if its caller subsequently leaves; transport suppresses delivery to invalid peers rather than undoing a committed action.
+
+Guards must be trusted, bounded and non-reentrant: do not call/await runtime or host queue methods, mutate the snapshot as an authority mechanism, or await network delivery. The transport uses non-refreshing credential SQL reads with deployment DB timeouts, followed by current socket/expiry/roster/human-controller checks. This prevents queued disconnections/revocations and cached receipts from bypassing current transport authorization. The runtime does not import credentials, sockets or SQL; engine rules remain unchanged. `src/runtime/admission.test.ts` covers denied admission, queued/cached receipt checks, detached inputs, sanitized sync/async errors, preserved deadlines and draining admitted commits.
+
 ## Committed publication subscriptions — Stage 8.6
 
 Subscribe only after obtaining a **live** runtime from `create`, `restore` or a successfully completed `PostgresLobby.startMatch`. No callback is installed through construction options: private successor preparation must never notify before its atomic database transition. Subscriptions do not modify checkpoints, frames, runtime options or existing result/snapshot contracts.

@@ -4,7 +4,7 @@ A TypeScript multiplayer card game with a planned Three.js table. Agreed rule-br
 
 ## Status
 
-The seventh engine/runtime increment is implemented; Stage 7 is partially complete:
+The eighth engine/runtime increment completes Stage 7 for the trusted server/storage interface:
 
 - 36-card deck and suit/rank comparison, including spade isolation and six-over-ace.
 - Deterministic game creation and event replay.
@@ -27,9 +27,10 @@ The seventh engine/runtime increment is implemented; Stage 7 is partially comple
 - PostgreSQL migrations and transactional frames persisting history, snapshots, receipts and runtime metadata before state/acknowledgment publication.
 - Single-writer leases, optimistic revisions, and verified recovery in a fresh Node process; failed storage commits fault the runtime rather than accept unpersisted actions.
 - Integrity-checked materialized snapshots with tail replay, verified against independent full archive replay.
-- Old-branch command/deadline invalidation and a serialized next-match rollback-window guard (actual lobby integration is still pending).
+- Old-branch command/deadline invalidation and atomic actual-next-match handoff, including rollback closure, successor state, lobby pointer and retry receipt.
+- Retained lobby chat with immutable authors, exact text and server-derived game/branch/scope context; rollback never deletes or relabels messages.
 
-**Not playable online yet:** lobby-scoped chat retention, actual next-match lifecycle integration, authenticated Socket.IO transport, bot decisions, and the browser/Three.js client are still planned. Scheduling, persistence and presence rules are server-side libraries, not a running network application. Chat/action evidence references remain trusted internal inputs until transport adapters resolve them against server history.
+**Not playable online yet:** private player/history projections, authenticated Socket.IO transport, bot decisions, and the browser/Three.js client are still planned. Scheduling, persistence and presence rules are server-side libraries, not a running network application. Chat/action evidence references remain trusted internal inputs until transport adapters resolve them against server history.
 
 **New rules, not implemented yet:** revision 1.4 adds a post-game deck-strike minigame and makes remaining participants losers when repetition ends a match. These approved changes are tracked in Stage 11a; current result contracts still follow revision 1.3.
 
@@ -37,7 +38,7 @@ The seventh engine/runtime increment is implemented; Stage 7 is partially comple
 
 ## Requirements
 
-- Node.js 24 or newer (verified on 24.22.1 and 26.13.1; CI covers Node 24/26)
+- Node.js 24 or newer
 - npm
 
 ```sh
@@ -76,6 +77,7 @@ The integration suite injects database faults; never point it at a shared databa
 - [Runtime interface and recovery policy](docs/runtime.md)
 - [Branch history and rollback](docs/history.md)
 - [PostgreSQL setup, storage and recovery](docs/postgres.md)
+- [Lobby chat and atomic match transitions](docs/lobby-persistence.md)
 - [Rule-to-test coverage](docs/rule-test-matrix.md)
 - [Open implementation decisions](docs/open-decisions.md)
 

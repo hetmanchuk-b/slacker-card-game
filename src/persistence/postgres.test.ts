@@ -451,7 +451,8 @@ test('PostgreSQL durable runtime', { skip: !url }, async (t) => {
       const timerId = runtime.read().state!.procedure!.timer.id;
       // System-boundary fault injection in this dedicated test database only.
       await pool.query(
-        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid()",
+        'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND application_name = $1 AND pid <> pg_backend_pid()',
+        [`penky-game:${gameId}`],
       );
       await assert.rejects(
         runtime.dispatch({

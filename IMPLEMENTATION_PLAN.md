@@ -18,7 +18,7 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - `src/game/cards.test.ts` covers deck uniqueness and rank/suit combinations.
 - The complete game engine, server, client, durable persistence, and bots are not implemented.
 
-### Progress — increment 7
+### Progress — increment 8
 
 **New approved direction, documentation only:** rules revision 1.4 adds a post-game little-finger/deck minigame and treats all participants remaining at a repetition draw as losers, preserving earlier winners. The current implementation still follows revision 1.3 for this outcome. No minigame or result changes have been implemented. Resolve §16.5 before implementing the affected behavior; planned work is tracked in Stage 11a below.
 
@@ -27,16 +27,16 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - **Stage 3: complete for the engine scope.** Dealing-time claims vote immediately, defer punishments correctly, and drain before the first lead. The reveal timer pauses and resumes across queued claims.
 - **Stage 4: complete for the agreed engine scope.** Rounds, automatic pickups, stumps, exits, and settled-action repetition work. D001 was approved and resolved: both in-round and boundary cycles draw at the third occurrence.
 - **Stage 5: complete for the trusted engine interface.** Scoped claims, FIFO voting, false-claim punishments, timeout abstentions, unanimous withdrawal, deferred-punishment cancellation, and episode-key deduplication are implemented. Binding chat/action references to authoritative evidence remains transport work in Stage 8.
-- **Stage 6: complete for the runtime interface.** Serialized dispatch, automatic deadlines, nested timer suspension, multiple absences, replacement voting, controller handover, idempotent receipts, and checkpoint recovery are implemented. Bot decisions remain Stage 10; durable checkpoint storage remains Stage 7.
-- **Stage 7: in progress.** PostgreSQL migrations and transactional versioned frames now persist the operation archive, state snapshot, receipts, branch/audit metadata, controllers and timers. Runtime publication/acknowledgment waits for the complete commit; writer leases and optimistic revisions prevent conflicting writes. Real PostgreSQL tests include separate-process recovery and injected failures. Snapshot-assisted recovery now loads validated materialized branch/index caches and replays only the tail; an independent full-replay mode verifies equivalence. Lobby-scoped chat and actual next-match/lobby transition integration remain pending.
+- **Stage 6: complete for the runtime interface.** Serialized dispatch, automatic deadlines, nested timer suspension, multiple absences, replacement voting, controller handover, idempotent receipts, and checkpoint recovery are implemented. Bot decisions remain Stage 10; durable checkpoint storage is implemented in Stage 7.
+- **Stage 7: complete for the trusted server/storage interface.** PostgreSQL persists action archives, snapshots, receipts, branch/audit metadata, controllers and timers before publication. Materialized snapshot recovery agrees with full replay. Lobby chat retains immutable author/context metadata across rollback and matches. Actual match handoff validates the observed result head and commits the old rollback closure, new initial frame, lobby pointer and start receipt atomically. Fault/race tests and generated rollback checkpoints cover nested procedures and all supported seat counts. Browser/session authentication, readiness UI and future minigame gating remain their planned later stages.
 - **Stages 8–12 (including 11a): not started.** No HTTP/Socket.IO server or browser application is claimed to exist.
-- Verification: `npm run check` passes on **Node 24.22.1 and 26.13.1**, with **172 passing checks when PostgreSQL is enabled** (158 non-database tests plus the integration suite and its parent test). Normal checks without the database explicitly skip the PostgreSQL suite. CI provisions PostgreSQL 18 on Linux for both Node versions. `npm audit --omit=dev` is clean; the pre-existing dev-toolchain advisory is documented in `docs/postgres.md`. CI is configured for Node 24/26 on Windows/Linux.
+- Verification: `npm run check` passes with **206 passing checks when PostgreSQL is enabled** (180 non-database tests plus the two integration suites and their parent tests). Normal checks without the database explicitly skip both PostgreSQL suites. CI provisions PostgreSQL 18 on Linux and runs ordinary checks on Windows/Linux. `npm audit --omit=dev` is clean; the pre-existing dev-toolchain advisory is documented in `docs/postgres.md`.
 - Full deterministic engine matches for every seat count from 2 through 8 finish and replay identically in `src/game/match.test.ts`. The formerly looping 5-seat match now draws. This is engine integration coverage, not browser/online coverage.
 - Red/green checks cover the engine behaviors plus runtime scheduling, logical clock suspension, presence reconciliation, bot-replacement control, checkpoint restoration, recovery-metadata validation, and native system adapters.
 - Increment 1 was committed and pushed as `17d2c96` before increment 2 work began.
-- See `docs/architecture.md`, `docs/history.md`, `docs/postgres.md`, `docs/rule-test-matrix.md`, and `README.md` for current interfaces, scope, and commands.
+- See `docs/architecture.md`, `docs/history.md`, `docs/postgres.md`, `docs/lobby-persistence.md`, `docs/rule-test-matrix.md`, and `README.md` for current interfaces, scope, and commands.
 
-**Dependency clarification:** Stage 3 originally depended on the claim handlers assigned to Stage 5. That cross-stage integration is now implemented and tested with real procedures, not placeholder handlers. Engine milestone A and runtime Stage 6 are complete; milestone B still requires durable history and rollback in Stage 7.
+**Dependency clarification:** Stage 3 originally depended on the claim handlers assigned to Stage 5. That cross-stage integration is now implemented and tested with real procedures, not placeholder handlers. Milestones A (engine) and B (recoverable runtime/storage) are complete for the trusted server interfaces. Functional online play begins with Stage 8.
 
 ### Execution rules
 
@@ -200,11 +200,11 @@ docs/            # Rules, scenarios, architecture decisions, operations
 - [x] Keep live connections/controllers external to restored game state and recompute suspension after rollback.
 - [x] Retain abandoned futures as separately identified in-memory branches; exclude abandoned occurrences from the restored repetition ledger.
 - [x] Persist retained branches, rollback audit and command receipts durably; verify fresh-process recovery and duplicate delivery.
-- [ ] Persist lobby-scoped retained chat; chat storage is not implemented yet.
+- [x] Persist lobby-scoped retained chat with immutable authors, exact text, server-derived scope/head, idempotent IDs and pagination; retain it across rollback and matches.
 - [x] Invalidate old-branch gameplay deliveries and timer callbacks; cancel obsolete replacement votes.
-- [ ] Integrate the post-result rollback window with actual next-match creation. `closeForNextMatch()` is serialized and tested against concurrent rollback; durable lobby-transition integration is still required.
+- [x] Integrate actual next-match creation through `PostgresLobby.startMatch()` and queued runtime handoff. Old rollback closure, successor frame, lobby pointer and start receipt commit together; preparation/transaction failures preserve the last durable old state.
 - [x] Persist the administrative rollback audit and require acknowledgment that human knowledge cannot be undone; owner UI remains Stage 9.
-- [ ] Complete phase-by-phase/generated rollback coverage, including random dealing outcomes. Current tests cover creation/dealing, reveal, nested claim/withdrawal, penalty transfers, live pause restoration, completed matches and repetition results. PostgreSQL recovery verifies recorded random dealing outcomes without rerolling; rollback before random reinsertion also restores the original deck and removes the abandoned punishment.
+- [x] Complete generated rollback coverage: every pre-action point of dealing/procedure fixtures for 2/4/8 seats, plus deterministic sampled checkpoints of complete 2–8-seat matches. Compare full state, exits, rights, repetition, timers, retained branches and snapshot/full replay. Recorded random dealing and reinsertion rollback are covered separately.
 
 **Exit criteria:** scenarios 17–18 pass; restart and rollback recover equivalent authoritative states without deleting history, duplicating cards, or restoring obsolete sockets.
 
@@ -218,7 +218,7 @@ docs/            # Rules, scenarios, architecture decisions, operations
 - [ ] Redact raw events, snapshots, branch previews, error messages, and reconnect payloads, not just the main game view.
 - [ ] Implement Socket.IO rooms, acknowledgments, command IDs, runtime validation, and session-to-seat authorization.
 - [ ] Make retries idempotent and serialize play, claims, timeouts, rollback, and disconnect events per game.
-- [ ] Define stale-command handling: reject obsolete branch commands, but do not accidentally block a deliberate current out-of-turn attempt that must be punishable.
+- [ ] Define stale-command handling: reject wrong-game or obsolete-branch commands, but do not accidentally block a deliberate current out-of-turn attempt that must be punishable.
 - [ ] Send versioned state and support full authorized resynchronization after missed messages or refresh.
 - [ ] Keep local game development single-runtime; prevent simultaneous writers instead of introducing premature distributed execution.
 - [ ] Add rate limits and payload limits without changing agreed game punishments.

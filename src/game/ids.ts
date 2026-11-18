@@ -1,7 +1,17 @@
 declare const idKind: unique symbol;
 
 export type IdKind =
-  'game' | 'seat' | 'card' | 'command' | 'event' | 'claim' | 'procedure' | 'branch';
+  | 'game'
+  | 'seat'
+  | 'card'
+  | 'command'
+  | 'event'
+  | 'claim'
+  | 'procedure'
+  | 'branch'
+  | 'lobby'
+  | 'session'
+  | 'message';
 export type Id<Kind extends IdKind> = string & { readonly [idKind]: Kind };
 
 export type GameId = Id<'game'>;
@@ -12,6 +22,9 @@ export type EventId = Id<'event'>;
 export type ClaimId = Id<'claim'>;
 export type ProcedureId = Id<'procedure'>;
 export type BranchId = Id<'branch'>;
+export type LobbyId = Id<'lobby'>;
+export type SessionId = Id<'session'>;
+export type MessageId = Id<'message'>;
 
 /** Only brand validated identifiers at a trusted seam; this does not authenticate them. */
 export function id<Kind extends IdKind>(_kind: Kind, value: string): Id<Kind> {

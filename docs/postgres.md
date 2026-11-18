@@ -20,7 +20,7 @@ npm run test:postgres
 
 `npm test` runs the PostgreSQL suite only when `PENKY_TEST_DATABASE_URL` is set; otherwise that suite is explicitly skipped. `npm run test:postgres` fails if the variable is missing. With the variable set, `npm run check` includes all integration scenarios.
 
-**Use an isolated, disposable database ending in `_test`.** The suite performs DDL, injects an INSERT failure, corrupts its own frames/heads, and terminates client connections in that database. Never point it at a shared application database. CI provisions PostgreSQL 18 separately for Node 24 and 26 on Linux; ordinary Windows/Linux checks do not require Docker.
+**Use an isolated, disposable database ending in `_test`.** The suite performs DDL, injects an INSERT failure, corrupts its own frames/heads, and terminates its own writer connections in that database. Never point it at a shared application database. CI provisions PostgreSQL 18 on Linux; ordinary Windows/Linux checks do not require Docker.
 
 ## Migrations
 
@@ -32,11 +32,13 @@ DATABASE_URL=postgresql://postgres:penky-local-test@127.0.0.1:55432/penky_test n
 
 `migrate(pool)` uses one checked-out client and a transaction-scoped advisory lock. Applied SQL is recorded with a checksum; changing an applied migration is an error. The SQL lives in the root `migrations/` directory, which must accompany a deployed `dist/` build. Both the source CLI and emitted `dist/persistence/cli/migrate.js` resolve that same directory.
 
-The first migration creates:
+The migration runner and first migration create:
 
 - `penky_game_heads`: original branch, durable revision and active branch/version.
 - `penky_game_frames`: immutable-by-adapter, versioned JSONB frames containing the operation archive, active state snapshot and runtime checkpoint (receipts, controllers and control audit included).
 - `penky_schema_migrations`: applied migration checksums.
+
+`002_lobbies.sql` adds `penky_lobbies` (durable owner binding/current game), `penky_lobby_chat` (append-only original messages with context/sequence) and `penky_match_starts` (idempotent start receipts). Existing applied migration files remain unchanged.
 
 These are private storage records, not public projections. Checksums detect accidental corruption, not a malicious database administrator.
 
@@ -76,10 +78,10 @@ Versioned caches include an archive-prefix digest, a materialized-data digest an
 
 Every successful queue job currently stores a full self-contained frame, including the materialized cache. Frame compaction/retention and storage-volume profiling remain work before release; do not silently delete abandoned gameplay branches.
 
-Lobby-scoped chat retention, authenticated ownership binding, and an atomic actual-next-match/lobby transition are not implemented. Stage 8 must also validate user text against JSONB encoding limits (no NUL or unpaired Unicode surrogates) before it reaches the trusted runtime. The persisted `closeForNextMatch()` guard alone does not create a new match. Stage 11a must additionally enforce minigame completion.
+Lobby chat and atomic actual-next-match transitions are implemented; see `lobby-persistence.md`. Persisted owner session IDs are trusted identifiers, not proof of browser authentication. Stage 8 still owns token validation, membership/seat binding, safe projections and incoming game/branch checks. Chat storage rejects NUL/unpaired Unicode without changing verbatim valid text; Stage 8 must validate all other user text against JSONB limits as well. Stage 11a must add minigame completion to the transition gate before that feature ships.
 
 ## Verification and dependency audit
 
-Integration coverage uses real PostgreSQL: fresh-session and separate-process recovery, immutable revision reads, writer exclusion, rollback branches/audit, exact timers, deadline/controller recovery, finished-match closure, recorded random outcomes, INSERT failure atomicity, connection loss, revision conflicts and corruption rejection.
+Integration coverage uses real PostgreSQL: fresh-session and separate-process recovery, immutable revision reads, writer exclusion, rollback branches/audit, exact timers, deadline/controller recovery, finished-match closure, recorded random outcomes, INSERT failure atomicity, connection loss, revision conflicts and corruption rejection. A second suite covers retained lobby chat, original author/scope metadata, concurrent retries, actual match handoff/restart, failed preparation/INSERT and rollback/start races. Writer-connection fault injection is tagged per game so the suites can run concurrently.
 
 `npm audit --omit=dev` reports no runtime dependency vulnerabilities at verification time. Full `npm audit` currently reports a pre-existing development-toolchain advisory through `picomatch`/`tinyglobby`/`typescript-eslint`; its suggested forced downgrade would change the established lint toolchain. No forced dependency downgrade was applied. Review this separately before release; it does not justify exposing this unfinished application to untrusted traffic.

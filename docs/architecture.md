@@ -29,7 +29,7 @@ Live socket/presence information is not part of rollbackable game state. Recompu
 
 ## Storage decision
 
-Stage 7 now uses PostgreSQL with `pg` and explicit checksum-checked SQL migrations. No ORM is required. Versioned private frames store the operation archive (action batches, ancestry, ownership and rollback audit), active snapshot and runtime checkpoint, including accepted command receipts. An optimistic head update and frame insert commit together on one leased connection. `History` is the synchronous private staging interface; the runtime's awaited commit adapter is the durability seam. Public state/acknowledgment publication waits for it. Real PostgreSQL tests cover faults and separate-process recovery. Recovery can load a validated materialized history cache and replay its operation tail; independent full replay remains available for auditing. Lobby-scoped chat remains pending. See `docs/postgres.md`.
+Stage 7 now uses PostgreSQL with `pg` and explicit checksum-checked SQL migrations. No ORM is required. Versioned private frames store the operation archive (action batches, ancestry, ownership and rollback audit), active snapshot and runtime checkpoint, including accepted command receipts. An optimistic head update and frame insert commit together on one leased connection. `History` is the synchronous private staging interface; the runtime's awaited commit adapter is the durability seam. Public state/acknowledgment publication waits for it. Real PostgreSQL tests cover faults and separate-process recovery. Recovery can load a validated materialized history cache and replay its operation tail; independent full replay remains available for auditing. Lobby chat is separately retained with original author/scope/head metadata. Actual next-match handoff atomically closes old rollback and commits the successor, lobby pointer and start receipt. See `docs/postgres.md` and `docs/lobby-persistence.md`.
 
 ## Guest sessions and ownership
 
@@ -42,7 +42,7 @@ Stage 7 now uses PostgreSQL with `pg` and explicit checksum-checked SQL migratio
 
 ## Current implementation scope
 
-The engine and serialized runtime are executable: scheduling, connection suspension, replacement control, and checkpoint recovery now drive the existing game/claim procedures. In-memory branch history and trusted owner rollback are also executable, including pre-action timer rebasing and branch invalidation. PostgreSQL persistence and durable rollback/recovery are executable. Retained lobby chat, authenticated transport, bot decisions, and browser rendering remain later work. See `docs/history.md`. No running multiplayer server or browser application is claimed.
+The engine and serialized runtime are executable: scheduling, connection suspension, replacement control, and checkpoint recovery now drive the existing game/claim procedures. In-memory branch history and trusted owner rollback are also executable, including pre-action timer rebasing and branch invalidation. PostgreSQL persistence and durable rollback/recovery are executable. Retained lobby chat and atomic actual-next-match transitions are also implemented. Authenticated transport, bot decisions, and browser rendering remain later work. See `docs/history.md`. No running multiplayer server or browser application is claimed.
 
 ## Atomic automatic consequences
 
@@ -64,7 +64,7 @@ Private stump peek knowledge is stored separately from the card's physical locat
 - Withdrawal pauses an active ballot with its exact remaining milliseconds. A denial or timeout restores those ballots and that remaining duration; a queued claim whose vote has not started gets a fresh timer only when it actually starts.
 - A deferred dealing verdict can still be withdrawn before its punishment starts. A request queued behind another procedure is honored before the matching deferred punishment; other punishments are not interrupted.
 - During the last-card reveal, accepted claims freeze the reveal timer until the full claim queue is drained. Resumption is an explicit event; replay never obtains fresh time.
-- Claim ledgers, automatic incident keys, and punishment-start markers are rollbackable state. The separately persisted chat itself must remain retained when Stage 7 implements rollback.
+- Claim ledgers, automatic incident keys, and punishment-start markers are rollbackable state. The separately persisted lobby chat is retained across rollback, with its original author and branch/scope context; Stage 8 must validate that provenance rather than trust browser-supplied labels.
 
 ## Settled-action repetition (D001 resolved)
 

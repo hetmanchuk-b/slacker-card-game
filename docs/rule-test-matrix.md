@@ -32,10 +32,10 @@ The engine command/event/invariant interface, runtime clock/ordering interface, 
 | 10.2 | 30-second wait, replacement vote, reconnection | `replacement.test.ts`, `recovery.test.ts` | Runtime control passing; lobby/UI integration pending |
 | 10.3, 13.6 | Bot observation limits and atomic handover | `replacement.test.ts`; bot/projections in stage 10 | Controller handover passing; bot strategy/observation memory not implemented |
 | 11, 15.1 | No secrets in player views or owner history | Projections/transport, stage 8 | Planned |
-| 12 | Conservation, structural validity, deterministic replay | `engine.test.ts`, `invariants.test.ts`, scenario helpers, history tests | Current engine phases and nested claim-history replay passing; generated tests pending |
+| 12 | Conservation, structural validity, deterministic replay | `engine.test.ts`, `invariants.test.ts`, scenario helpers, history tests | Current engine phases, nested replay and generated rollback histories passing; broader adversarial command fuzzing remains Stage 12 |
 | 13.3 | Unused stump right survives temporary cards | `stumps.test.ts` | Passing |
 | 13.7 | Third repeated meaningful state, prior wins retained | `repetition.test.ts`, `match.test.ts` | Passing at settled action checkpoints, including in-round cycles (D001 resolved) |
-| 15.2–15.5 | Owner rollback, branches, timers, chat, knowledge warning | `persistence/branches.test.ts`, `runtime/rollback.test.ts`; stages 7–9 | Owner/branch/timer/acknowledgment behavior and PostgreSQL recovery passing; lobby chat and authenticated UI pending |
+| 15.2–15.5 | Owner rollback, branches, timers, chat, knowledge warning | `persistence/branches.test.ts`, `runtime/rollback.test.ts`; stages 7–9 | Owner/branch/timer/acknowledgment behavior, PostgreSQL recovery, retained chat and atomic next-match handoff passing; authenticated delivery/UI pending |
 | 16 | Post-game strikes, card counts, force/aim, dodges, connection handling | Stage 11a | Approved rules documented; no implementation yet; revision 1.4 repetition-loser outcome also pending |
 
 ## Scenario coverage
@@ -58,8 +58,8 @@ The engine command/event/invariant interface, runtime clock/ordering interface, 
 | 14. Claim vs completing play | Both event orders, closed scope, repeat incident | 5–6 (engine/runtime ordering passing); transport in 8 |
 | 15. Everyone wins | Zero remaining participants is victory, not draw | 4 |
 | 16. Repetition draw | Third meaningful occurrence after the 12-round cycle | 4 |
-| 17. Administrative rollback | Restore cards/turn/N, retain abandoned branch and chat | 7 (core and durable branches passing); lobby chat/transport/UI pending |
-| 18. Rollback result and timers | Restore procedure/remaining time; live absence still pauses | 7 (runtime core passing); durable next-match/lobby transition pending |
+| 17. Administrative rollback | Restore cards/turn/N, retain abandoned branch and chat | 7 (core, durable branches and retained chat passing); transport/UI pending |
+| 18. Rollback result and timers | Restore procedure/remaining time; live absence still pauses | 7 (runtime/storage and actual next-match closure passing); transport/UI pending |
 | 19. In-round cycle (D001) | Third state occurrence draws; table/discard preserved | 4 (passing) |
 
 ## Current executable coverage
@@ -89,7 +89,10 @@ The engine command/event/invariant interface, runtime clock/ordering interface, 
 - `src/persistence/archive.test.ts`: 9 tests for versioned JSON recovery, snapshot-plus-tail/full-replay equivalence, four nested-clock phases, integrity/prefix checks, empty-state ownership and malformed archives.
 - `src/runtime/durability.test.ts`: 4 tests for commit-gated publication/receipts/scheduling, fail-stop storage behavior, and obsolete-callback disposal.
 - `src/persistence/postgres.test.ts`: 13 real PostgreSQL integration scenarios (plus the parent test) for session/process recovery, immutable revisions, writer leases, durable branches/audit, atomic SQL failure, independent control clocks, completed-match closure, recorded randomness, connection loss, revision conflicts and corrupted metadata/frames.
-- **Total with PostgreSQL enabled: 172 passing checks**, verified on Node 24.22.1 and 26.13.1. Without `PENKY_TEST_DATABASE_URL`, 158 tests pass and the PostgreSQL parent suite is explicitly skipped. Lobby chat, authenticated evidence resolution, bots, the minigame and browser flows remain pending.
+- `src/persistence/generated-rollback.test.ts`: 19 generated-history tests: all fixture action points for nested phases at 2/4/8 seats and sampled checkpoints of complete 2–8-seat matches, including exact state/timers and snapshot/replay equivalence.
+- `src/runtime/handoff.test.ts`: 3 tests for both rollback/handoff queue orders, commit-gated retirement and non-fatal observer errors.
+- `src/persistence/lobby.postgres.test.ts`: 11 real database scenarios plus the parent test for retained authors/text/context, chat ordering/scopes, idempotent pagination/retries, owner validation, actual successor creation/recovery, failed preparation/INSERT and rollback/start races.
+- **Total with PostgreSQL enabled: 206 passing checks**. Without `PENKY_TEST_DATABASE_URL`, 180 tests pass and both PostgreSQL parent suites are explicitly skipped. Authenticated evidence resolution, private projections, bots, the minigame and browser flows remain pending.
 
 ## Verification commands
 

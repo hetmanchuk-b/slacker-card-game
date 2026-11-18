@@ -626,7 +626,36 @@ export class GameRuntime {
     });
   }
 
-  /** Trusted host hook; does not itself create the next match. */
+  /** Read-only server operation ordered against play, timers and rollback. Do not re-enter this queue. */
+  observe<T>(operation: (snapshot: RuntimeSnapshot, nowMs: number) => Promise<T>): Promise<T> {
+    return this.#enqueue(
+      () => {
+        if (this.#closed) throw new Error('Game runtime is closed');
+        return operation(this.#view(), this.#options.clock.now());
+      },
+      false,
+      false,
+    );
+  }
+
+  /** Publisher must atomically store the closed old checkpoint and actual successor. */
+  handoff(
+    publish: (checkpoint: RuntimeCheckpoint) => Promise<void>,
+    expected?: BranchHead,
+  ): Promise<boolean> {
+    return this.#enqueue(async () => {
+      if (this.#closed || this.#view().state?.phase.type !== 'finished') return false;
+      if (expected && !isDeepStrictEqual(expected, this.#view().head)) return false;
+      this.#options.history.closeRollback();
+      await publish(this.#capture());
+      this.#published = this.#view();
+      this.#closed = true;
+      this.#cancelTasks();
+      return true;
+    }, false);
+  }
+
+  /** Low-level legacy guard only. Actual starts must use handoff via PostgresLobby. */
   closeForNextMatch(): Promise<boolean> {
     return this.#enqueue(() => {
       if (this.#closed || this.#view().state?.phase.type !== 'finished') return false;
@@ -642,21 +671,23 @@ export class GameRuntime {
     }, false);
   }
 
-  #enqueue<T>(job: () => T | Promise<T>, persist = true): Promise<T> {
+  #enqueue<T>(job: () => T | Promise<T>, persist = true, faultOnFailure = true): Promise<T> {
     const result = this.#tail.then(async () => {
       if (persist && this.#fault !== null)
         throw new Error('Runtime is faulted', { cause: this.#fault });
       try {
         const value = await job();
-        if (persist) await this.#publish();
+        if (persist && !this.#closed) await this.#publish();
         if (this.#schedulePending) {
           this.#schedulePending = false;
           this.#armSchedule();
         }
         return value;
       } catch (error) {
-        this.#fault = error;
-        this.#cancelTasks();
+        if (faultOnFailure) {
+          this.#fault = error;
+          this.#cancelTasks();
+        }
         throw error;
       }
     });

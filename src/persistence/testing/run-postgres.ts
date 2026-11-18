@@ -5,7 +5,11 @@ if (!process.env.PENKY_TEST_DATABASE_URL)
   throw new Error('Set PENKY_TEST_DATABASE_URL to a dedicated *_test database');
 const child = spawn(
   process.execPath,
-  ['--test', fileURLToPath(new URL('../postgres.test.ts', import.meta.url))],
+  [
+    '--test',
+    fileURLToPath(new URL('../postgres.test.ts', import.meta.url)),
+    fileURLToPath(new URL('../lobby.postgres.test.ts', import.meta.url)),
+  ],
   { stdio: 'inherit' },
 );
 child.on('error', () => {

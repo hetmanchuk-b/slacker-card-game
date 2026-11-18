@@ -18,7 +18,7 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - `src/game/cards.test.ts` covers deck uniqueness and rank/suit combinations.
 - The complete game engine, server, client, durable persistence, and bots are not implemented.
 
-### Progress — increment 11
+### Progress — increment 12
 
 **New approved direction, documentation only:** rules revision 1.4 adds a post-game little-finger/deck minigame and treats all participants remaining at a repetition draw as losers, preserving earlier winners. The current implementation still follows revision 1.3 for this outcome. No minigame or result changes have been implemented. Resolve §16.5 before implementing the affected behavior; planned work is tracked in Stage 11a below.
 
@@ -29,9 +29,9 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - **Stage 5: complete for the trusted engine interface.** Scoped claims, FIFO voting, false-claim punishments, timeout abstentions, unanimous withdrawal, deferred-punishment cancellation, and episode-key deduplication are implemented. Binding chat/action references to authoritative evidence remains transport work in Stage 8.
 - **Stage 6: complete for the runtime interface.** Serialized dispatch, automatic deadlines, nested timer suspension, multiple absences, replacement voting, controller handover, idempotent receipts, and checkpoint recovery are implemented. Bot decisions remain Stage 10; durable checkpoint storage is implemented in Stage 7.
 - **Stage 7: complete for the trusted server/storage interface.** PostgreSQL persists action archives, snapshots, receipts, branch/audit metadata, controllers and timers before publication. Materialized snapshot recovery agrees with full replay. Lobby chat retains immutable author/context metadata across rollback and matches. Actual match handoff validates the observed result head and commits the old rollback closure, new initial frame, lobby pointer and start receipt atomically. Fault/race tests and generated rollback checkpoints cover nested procedures and all supported seat counts. Browser/session authentication, readiness UI and future minigame gating remain their planned later stages.
-- **Stage 8: started, projections only.** Increments 8.1–8.3 add baseline views, scoped live/action disclosures, redacted procedures/control state and metadata-only owner history. D002/D003 record approved disclosure policies. Authenticated transport, committed history/update delivery, selector resolution and full resync remain incomplete.
+- **Stage 8: started, projection/protocol libraries only.** Increments 8.1–8.4 add viewer-specific projections, metadata-only owner history, explicit version-1 browser intents, strict runtime decoding and allowlisted server envelopes. D002/D003 record approved disclosure policies. Session authentication, transport, committed delivery, evidence/selector resolution and full resync remain incomplete.
 - **Stages 9–12 (including 11a): not started.** No HTTP/Socket.IO server or browser application is claimed to exist.
-- Verification for increment 11 / Stage 8.3: `npm run check` passes with **230 passing non-database tests and 2 explicitly skipped PostgreSQL suites**, including 16 new history projection tests (50 projection tests total). Coverage includes 2/4/8-seat metadata privacy, retained/nested branches, pre-creation owner access, archive/cache recovery equivalence and a real runtime completed-match/queued-closure flow. No database, browser or transport verification was performed in this increment. The previous Stage 7 database-enabled gate passed 206 checks; it was not rerun here. CI provisions PostgreSQL 18 on Linux and runs ordinary checks on Windows/Linux. The pre-existing dev-toolchain advisory is documented in `docs/postgres.md`; dependency audits were not rerun in this increment.
+- Verification for increment 12 / Stage 8.4: `npm run check` passes with **248 passing non-database tests and 2 explicitly skipped PostgreSQL suites**, including 18 new protocol tests (50 existing projection tests retained). Tests cover exact-key/untrusted decoding, safe outgoing envelopes, and test-only explicit server bindings through the real engine/runtime for violations, retries and exact timer IDs. No database, browser or transport verification was performed in this increment. The previous Stage 7 database-enabled gate passed 206 checks; it was not rerun here. CI provisions PostgreSQL 18 on Linux and runs ordinary checks on Windows/Linux. The pre-existing dev-toolchain advisory is documented in `docs/postgres.md`; dependency audits were not rerun in this increment.
 - Full deterministic engine matches for every seat count from 2 through 8 finish and replay identically in `src/game/match.test.ts`. The formerly looping 5-seat match now draws. This is engine integration coverage, not browser/online coverage.
 - Red/green checks cover the engine behaviors plus runtime scheduling, logical clock suspension, presence reconciliation, bot-replacement control, checkpoint restoration, recovery-metadata validation, and native system adapters.
 - Increment 1 was committed and pushed as `17d2c96` before increment 2 work began.
@@ -243,7 +243,18 @@ The pure projectors do not establish exactly-once network delivery. Future publi
 
 These are pure projection APIs, not authenticated endpoints. Committed capture, selector resolution and delivery remain future integration responsibilities; neither raw snapshots nor live observations are owner-history payloads.
 
-**Next increment 8.4:** external protocol contracts and runtime validation, separating browser intents/safe envelopes from trusted internal commands. Preserve deliberate current out-of-turn attempts; never accept browser actor/owner/controller/system identities.
+### Increment 8.4 — External protocol contracts and runtime validation (complete)
+
+- [x] Define an explicit version-1 browser intent union and fixed server message/error envelopes in `src/protocol`, separate from trusted game/runtime commands and private storage records. No dependencies or existing internal contracts change.
+- [x] Decode only exact own data properties, including nested evidence/heads/selectors; reject unknown/system/identity/scope/configuration fields, unsafe numbers, malformed Unicode and bounded-field violations without coercion, value echo or gameplay punishment.
+- [x] Preserve exact request/reference IDs, procedure timers, chat text and unresolved evidence. Use ordinal rollback selectors; omit ordinary-play expected-version/turn/legality gates so admitted current out-of-turn attempts remain punishable.
+- [x] Build state/action/history envelopes through authorized projectors, select safe command/start acknowledgments and redact chat author sessions. Server-supplied delivery epoch/sequence are separate from action heads; actual ordering/allocation/delivery remains later work.
+- [x] Add 9 decoder tests, 5 envelope tests and 4 engine/runtime binding tests. `npm run check` passes with 248 tests and two PostgreSQL suite skips; no network/database/browser verification is claimed.
+- [x] Fix independent review's action-reference bound mismatch test-first: existing action command references accept 129–256 code units while new request IDs remain capped at 128; 257-unit references are rejected.
+
+See `docs/protocol.md` for exact shapes, technical limits and caller obligations. A decoded intent is not authorization or a trusted engine command. Session binding, wrong-game routing, evidence/selector resolution, canonical start/chat retry handling, raw transport byte/rate limits and committed publication remain their planned server increments.
+
+**Next increment 8.5:** guest authentication and durable session/lobby/seat membership bindings. Confirm credential lifecycle/storage/revocation and minimal admission policy before affected persistence/auth work; do not invent host transfer or Stage 9 readiness/house-rule behavior.
 
 ### Remaining Stage 8 work
 

@@ -65,6 +65,14 @@ Rollback targets exist only on the active timeline while rollback is open. They 
 
 No runtime/storage interfaces or live projection contracts change. This does not implement the future history endpoint, pagination/rate limits, delivery ordering or owner UI.
 
+## External protocol boundary — Stage 8.4
+
+`src/protocol/contracts.ts` declares an explicit browser intent union, version-1 envelope types and technical field limits. It is not derived from internal commands, so new system capabilities do not automatically become browser capabilities. `decodeClientMessage` accepts untrusted deserialized plain data, checks exact own fields at each known schema level, constructs detached validated intents, and returns only fixed technical failures. There is no actor/owner/controller/system/configuration authority, trusted claim scope, turn check or ordinary-play expected-version gate in the decoder.
+
+`messages.ts` constructs safe acknowledgments/chat/start envelopes by selecting fields and fixed codes. State/action/history envelopes invoke authorized projectors directly rather than accepting arbitrary prebuilt payloads. Stream epoch/sequence is supplied by the future publisher independently of game-head versions. Immutable chat author session IDs, private start receipts, DB sessions, runtime objects and error diagnostics are never generic payloads.
+
+See `docs/protocol.md` for shapes, exact procedure/evidence/ordinal references, technical bounds and retry semantics. This library does not implement authentication, lobby admission/readiness, raw transport byte/rate limits, canonical start-intent orchestration, committed capture/publication or queued evidence/selector resolution. Test-only explicit server bindings demonstrate accepted rule-breaking attempts and receipts; they are not production handlers or online verification. Existing internal runtime/persistence/projection contracts are unchanged.
+
 ## Timer and pause model
 
 Gameplay phase, claim/penalty procedure, and live connection suspension are separate concepts. A disconnected player does not erase the procedure being interrupted. `GameRuntime` turns injected clock deadlines into serialized system commands. The engine records logical clock suspension and the IDs of timers that were running; nested timers already paused by a claim/withdrawal remain paused.
@@ -86,7 +94,7 @@ Stage 7 now uses PostgreSQL with `pg` and explicit checksum-checked SQL migratio
 
 ## Current implementation scope
 
-The engine and serialized runtime are executable: scheduling, connection suspension, replacement control, and checkpoint recovery now drive the existing game/claim procedures. In-memory branch history and trusted owner rollback are also executable, including pre-action timer rebasing and branch invalidation. PostgreSQL persistence and durable rollback/recovery are executable. Retained lobby chat and atomic actual-next-match transitions are also implemented. Baseline, scoped live/action and metadata-only owner-history projections are implemented as described above; authenticated committed delivery remains incomplete. Authenticated transport, bot decisions, and browser rendering remain later work. See `docs/history.md`. No running multiplayer server or browser application is claimed.
+The engine and serialized runtime are executable: scheduling, connection suspension, replacement control, and checkpoint recovery now drive the existing game/claim procedures. In-memory branch history and trusted owner rollback are also executable, including pre-action timer rebasing and branch invalidation. PostgreSQL persistence and durable rollback/recovery are executable. Retained lobby chat and atomic actual-next-match transitions are also implemented. Baseline, scoped live/action and metadata-only owner-history projections are implemented as described above; authenticated committed delivery remains incomplete. External intent validation and safe envelope libraries are implemented as described above. Authenticated transport, bot decisions, and browser rendering remain later work. See `docs/history.md`. No running multiplayer server or browser application is claimed.
 
 ## Atomic automatic consequences
 

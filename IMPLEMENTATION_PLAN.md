@@ -18,7 +18,7 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - `src/game/cards.test.ts` covers deck uniqueness and rank/suit combinations.
 - The complete game engine, server, client, durable persistence, and bots are not implemented.
 
-### Progress — increment 14
+### Progress — increment 15
 
 **New approved direction, documentation only:** rules revision 1.4 adds a post-game little-finger/deck minigame and treats all participants remaining at a repetition draw as losers, preserving earlier winners. The current implementation still follows revision 1.3 for this outcome. No minigame or result changes have been implemented. Resolve §16.5 before implementing the affected behavior; planned work is tracked in Stage 11a below.
 
@@ -29,9 +29,9 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - **Stage 5: complete for the trusted engine interface.** Scoped claims, FIFO voting, false-claim punishments, timeout abstentions, unanimous withdrawal, deferred-punishment cancellation, and episode-key deduplication are implemented. Binding chat/action references to authoritative evidence remains transport work in Stage 8.
 - **Stage 6: complete for the runtime interface.** Serialized dispatch, automatic deadlines, nested timer suspension, multiple absences, replacement voting, controller handover, idempotent receipts, and checkpoint recovery are implemented. Bot decisions remain Stage 10; durable checkpoint storage is implemented in Stage 7.
 - **Stage 7: complete for the trusted server/storage interface.** PostgreSQL persists action archives, snapshots, receipts, branch/audit metadata, controllers and timers before publication. Materialized snapshot recovery agrees with full replay. Lobby chat retains immutable author/context metadata across rollback and matches. Actual match handoff validates the observed result head and commits the old rollback closure, new initial frame, lobby pointer and start receipt atomically. Fault/race tests and generated rollback checkpoints cover nested procedures and all supported seat counts. Browser/session authentication, readiness UI and future minigame gating remain their planned later stages.
-- **Stage 8: started, server libraries only.** Increments 8.1–8.6 add private projections, protocol decoding/envelopes, durable guest access and server-private committed runtime subscriptions. D002–D004 record approved policies. The runtime host, actual HTTP/Socket.IO authentication/routing, committed network delivery, evidence/selector resolution and full resync remain incomplete.
+- **Stage 8: started, server libraries only.** Increments 8.1–8.7 add private projections, protocol decoding/envelopes, durable guest access, server-private committed runtime subscriptions and a durable local game host/registry. D002–D004 record approved policies. Actual HTTP/Socket.IO authentication/routing, committed network delivery, evidence/selector resolution and full resync remain incomplete.
 - **Stages 9–12 (including 11a): not started.** No HTTP/Socket.IO server or browser application is claimed to exist.
-- Verification for increment 14 / Stage 8.6: `npm run check` passes with **267 non-database tests and 3 explicit PostgreSQL suite skips**, and with **307 passing checks / no skips** when PostgreSQL is enabled. `npm run test:postgres` passes all 40 database checks against a newly created disposable tmpfs test container. New coverage is 15 committed-publication tests; existing real PostgreSQL tests now verify independent committed-frame visibility, recovered baselines/duplicate suppression and no notification after failed SQL. No browser, HTTP or Socket.IO verification is claimed. CI provisions PostgreSQL 18 on Linux and runs ordinary checks on Windows/Linux. The pre-existing dev-toolchain advisory is documented in `docs/postgres.md`; dependency audits were not rerun in this increment.
+- Verification for increment 15 / Stage 8.7: `npm run check` passes with **267 non-database tests and 4 explicit PostgreSQL suite skips**, and with **322 passing checks / no skips** when PostgreSQL is enabled. `npm run test:postgres` passes all **55 database checks** against a newly created disposable tmpfs PostgreSQL 18 container. New coverage is 14 host scenarios plus parent. Independent review confirmed fixes for failed-detach stale presence and swallowed deadline-failure cleanup, then approved the implementation. No browser, HTTP or Socket.IO verification is claimed. CI provisions PostgreSQL 18 on Linux and runs ordinary checks on Windows/Linux. The pre-existing dev-toolchain advisory is documented in `docs/postgres.md`; dependency audits were not rerun in this increment.
 - Full deterministic engine matches for every seat count from 2 through 8 finish and replay identically in `src/game/match.test.ts`. The formerly looping 5-seat match now draws. This is engine integration coverage, not browser/online coverage.
 - Red/green checks cover the engine behaviors plus runtime scheduling, logical clock suspension, presence reconciliation, bot-replacement control, checkpoint restoration, recovery-metadata validation, and native system adapters.
 - Increment 1 was committed and pushed as `17d2c96` before increment 2 work began.
@@ -294,7 +294,7 @@ One intermediate final-gate attempt failed because immediate recovery raced serv
 
 **Unresolved integration work / risks (not completed by these increments):**
 
-- Stage 8.7 must own one live runtime/writer per game, recover faulted drafts from durable state, respect temporary writer refusal, route the current lobby match and consolidate multiple live connections per seat. Never force a second writer or reuse a failed prepared handoff runtime.
+- Stage 8.7 now owns one live runtime/writer per game, recovers faulted drafts from durable state, respects temporary writer refusal, routes the current lobby match and consolidates multiple live connections per seat. Actual socket adapters must use this ownership path, never force a second writer or reuse a failed prepared handoff runtime.
 - Actual transport must enforce origin/session/membership/owner checks per operation, distinguish lobby membership from current-match participation, and handle expiry/revocation for live sockets. The current gates are server-private libraries, not authenticated endpoints.
 - Publication is best-effort. A host still needs bounded/ordered asynchronous delivery, fresh transport epochs and stale-branch/epoch invalidation. Never serialize raw notices or replay one-time private observations after failure/resync; capture extra committed history synchronously before awaiting.
 - Canonical creation/chat/start retry orchestration, original-scope evidence validation and fresh ordinal rollback-selector resolution remain later queued integrations. Decoder validity or a cached binding alone is not authorization.
@@ -303,7 +303,20 @@ One intermediate final-gate attempt failed because immediate recovery raced serv
 
 **Stage 8 remains incomplete:** its 2/4/8 isolated-client transport/privacy exit criteria are not established by library/database tests.
 
-**Next increment 8.7:** single-runtime durable game host/registry: lease-aware acquisition/restoration, current-game routing and consolidated seat presence. Reuse guest bindings and committed subscriptions; do not add distributed execution, Socket.IO handlers or lobby/readiness policy yet.
+### Increment 8.7 — Single-runtime durable game host/registry (complete)
+
+- [x] Add `PostgresGameHost` with serialized existing-game-only acquisition/restoration and fixed writer-unavailable failures. Reuse existing leases/checkpoints; never fabricate missing games, steal locks or retry integrity faults automatically.
+- [x] Resolve durable current-lobby routing, reject old-game intents/stale attachment bindings, and assign a fresh epoch per writer lifetime. Expose only private callback/snapshot seams, not network payloads.
+- [x] Aggregate trusted authenticated connections per seat with idempotent detach handles. Only aggregate transitions reach the runtime; lobby-only members do not enter old match rosters. Reconcile surviving live connections after recovery/successor adoption.
+- [x] Dispose failed drafts and release leased sessions after dispatch/deadline faults. Wrap settled clock tasks because runtime expiry failures are consumed internally. Preserve receipts/nested timers and do not replay commands or private action observations. Evict stale connected views after failed detach lookup; epoch-check late cleanup.
+- [x] Adopt only a successfully committed `PostgresLobby.startMatch` successor without reopening its writer. Failed handoff/preparation is discarded and later restored from unchanged durable state. Canonical browser retry orchestration remains deferred.
+- [x] Drain queued work on shutdown, checkpoint healthy entries, and dispose/close all entries even when one checkpoint fails. No heartbeat, idle eviction, distributed execution or new runtime/storage contracts are added.
+- [x] Add 14 real PostgreSQL scenarios plus parent and register them in `test:postgres`. Verify acquisition/lease contention, connection aggregation, stale routing, receipts/baselines, faults/corruption, post-restore presence failure, nested timers, failed/successful successor adoption and multi-game shutdown failure. Both repository gates and all 55 PostgreSQL checks pass on a confirmed disposable tmpfs container.
+- [x] Independent review identified two confirmed fault-path defects; failing regressions reproduced both, minimal fixes passed, and a bounded follow-up approved the result. See `docs/game-host.md` and `docs/rule-test-matrix.md`.
+
+The host is a private local library, not a running server or authorization boundary. Lifecycle callbacks are serialized across lobbies and must remain bounded/non-reentrant; no asynchronous network delivery is awaited here. Actual credential expiry/revocation integration, origin/byte/rate limits, projected ordered delivery and authenticated evidence/selector resolution remain incomplete. Stage 8's isolated-client exit criteria are still unmet.
+
+**Next dependency-ready increment:** authenticated HTTP/Socket.IO boundary using guest access and the durable host, with per-operation identity/current-match checks. Confirm a bounded transport slice and any required major dependency before implementation; readiness/UI, bots and minigame work remain deferred.
 
 ### Remaining Stage 8 work
 
@@ -315,7 +328,7 @@ One intermediate final-gate attempt failed because immediate recovery raced serv
 - [ ] Make retries idempotent and serialize play, claims, timeouts, rollback, and disconnect events per game.
 - [ ] Define stale-command handling: reject wrong-game or obsolete-branch commands, but do not accidentally block a deliberate current out-of-turn attempt that must be punishable.
 - [ ] Send versioned state and support full authorized resynchronization after missed messages or refresh.
-- [ ] Keep local game development single-runtime; prevent simultaneous writers instead of introducing premature distributed execution.
+- [x] Keep local game development single-runtime; prevent simultaneous writers instead of introducing premature distributed execution (durable host library, Stage 8.7; actual socket integration pending).
 - [ ] Add rate limits and payload limits without changing agreed game punishments.
 
 **Exit criteria:** 2, 4, and 8 isolated clients can drive the same game; duplicate delivery executes once; no unauthorized viewer receives hidden faces or raw authoritative history.

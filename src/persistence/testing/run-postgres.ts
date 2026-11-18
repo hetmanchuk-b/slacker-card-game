@@ -10,6 +10,7 @@ const child = spawn(
     fileURLToPath(new URL('../postgres.test.ts', import.meta.url)),
     fileURLToPath(new URL('../lobby.postgres.test.ts', import.meta.url)),
     fileURLToPath(new URL('../../server/guest-access.postgres.test.ts', import.meta.url)),
+    fileURLToPath(new URL('../../server/game-host.postgres.test.ts', import.meta.url)),
   ],
   { stdio: 'inherit' },
 );

@@ -1,0 +1,30 @@
+# Durable local game host — Stage 8.7
+
+`src/server/game-host.ts` implements `PostgresGameHost`, a server-private, single-process registry over the existing PostgreSQL leases, runtime and lobby transition APIs. It is not a running server, an authentication boundary, a projection or a network delivery service. No schema, engine rule, runtime/checkpoint contract or dependency changes are required.
+
+## Interface
+
+Construct with a configured `pg` pool. Default inputs use `systemInputs`; tests inject clock/randomness/command IDs through the optional `inputs(onError)` factory. The host wraps scheduled tasks to check runtime health after settlement: runtime deadline failures are consumed internally and cannot be detected solely through a clock rejection reporter.
+
+- `read(lobbyId)` resolves the durable current-match pointer and returns `null` or a private `{ epoch, snapshot }`. Unknown/unavailable lobbies fail rather than creating a lobby/game.
+- `withCurrent(lobbyId, expectedGameId, operation)` checks current routing and runs a trusted server operation against its live runtime and epoch. A stale game is rejected, never silently routed to its successor. Ordinary-play versions/turns are not gated here; use existing runtime branch/controller checks. Callers must not retain writable runtime references or bypass host ownership.
+- `attach(freshMembership)` records one authenticated connection and returns an idempotent async detach handle. The membership must come from a fresh guest-access check, never client-supplied fields. A stale `currentGameId` rejects attachment. Multiple connections for one seat produce only aggregate presence transitions. Lobby-only members are tracked for future matches but cannot enter an existing match's roster.
+- `recover(lobbyId)` disposes the old runtime, releases its session, restores durable state and reconciles the surviving live connection ledger. It does **not** checkpoint a possibly failed draft or rerun any command. Retry the original command ID separately to consult durable receipts.
+- `startMatch(lobbyId, trustedCanonicalRequest)` delegates to `PostgresLobby.startMatch` and adopts only the successfully committed live successor. Returned start results omit runtime/session references. Existing atomic owner/head/roster/receipt checks remain authoritative. Browser start-intent canonicalization, readiness and authentication remain future transport work.
+- `close()` rejects new work, drains already queued operations, checkpoints healthy entries, disposes every runtime and closes every leased session, even if one checkpoint fails. The returned promise is stable, including its failure. The caller closes the pool afterward. Detach after shutdown is harmless.
+
+## Ownership, faults and presence
+
+Lifecycle operations and trusted callbacks share a local serialized queue. Concurrent cold requests restore a game once and reuse the same writer/epoch. Keep callbacks bounded and **never re-enter the host from an awaited callback**. Independent runtime deadlines retain their existing per-game queue. This deliberately small registry can head-of-line block unrelated lobby operations; parallel lifecycle queues, idle eviction and distributed execution are not implemented.
+
+Acquisition looks up an existing durable root branch with a committed revision before opening its lease. It always restores the stored checkpoint, never fabricates a missing game or starts a fresh runtime over recovered receipts. Failed restoration or presence reconciliation disposes/closes its resources. Writer contention returns fixed `game-unavailable`; no automatic retry, lock stealing or integrity-error retry is introduced. A later request can retry acquisition. PostgreSQL may release a destroyed backend's lease slightly after local close completion.
+
+Dispatch callback faults and settled deadline failures evict faulted entries. A callback that swallowed a dispatch error is detected on the next acquisition. Epoch checks prevent old clock cleanup from evicting a replacement. A failed detach lookup also evicts cached lobby entries, preserving the real departure in the ledger rather than allowing stale connected gameplay. Recovery starts with old sockets disconnected, then reconnects only seats with surviving host connections; timer/receipt/controller recovery uses the existing runtime contract.
+
+A fresh random epoch identifies each live writer lifetime. `withCurrent` can install an existing runtime subscription with that epoch; recovered subscriptions must be installed anew and receive only a baseline, never replayed private observations. The host does not allocate transport sequence numbers, retain/retry delivery, cancel already-running listener promises or project raw publications. Future transport must invalidate stale epochs/branches and perform authorized resync without replaying one-time peeks.
+
+## Authorization and remaining integration
+
+All input bindings, callbacks, snapshots and runtime publications are trusted **private server data**. Reauthenticate membership/owner privileges on each external operation and separately verify current-match participation. This registry does not close expired/revoked sockets, resolve claim evidence/rollback selectors, enforce origin/rate/byte limits, implement HTTP/Socket.IO or authorize browser/bot payloads. Credential expiry/revocation integration and canonical creation/chat/start retries remain later work. Do not use lobby membership as a permanent authorization capability.
+
+Real disposable PostgreSQL coverage in `src/server/game-host.postgres.test.ts` includes cold/concurrent acquisition, competing leases, connection aggregation, stale routing/bindings, receipt/baseline recovery, dispatch/deadline faults, failed detach lookup, corruption, post-restore presence failure, multi-game shutdown failure, nested timer recovery and failed/successful successor adoption. These are library/database tests, not isolated online-client or browser verification.

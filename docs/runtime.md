@@ -18,7 +18,7 @@ Every mutation, including a clock callback, enters the same per-game promise que
 
 The optional awaited `commit(checkpoint)` adapter atomically stores staged history and runtime metadata. Public `read()` and command acknowledgments remain at the committed view until it completes; persistence failure faults the runtime. Deadline callbacks are armed only after successful commit. `dispose()` does not save; call `checkpoint()` first for a healthy graceful shutdown. Never mutate/read the private history draft as an alternative to the published runtime view.
 
-Use `systemInputs(onError)` for a monotonic process clock, cryptographic bounded randomness, and UUID command IDs. Tests use `FakeClock` instead. The host must keep exactly one runtime writer per game and dispose the old instance before creating its replacement. Socket adapters must consolidate a seat's live connections before reporting disconnect/reconnect.
+Use `systemInputs(onError)` for a monotonic process clock, cryptographic bounded randomness, and UUID command IDs. Tests use `FakeClock` instead. The host must keep exactly one runtime writer per game and dispose the old instance before creating its replacement. `PostgresGameHost` now owns this local writer lifecycle and consolidates trusted seat connections; see `game-host.md`. Socket adapters must authenticate/revalidate bindings before attaching and detach revoked/expired connections. They must not independently report per-socket disconnects to a shared seat.
 
 ## Committed publication subscriptions — Stage 8.6
 
@@ -48,7 +48,7 @@ Unsubscribe prevents new invocations immediately; disposal clears subscribers. A
 
 ### Capturing history and privacy
 
-Every field in `RuntimePublication` is **private server data**, not a generic browser/bot payload. Apply the existing viewer-specific projection/envelope builders only after fresh identity/seat authorization. No sockets, identity binding, transport counters or client delivery are implemented here.
+Every field in `RuntimePublication` is **private server data**, not a generic browser/bot payload. Apply the existing viewer-specific projection/envelope builders only after fresh identity/seat authorization. No sockets, identity binding, transport counters or client delivery are implemented here. Stage 8.7's private host allocates writer-lifetime epochs and can install subscriptions through `withCurrent`; it does not implement network ordering/delivery.
 
 Use the detached notice for later asynchronous work, not a fresh `read()` of a potentially newer game. If a host needs owner-history metadata from its concrete committed history, capture/project that sidecar **synchronously in the listener before the first await**. This synchronous prefix is still at the serialized committed point, including same-head closure. Do not re-read mutable staging history after awaiting or assume matching heads prove a closure committed. Alternatively use a separately retained, validated committed storage frame. The generic History interface is unchanged; this seam does not turn arbitrary history reads into proof of commitment.
 

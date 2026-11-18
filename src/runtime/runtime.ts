@@ -1,7 +1,7 @@
 import { decide } from '../game/engine.ts';
 import { isDeepStrictEqual } from 'node:util';
 import { id } from '../game/ids.ts';
-import type { BranchHead, GameCommand, RejectionCode } from '../game/contracts.ts';
+import type { ActionBatch, BranchHead, GameCommand, RejectionCode } from '../game/contracts.ts';
 import type { BranchId, CommandId, ProcedureId, SeatId } from '../game/ids.ts';
 import type { GameState, Timer, Vote } from '../game/model.ts';
 import type { ForkResult, History, RollbackAudit } from '../persistence/history.ts';
@@ -24,6 +24,30 @@ export type RuntimeSnapshot = Readonly<{
   paused: boolean;
   replacementVote: ReplacementVote | null;
   controlEvents: readonly ControlEvent[];
+}>;
+
+/** Exact newly appended action, private until the whole queue job publishes. */
+export type RuntimeActionPair = Readonly<{
+  before: Readonly<{ head: BranchHead; state: GameState | null }>;
+  action: ActionBatch;
+  after: Readonly<{ head: BranchHead; state: GameState | null }>;
+  delivery: 'fresh';
+}>;
+
+/** Server-private data, NOT a network payload. Sequence is local to this runtime
+ * instance, not a durable revision/transport epoch. Initial subscription is a
+ * baseline with no replayed actions. Consumers must apply viewer projections.
+ */
+export type RuntimePublication = Readonly<{
+  sequence: number;
+  kind: 'initial' | 'update' | 'rollback' | 'rollback-closed' | 'handoff';
+  nowMs: number;
+  snapshot: RuntimeSnapshot;
+  actions: readonly RuntimeActionPair[];
+}>;
+type Subscription = Readonly<{
+  receive: (publication: RuntimePublication) => void | Promise<void>;
+  report: ((sequence: number) => void | Promise<void>) | undefined;
 }>;
 
 export type RuntimeResult =
@@ -130,6 +154,12 @@ export class GameRuntime {
   #replacement: ReplacementVote | null = null;
   #controlEvents: ControlEvent[] = [];
   #receipts = new Map<CommandId, StoredReceipt>();
+  #subscriptions = new Set<Subscription>();
+  #publicationSequence = 0;
+  #pendingActions: RuntimeActionPair[] = [];
+  #pendingPublication: RuntimePublication | null = null;
+  #pendingClosure = false;
+  #closureAnnounced = false;
 
   private constructor(options: RuntimeOptions) {
     this.#options = options;
@@ -294,6 +324,56 @@ export class GameRuntime {
     return structuredClone(this.#published);
   }
 
+  /** Subscribe only after obtaining a live runtime (never during private match
+   * preparation). Registration is serialized and receives the current baseline.
+   * Invocation is ordered, completion is not awaited. Unsubscribe is immediate.
+   * Capture extra committed history synchronously here, before any await; never
+   * reread mutable staging state later to reconstruct an earlier publication.
+   */
+  subscribe(
+    receive: Subscription['receive'],
+    report?: Subscription['report'],
+  ): Promise<() => void> {
+    return this.#enqueue(
+      () => {
+        if (this.#closed || this.#fault !== null || this.#published === null)
+          throw new Error('Runtime subscription unavailable');
+        if (typeof receive !== 'function') throw new Error('Invalid runtime subscription');
+        const subscription: Subscription = { receive, report };
+        this.#subscriptions.add(subscription);
+        this.#deliver(subscription, {
+          sequence: this.#publicationSequence,
+          kind: 'initial',
+          nowMs: this.#options.clock.now(),
+          snapshot: this.#published,
+          actions: [],
+        });
+        return () => {
+          this.#subscriptions.delete(subscription);
+        };
+      },
+      false,
+      false,
+    );
+  }
+
+  #deliver(subscription: Subscription, publication: RuntimePublication): void {
+    if (!this.#subscriptions.has(subscription)) return;
+    const report = () => {
+      // No exception/cause or raw private payload enters notification diagnostics.
+      try {
+        void Promise.resolve(subscription.report?.(publication.sequence)).catch(() => {});
+      } catch {
+        /* Diagnostic failure cannot undo a committed publication either. */
+      }
+    };
+    try {
+      void Promise.resolve(subscription.receive(structuredClone(publication))).catch(report);
+    } catch {
+      report();
+    }
+  }
+
   #view(): RuntimeSnapshot {
     if (this.#fault !== null) throw new Error('Runtime scheduling failed', { cause: this.#fault });
     const { head, state } = this.#options.history.read();
@@ -401,6 +481,17 @@ export class GameRuntime {
     if (result.type === 'rejected') return result;
     if (result.type === 'committed') {
       this.#requiresBranch = true;
+      // Fork rebases are new administrative actions on the CHILD branch, not
+      // replays of the inherited prefix or observations from abandoned futures.
+      if (point?.state && this.#subscriptions.size) {
+        const after = this.#options.history.read();
+        this.#pendingActions.push({
+          before: { head: { ...after.head, version: point.head.version }, state: point.state },
+          action: after.actions.at(-1)!,
+          after: { head: after.head, state: after.state },
+          delivery: 'fresh',
+        });
+      }
       if (this.#replacement) {
         this.#controlEvents.push({
           type: 'replacement-canceled',
@@ -648,7 +739,7 @@ export class GameRuntime {
       if (expected && !isDeepStrictEqual(expected, this.#view().head)) return false;
       this.#options.history.closeRollback();
       await publish(this.#capture());
-      this.#published = this.#view();
+      await this.#publish('handoff', false);
       this.#closed = true;
       this.#cancelTasks();
       return true;
@@ -660,6 +751,10 @@ export class GameRuntime {
     return this.#enqueue(() => {
       if (this.#closed || this.#view().state?.phase.type !== 'finished') return false;
       this.#options.history.closeRollback();
+      if (!this.#closureAnnounced) {
+        this.#pendingClosure = true;
+        this.#closureAnnounced = true;
+      }
       return true;
     });
   }
@@ -668,6 +763,7 @@ export class GameRuntime {
     return this.#enqueue(() => {
       this.#closed = true;
       this.#cancelTasks();
+      this.#subscriptions.clear();
     }, false);
   }
 
@@ -675,12 +771,22 @@ export class GameRuntime {
     const result = this.#tail.then(async () => {
       if (persist && this.#fault !== null)
         throw new Error('Runtime is faulted', { cause: this.#fault });
+      this.#pendingActions = [];
+      this.#pendingPublication = null;
+      this.#pendingClosure = false;
       try {
         const value = await job();
-        if (persist && !this.#closed) await this.#publish();
+        if (persist && !this.#closed)
+          await this.#publish(this.#pendingClosure ? 'rollback-closed' : undefined);
         if (this.#schedulePending) {
           this.#schedulePending = false;
           this.#armSchedule();
+        }
+        const publication = this.#pendingPublication;
+        this.#pendingPublication = null;
+        if (publication) {
+          for (const subscription of [...this.#subscriptions])
+            this.#deliver(subscription, publication);
         }
         return value;
       } catch (error) {
@@ -689,6 +795,10 @@ export class GameRuntime {
           this.#cancelTasks();
         }
         throw error;
+      } finally {
+        this.#pendingActions = [];
+        this.#pendingPublication = null;
+        this.#pendingClosure = false;
       }
     });
     this.#tail = result.then(
@@ -698,10 +808,28 @@ export class GameRuntime {
     return result;
   }
 
-  async #publish(): Promise<void> {
+  async #publish(kind?: 'handoff' | 'rollback-closed', persist = true): Promise<void> {
     const view = this.#view();
-    if (this.#options.commit) await this.#options.commit(this.#capture());
+    if (persist && this.#options.commit) await this.#options.commit(this.#capture());
+    const previous = this.#published;
     this.#published = view;
+    if (kind || previous === null || !isDeepStrictEqual(previous, view)) {
+      this.#publicationSequence++;
+      if (this.#subscriptions.size)
+        this.#pendingPublication = {
+          sequence: this.#publicationSequence,
+          kind:
+            kind ??
+            (previous === null
+              ? 'initial'
+              : previous.head.branchId !== view.head.branchId
+                ? 'rollback'
+                : 'update'),
+          nowMs: this.#options.clock.now(),
+          snapshot: view,
+          actions: kind ? [] : [...this.#pendingActions],
+        };
+    }
   }
 
   #commit(command: GameCommand, nowMs: number): RuntimeResult {
@@ -711,6 +839,15 @@ export class GameRuntime {
     if (decision.type === 'rejected') return { ...decision, head: snapshot.head };
     const appended = this.#options.history.append(snapshot.head, decision.action);
     if (appended.type === 'rejected') throw new Error(`History append rejected: ${appended.code}`);
+    if (appended.type === 'committed' && this.#subscriptions.size) {
+      const after = this.#options.history.read();
+      this.#pendingActions.push({
+        before: { head: snapshot.head, state: snapshot.state },
+        action: decision.action,
+        after: { head: after.head, state: after.state },
+        delivery: 'fresh',
+      });
+    }
     return {
       type: 'accepted',
       outcome: decision.outcome,

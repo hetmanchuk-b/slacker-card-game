@@ -1,5 +1,15 @@
 # Open decisions discovered during implementation
 
+## D004 — Guest credentials and initial lobby admission
+
+**Status:** approved and resolved for Stage 8.5 by the user.
+
+- Server-issued cryptographically random opaque guest token; only its hash persists in PostgreSQL. Browser deployment uses a persistent Secure/HttpOnly/SameSite=Lax cookie with a 30-day sliding lifetime.
+- Revocation/expiry never releases a seat or transfers ownership. Losing/expiring the credential loses access; no recovery by display name/lobby code, credential-recovery mechanism or implicit host transfer is introduced.
+- Owner takes the first seat. Later authenticated guests receive server-assigned clockwise seats, at most eight. New seats are admitted only when no match is running; existing members may reconnect. Spectator admission, kicking, seat reassignment and host transfer remain deferred.
+
+The durable gate admits new seats before a match pointer is assigned or after a verified finished current game. An assigned unfinished/suspended/pre-creation-rollback match keeps admission closed; unknown/corrupt state is not proof of completion. A later rollback cannot insert newly admitted lobby seats into an old match roster. Legacy trusted lobbies get no fabricated credentials or automatic adoption. See `docs/guest-access.md` for transaction, cookie and future transport obligations.
+
 ## D003 — Metadata-only owner history
 
 **Status:** approved and resolved for Stage 8.3 by the user.

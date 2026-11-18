@@ -8,6 +8,8 @@ import { Pool } from 'pg';
 import { id } from '../game/ids.ts';
 import { fixture } from '../runtime/testing/fixtures.ts';
 import { GameRuntime } from '../runtime/runtime.ts';
+import type { RuntimePublication } from '../runtime/runtime.ts';
+import type { StoredGame } from './postgres.ts';
 import { finishMatch } from '../runtime/testing/match.ts';
 import { PostgresSession, migrate } from './postgres.ts';
 import { MemoryHistory } from './memory-history.ts';
@@ -30,6 +32,14 @@ test('PostgreSQL durable runtime', { skip: !url }, async (t) => {
         session.history.append(session.history.read().head, action);
       const options = { ...source.options, history: session.history, commit: session.commit };
       const runtime = await GameRuntime.create(options);
+      const publications: RuntimePublication[] = [];
+      const committedReads: Promise<StoredGame | null>[] = [];
+      await runtime.subscribe((publication) => {
+        if (publication.kind !== 'initial') {
+          publications.push(publication);
+          committedReads.push(PostgresSession.load(pool, gameId));
+        }
+      });
       t.after(async () => {
         await runtime.dispose();
         await session.close();
@@ -43,6 +53,9 @@ test('PostgreSQL durable runtime', { skip: !url }, async (t) => {
         vote: 'yes' as const,
       };
       assert.equal((await runtime.dispatch(ballot)).type, 'accepted');
+      assert.equal(publications.length, 1);
+      assert.equal(publications[0]!.actions.length, 1);
+      assert.deepEqual((await committedReads[0])?.snapshot.state, publications[0]!.snapshot.state);
       const state = runtime.read().state;
       await runtime.dispose();
       await session.close();
@@ -62,9 +75,15 @@ test('PostgreSQL durable runtime', { skip: !url }, async (t) => {
       );
       t.after(() => recovered.dispose());
       assert.equal(recovered.read().state?.procedure?.timer.remainingMs, 6000);
+      const recoveredPublications: RuntimePublication[] = [];
+      await recovered.subscribe((publication) => {
+        recoveredPublications.push(publication);
+      });
+      assert.deepEqual(recoveredPublications[0]!.actions, []);
       const retry = await recovered.dispatch(ballot);
       assert.equal(retry.type, 'accepted');
       if (retry.type === 'accepted') assert.equal(retry.duplicate, true);
+      assert.equal(recoveredPublications.length, 1);
       await recovered.dispose();
       await reopened.close();
     },
@@ -177,6 +196,10 @@ test('PostgreSQL durable runtime', { skip: !url }, async (t) => {
       });
       t.after(() => runtime.dispose());
       const before = await PostgresSession.load(pool, gameId);
+      const publications: RuntimePublication[] = [];
+      await runtime.subscribe((publication) => {
+        publications.push(publication);
+      });
       const functionName = `penky_fail_${randomUUID().replaceAll('-', '')}`;
       // External fault injection into this test game's INSERT, not a storage implementation mock.
       await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
@@ -198,10 +221,32 @@ test('PostgreSQL durable runtime', { skip: !url }, async (t) => {
         /injected storage failure/,
       );
       assert.throws(() => runtime.read(), /Runtime scheduling failed/);
+      assert.equal(publications.length, 1, 'failed SQL never releases a staged notification');
+      assert.equal(publications[0]!.kind, 'initial');
+      assert.deepEqual(publications[0]!.snapshot.state, before!.snapshot.state);
       assert.deepEqual(await PostgresSession.load(pool, gameId), before);
       await runtime.dispose();
       await session.close();
-      const recovered = await PostgresSession.open(pool, gameId, id('branch', 'main'));
+      // A faulted session destroys its connection. PostgreSQL may release that
+      // backend's advisory lock slightly after the local socket is destroyed.
+      // Reacquire through the public interface, boundedly; never hide a persistent
+      // lease leak or a different recovery/integrity error behind this retry.
+      const deadline = Date.now() + 5000;
+      let recovered: PostgresSession;
+      for (;;) {
+        try {
+          recovered = await PostgresSession.open(pool, gameId, id('branch', 'main'));
+          break;
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            error.message !== 'Game already has a writer' ||
+            Date.now() >= deadline
+          )
+            throw error;
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      }
       t.after(() => recovered.close());
       assert.deepEqual(recovered.history.read(), before!.snapshot);
     },

@@ -12,12 +12,47 @@ Implemented interface:
 - `checkpoint()` captures recovery metadata at a known history head.
 - `GameRuntime.restore(options, checkpoint)` restores control metadata against that exact history head, with sockets disconnected.
 - `dispose()` stops scheduling; an old runtime must not act after a replacement runtime is created.
+- `subscribe(receive, report?)` installs a server-private committed-publication listener in queue order and resolves to an idempotent, immediate unsubscribe function. See Stage 8.6 below; this is not a network subscription.
 
 Every mutation, including a clock callback, enters the same per-game promise queue. Scheduled callbacks carry a generation and branch/head identity; canceled or obsolete callbacks cannot execute an old turn. Explicit out-of-turn card commands still reach the engine and remain punishable. Accepted command receipts are deduplicated before rules run; a reused command ID with a different payload is rejected.
 
 The optional awaited `commit(checkpoint)` adapter atomically stores staged history and runtime metadata. Public `read()` and command acknowledgments remain at the committed view until it completes; persistence failure faults the runtime. Deadline callbacks are armed only after successful commit. `dispose()` does not save; call `checkpoint()` first for a healthy graceful shutdown. Never mutate/read the private history draft as an alternative to the published runtime view.
 
 Use `systemInputs(onError)` for a monotonic process clock, cryptographic bounded randomness, and UUID command IDs. Tests use `FakeClock` instead. The host must keep exactly one runtime writer per game and dispose the old instance before creating its replacement. Socket adapters must consolidate a seat's live connections before reporting disconnect/reconnect.
+
+## Committed publication subscriptions — Stage 8.6
+
+Subscribe only after obtaining a **live** runtime from `create`, `restore` or a successfully completed `PostgresLobby.startMatch`. No callback is installed through construction options: private successor preparation must never notify before its atomic database transition. Subscriptions do not modify checkpoints, frames, runtime options or existing result/snapshot contracts.
+
+Registration receives one detached `RuntimePublication` with kind `initial`, the current committed snapshot and an empty action list. It never replays preloaded/recovered history, receipts, private peeks or earlier observations. Registration is read-only and does not commit. A failed/faulted/retired/disposed runtime rejects new subscriptions with a fixed unavailable error.
+
+Subsequent notices contain:
+
+- `sequence`: monotonically increasing publication number for this runtime instance, independent of game-head version. It is not persisted, a PostgreSQL revision, a reliable-delivery acknowledgment or a transport epoch. Later hosts must allocate an epoch per live writer lifetime; a late subscriber's initial sequence may already be greater than one.
+- `kind`: `update`, `rollback`, `rollback-closed` or terminal `handoff` (plus subscription baseline `initial`).
+- `nowMs`: trusted injected runtime time sampled at publication/initial subscription, suitable for scoped live timer projection.
+- `snapshot`: the complete final committed **server-only** runtime snapshot, including controls.
+- `actions`: exact newly appended per-action `{ before, action, after, delivery: 'fresh' }` pairs, in order. One queue job may contain several actions, e.g. creation/play plus clock reconciliation, but only one final snapshot notice is delivered. Each pair has adjacent same-game/branch heads and can be consumed by the existing authorized action projector. No intermediate snapshot is a separate publication.
+
+Rollback captures only its new child-branch rebase and any new reconciliation, not inherited prefixes or abandoned futures. Rollback before creation has no synthetic pair. Administrative rebases project no card observations. Legacy closure and actual handoff emit explicit same-head metadata notices with no action replay; the legacy closure guard suppresses repeated closure notices in the same instance. Handoff waits for its special atomic publisher and never adds an ordinary old-game commit. Failed transactions emit nothing.
+
+Deadline callbacks use the same publication path as dispatch. Control-only changes notify even if the action head is identical. Duplicate/rejected/checkpoint jobs retain their existing persistence behavior but do not notify if snapshot/control content is unchanged. `observe`, unsubscribe and disposal do not publish. Obsolete/canceled callbacks cannot produce stale notices. Fresh private peek observations are available only through the one fresh action pair; retries and new subscriptions do not reproduce them.
+
+### Delivery and failure semantics
+
+The commit adapter completes first, then `read()` is installed, deadlines are armed, and listeners are invoked synchronously in publication order with a **separate deep clone per listener**. A listener may enqueue follow-up runtime work. Its returned promise is never awaited, so async work, reentrancy or a never-settling delivery cannot hold the game queue or acknowledgment hostage. Synchronous JavaScript work still occupies the event loop: keep the synchronous prefix short and do not create feedback loops.
+
+Synchronous throws, cloning failures and asynchronous rejections are caught outside the runtime fault path. Optional `report(sequence)` receives only the affected publication sequence, never the exception/cause or raw private payload. Reporter throws/rejections are also isolated. Delivery failure cannot roll back committed storage, invalidate an accepted receipt or masquerade as commit failure. This is best-effort invocation, not an outbox, retry ledger, backpressure mechanism or exactly-once network delivery. Async listener completions may arrive out of order; later hosts must bound/order their delivery work and reject stale epochs/branches.
+
+Unsubscribe prevents new invocations immediately; disposal clears subscribers. Already-running async listener work cannot be canceled by the runtime; its failures are still caught/reported. A host must invalidate obsolete queued network work on rollback/handoff/disposal and refresh authorized state after delivery failure, **without replaying one-time private observations**.
+
+### Capturing history and privacy
+
+Every field in `RuntimePublication` is **private server data**, not a generic browser/bot payload. Apply the existing viewer-specific projection/envelope builders only after fresh identity/seat authorization. No sockets, identity binding, transport counters or client delivery are implemented here.
+
+Use the detached notice for later asynchronous work, not a fresh `read()` of a potentially newer game. If a host needs owner-history metadata from its concrete committed history, capture/project that sidecar **synchronously in the listener before the first await**. This synchronous prefix is still at the serialized committed point, including same-head closure. Do not re-read mutable staging history after awaiting or assume matching heads prove a closure committed. Alternatively use a separately retained, validated committed storage frame. The generic History interface is unchanged; this seam does not turn arbitrary history reads into proof of commitment.
+
+Without `commit`, publication is only authoritative in memory, not crash durable. Restore requires a new live runtime/subscription baseline; publication sequence and delivery work are not recovered from checkpoints.
 
 ## Two kinds of time
 

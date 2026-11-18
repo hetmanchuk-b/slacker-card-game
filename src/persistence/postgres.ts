@@ -56,7 +56,7 @@ async function writeFrame(
 /** Explicit, transactional, checksum-checked migrations; requires DDL permission. */
 export async function migrate(pool: Pool): Promise<void> {
   const migrations = await Promise.all(
-    ['001_runtime.sql', '002_lobbies.sql'].map(async (name, index) => {
+    ['001_runtime.sql', '002_lobbies.sql', '003_guest_access.sql'].map(async (name, index) => {
       const sql = await readFile(new URL(`../../migrations/${name}`, import.meta.url), 'utf8');
       return { version: index + 1, sql, checksum: createHash('sha256').update(sql).digest('hex') };
     }),
@@ -350,6 +350,21 @@ export class PostgresSession {
         (old === null && record.current_game_id !== null)
       )
         throw new Error('Lobby transition conflict');
+      // Authenticated lobbies retain a durable clockwise roster. A join may win
+      // after private preparation: validate again under this same lobby lock.
+      // Empty membership preserves legacy trusted/internal lobby behavior.
+      const roster = await this.#client.query<{ seat_id: string }>(
+        'SELECT seat_id FROM penky_lobby_members WHERE lobby_id=$1 ORDER BY seat_index',
+        [binding.id],
+      );
+      if (
+        roster.rows.length &&
+        !isDeepStrictEqual(
+          request.seatIds,
+          roster.rows.map((member) => member.seat_id),
+        )
+      )
+        throw new Error('Lobby roster changed');
       if (old) await writeFrame(this.#client, old, this.#revision);
       await this.#client.query(
         'INSERT INTO penky_game_heads(game_id, root_branch_id, branch_id) VALUES ($1,$2,$2)',

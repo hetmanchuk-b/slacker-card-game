@@ -73,6 +73,14 @@ No runtime/storage interfaces or live projection contracts change. This does not
 
 See `docs/protocol.md` for shapes, exact procedure/evidence/ordinal references, technical bounds and retry semantics. This library does not implement authentication, lobby admission/readiness, raw transport byte/rate limits, canonical start-intent orchestration, committed capture/publication or queued evidence/selector resolution. Test-only explicit server bindings demonstrate accepted rule-breaking attempts and receipts; they are not production handlers or online verification. Existing internal runtime/persistence/projection contracts are unchanged.
 
+## Committed update seam — Stage 8.6
+
+`GameRuntime.subscribe(receive, report?)` attaches only to a live runtime, receives an initial detached baseline, and returns an unsubscribe function. This avoids leaking private successor preparation through construction callbacks. Successful committed changes produce one final private snapshot plus exact fresh action pairs; rollback includes only its new child rebase/reconciliation. Same-head control changes, closure and actual handoff have publication sequences/kinds independent of game-head versions. No runtime options, checkpoint/history/frame schemas or existing projection contracts change.
+
+Delivery promises are not awaited. Listener/reporter throws or rejections cannot enter command/deadline fault handling or undo committed receipts. Each listener receives its own clone after commit, published-read installation and deadline arming. Async completion order/backpressure, reliable delivery, transport epochs and authenticated projection remain host responsibilities; see `docs/runtime.md` for the complete interface and its synchronous capture constraints.
+
+Never serialize a `RuntimePublication` to clients/bots. Use its detached snapshot/action pairs for authorized projections. Additional committed history must be captured synchronously at the callback point, never reread from a mutable draft after an await. No subscription is installed on private match preparation; successor attachment follows the successful atomic start result.
+
 ## Timer and pause model
 
 Gameplay phase, claim/penalty procedure, and live connection suspension are separate concepts. A disconnected player does not erase the procedure being interrupted. `GameRuntime` turns injected clock deadlines into serialized system commands. The engine records logical clock suspension and the IDs of timers that were running; nested timers already paused by a claim/withdrawal remain paused.
@@ -92,9 +100,17 @@ Stage 7 now uses PostgreSQL with `pg` and explicit checksum-checked SQL migratio
 - Persist the lobby owner's session binding. Owner privileges are checked on every administrative command.
 - No implicit host transfer or spectator access to private history is introduced by this decision. Obtain agreement before adding host-transfer behavior.
 
+### Durable guest-access implementation — Stage 8.5
+
+Approved D004 is implemented in `src/server/guest-session.ts` and `guest-access.ts`: independent 256-bit bearer tokens with only SHA-256 verifiers stored; stable identity/seat binding; 30-day sliding expiry; revocation without membership deletion or ownership transfer; exact HTTPS-origin and host-only Secure/HttpOnly/SameSite=Lax cookie helpers. No account or recovery system is introduced. `003_guest_access.sql` is additive; existing private game frames and trusted lobby APIs remain unchanged.
+
+Owner lobby/membership creation is atomic. Access serializes on credential then lobby rows; new admission also locks the current game head and validates its exact committed frame before treating it as finished. Existing members may reconnect during play/full capacity. New seats append clockwise after owner index 0, capped at eight; expired/revoked seats remain occupied. Assigned unfinished/pre-creation-rollback games keep admission closed. A later rollback never changes the old match roster to include newly admitted lobby members.
+
+The match transition rechecks authenticated-lobby roster equality under its existing lobby lock, closing join-versus-prepared-start races without holding auth locks across a runtime queue. Legacy trusted lobbies have no automatic credential backfill/adoption. See `docs/guest-access.md` for APIs, lock order and residual integration boundaries. These libraries do not install HTTP/Socket.IO handlers, close expired/revoked sockets, infer game participation from membership, or make a returned binding a permanent authorization capability.
+
 ## Current implementation scope
 
-The engine and serialized runtime are executable: scheduling, connection suspension, replacement control, and checkpoint recovery now drive the existing game/claim procedures. In-memory branch history and trusted owner rollback are also executable, including pre-action timer rebasing and branch invalidation. PostgreSQL persistence and durable rollback/recovery are executable. Retained lobby chat and atomic actual-next-match transitions are also implemented. Baseline, scoped live/action and metadata-only owner-history projections are implemented as described above; authenticated committed delivery remains incomplete. External intent validation and safe envelope libraries are implemented as described above. Authenticated transport, bot decisions, and browser rendering remain later work. See `docs/history.md`. No running multiplayer server or browser application is claimed.
+The engine and serialized runtime are executable: scheduling, connection suspension, replacement control, and checkpoint recovery now drive the existing game/claim procedures. In-memory branch history and trusted owner rollback are also executable, including pre-action timer rebasing and branch invalidation. PostgreSQL persistence and durable rollback/recovery are executable. Retained lobby chat and atomic actual-next-match transitions are also implemented. Baseline, scoped live/action and metadata-only owner-history projections are implemented as described above, together with server-private committed runtime subscriptions. Actual authenticated committed network delivery remains incomplete. External intent validation and safe envelope libraries are implemented as described above. Durable guest credential/membership libraries are implemented as described above. Authenticated transport integration, bot decisions, and browser rendering remain later work. See `docs/history.md`. No running multiplayer server or browser application is claimed.
 
 ## Atomic automatic consequences
 

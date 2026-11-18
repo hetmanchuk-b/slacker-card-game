@@ -1,5 +1,25 @@
 # Open decisions discovered during implementation
 
+## D003 — Metadata-only owner history
+
+**Status:** approved and resolved for Stage 8.3 by the user.
+
+- Owner history across active and abandoned branches contains action labels/actors, violations, selected claim metadata and final decisions, branch labels, and completed-action rollback references.
+- No card faces or card handles appear, including previously public cards. No state previews or replayed reveal/peek/transfer observations are available through history.
+- Ordinary current seat visibility remains separate; ownership does not expand it. Individual ballot/approval choices and penalty selections are not administrative history disclosures.
+
+Implementation uses branch/action ordinals rather than raw branch/command/event/claim/procedure identifiers, avoiding accidental disclosure through identifiers derived from private data. The server must resolve an active rollback selector against a fresh matching committed capture and still enforce the existing owner, warning, head and closure checks. User-authored claim reasons remain text, not machine-enriched card descriptions. Committed capture and session authentication remain transport integration responsibilities.
+
+## D002 — Transient disclosure presentation
+
+**Status:** approved and resolved for Stage 8.2 by the user.
+
+- The private initial-recipient notice may be reissued on refresh/reconnect before the first successful draw. Out-of-turn attempts do not consume it; no continuing dealing-turn hint is added.
+- Hide the final-card reveal while its timer is suspended (including claims and disconnection). Resume only its remaining time; expiry never grants a new display window.
+- An illegal own-stump peek is a one-time fresh-action response to that seat. Do not replay it from snapshots, the private knowledge ledger, reconnect, history or duplicate receipts. A separate new illegal click is still a separate punishable action.
+
+These presentation decisions are reflected in rules §§3.2, 3.3 and 6.4. They do not change engine timers, physical card locations, rollback knowledge limits or bot-memory policy. Pure projectors cannot prove delivery freshness: the future authenticated publisher must supply committed action pairs and classify duplicate deliveries.
+
 ## D001 — Repetition entirely inside one round
 
 **Status:** approved and resolved in specification revision 1.3. No open product decision remains for D001.

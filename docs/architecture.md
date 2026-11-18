@@ -21,6 +21,50 @@ Tests cross these interfaces. No tests against private helper call order are req
 - A rejected command produces no action. A recognized in-game violation produces an accepted action with a violation outcome.
 - Engine state and raw events are private authoritative data. They must never be sent directly to browsers or bots.
 
+## Baseline current-state projections — Stage 8.1
+
+`src/projections/game.ts` provides `projectGame({ head, state }, viewer)`, a pure allowlisted view of a committed server snapshot. The viewer is a trusted server binding (`seat` with seat ID, or `public`), not a browser credential. Unknown seated viewers and game/head mismatches fail with fixed errors that do not echo identifiers or state. No engine, runtime or persistence contract changes are required.
+
+| Viewer | Private current data | Shared current data |
+| --- | --- | --- |
+| Bound active seat | Own hand faces and opaque own-stump command handles, never closed stump faces | Clockwise seat IDs/status/counts, public table bottom-to-top, deck/discard counts, safe phase/result fields and head |
+| Bound finished seat | Same seat-local rights, no additional access after exit | Same shared fields |
+| Public viewer | None | Same shared fields |
+
+Ownership does not elevate this view. Output objects/arrays are newly constructed; extra properties on private inputs are not copied. Only own-hand and public-table IDs are resolved to faces. The host remains responsible for face-independent opaque IDs and for supplying committed rather than staged snapshots.
+
+Dealing/reveal/pre-game-penalty phases expose only their type. Between-round and round phases expose leader/turn, round number and fixed target as applicable; no dealing-turn hint, trump, reveal face/timer or permanent trump record is included. Current results retain the existing revision 1.3 contracts; revision 1.4 changes remain Stage 11a work.
+
+This baseline remains deliberately minimal. Stage 8.2 adds separate scoped live/action projectors below, preserving `projectGame`'s contract. Neither projector is a bot memory API or a network endpoint; metadata-only owner history is a separate Stage 8.3 projector below, and authenticated resync remains later work.
+
+## Scoped live and action projections — Stage 8.2
+
+`projectLiveGame(snapshot, viewer, nowMs)` composes the baseline with current procedure/control views and authorized transient disclosures. Time is supplied by the trusted server, never read from a system clock in projections. D002 records the approved presentation policies:
+
+- Reissue the private initial-recipient notice only at dealing `drawCount=0` to the selected seat. Out-of-turn draws do not consume it.
+- Show the final card only while its reveal timer runs with positive remaining time. Hide it during claims/disconnect suspension and at the deadline even if the expiry callback is delayed. Resume with the captured remainder, never a new ten seconds. Normal own-hand visibility is unaffected.
+- Never expose `peekedStumps` in a current/reconnect view.
+
+Claim/withdrawal views select safe claim fields, eligible seats, timer durations and only the viewer's own ballot/approval. The suspended ballot is projected explicitly. Penalties expose recipient/reason and only the donor's own reserved selection; recipients do not learn reserved cards before completion. Presence selects seat/connected/controller fields. Replacement timers continue independently during gameplay suspension; no raw control audit, receipts or timestamps are returned.
+
+`projectAction({ before, after, action, delivery }, viewer)` is a **fresh committed action response**, not history or a reconnect feed. It checks same-game/same-branch adjacent heads and deterministic replay equality, replacing replay diagnostics with a fixed error. Only allowlisted movement/violation observations are returned, as one complete list: played cards and automatic pickups remain observable even when the final table is empty; draws/opens hide faces from other seats; the last draw does not create a permanent public reveal record. Illegal peeks are sent only to the actor for `delivery='fresh'`; duplicate deliveries yield no observations.
+
+Nonzero penalty transfers consume the pre-action penalty's reserved choices plus any final response in the batch; faces go only to donor and recipient on the matching completion event. Newly auto-started penalties cannot receive a second user response within that same action; zero-card completion discloses no cards. No partial authoritative state is published.
+
+**Caller obligations:** authenticate the viewer, use committed rather than staged snapshots, supply exact per-action pre/post pairs, and classify retries as duplicate. Replay consistency and a delivery tag do not establish freshness or durability; a stateless projector cannot prevent a trusted caller replaying identical fresh input. A runtime queue job may append several actions, so its overall head/state is not an individual action pair. The later committed-update publisher must integrate these APIs without leaking intermediate state or rebuilding private observations from history. Bot observation memory, rollback observation treatment and authorized delivery ordering remain their separate planned work.
+
+## Metadata-only owner history — Stage 8.3
+
+`projectOwnerHistory(capture, viewer)` implements D003 separately from current seat views. Its narrow trusted input is structurally compatible with `MemoryHistory.snapshot().value`: active/retained action histories, ancestry, immutable original owner, rollback closure and administrative audit. It does not read state snapshots or replay actions. Storage recovery/integrity validation and **successful commit capture** are caller obligations; taking a snapshot of an in-flight private draft does not make it committed. The pure projector checks viewer ownership before building output, validates structural game/head/ancestry references, and returns fixed errors without private diagnostics. Original ownership remains authoritative even when rollback restores a null pre-creation state.
+
+Each branch has an active/abandoned label and one row per completed atomic action, including inherited prefixes and synthetic rollback rebases. Rows select action labels and recorded actors, violations, safe claim fields and final verdict/withdrawal decisions. They do not infer an original command when the event batch lacks that information. Individual ballot/approval values, penalty choices, card faces/handles (even public cards), initial-recipient notices, raw events, timestamps inside timer/rebase payloads and state previews are omitted. User-authored claim reasons remain text; the projector never enriches them with card data.
+
+Branch numbers follow persisted ancestry insertion order. Display heads use `{ gameId, branch, version }`; claim links use their submission action version, and rollback audit links use ordinals. Raw branch/command/event/claim/procedure IDs are not display payloads, since they can contain correlated private data. Rows identify their original branch/version through nested ancestry. Administrative audit remains available even for a fork before creation with no synthetic action.
+
+Rollback targets exist only on the active timeline while rollback is open. They select `{ expected: displayHead, beforeActionVersion }`, where the version identifies the completed action to roll back **before**, never an internal event. Inherited active-prefix actions and synthetic rebase actions are valid targets; abandoned-only futures are not. Closure disables every target even though it does not advance the action head. The later authenticated adapter must compare the observed display head with a fresh committed capture, resolve its branch/action ordinals to the server's private head/command ID, and invoke the existing runtime owner/warning/version/closure checks. These selectors are not standalone rollback authorization or a new persistence format.
+
+No runtime/storage interfaces or live projection contracts change. This does not implement the future history endpoint, pagination/rate limits, delivery ordering or owner UI.
+
 ## Timer and pause model
 
 Gameplay phase, claim/penalty procedure, and live connection suspension are separate concepts. A disconnected player does not erase the procedure being interrupted. `GameRuntime` turns injected clock deadlines into serialized system commands. The engine records logical clock suspension and the IDs of timers that were running; nested timers already paused by a claim/withdrawal remain paused.
@@ -42,7 +86,7 @@ Stage 7 now uses PostgreSQL with `pg` and explicit checksum-checked SQL migratio
 
 ## Current implementation scope
 
-The engine and serialized runtime are executable: scheduling, connection suspension, replacement control, and checkpoint recovery now drive the existing game/claim procedures. In-memory branch history and trusted owner rollback are also executable, including pre-action timer rebasing and branch invalidation. PostgreSQL persistence and durable rollback/recovery are executable. Retained lobby chat and atomic actual-next-match transitions are also implemented. Authenticated transport, bot decisions, and browser rendering remain later work. See `docs/history.md`. No running multiplayer server or browser application is claimed.
+The engine and serialized runtime are executable: scheduling, connection suspension, replacement control, and checkpoint recovery now drive the existing game/claim procedures. In-memory branch history and trusted owner rollback are also executable, including pre-action timer rebasing and branch invalidation. PostgreSQL persistence and durable rollback/recovery are executable. Retained lobby chat and atomic actual-next-match transitions are also implemented. Baseline, scoped live/action and metadata-only owner-history projections are implemented as described above; authenticated committed delivery remains incomplete. Authenticated transport, bot decisions, and browser rendering remain later work. See `docs/history.md`. No running multiplayer server or browser application is claimed.
 
 ## Atomic automatic consequences
 

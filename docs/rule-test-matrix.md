@@ -13,29 +13,29 @@ The engine command/event/invariant interface, runtime clock/ordering interface, 
 | 1 | Clockwise seats, stable identities, stack order | `engine.test.ts`, `dealing.test.ts`, `rounds.test.ts` | Engine passing |
 | 2 | Lobby rules, owner edits, readiness reset, chat | Transport/client, stages 8–9 | Planned |
 | 3.1, 4 | 36 unique cards, trump, rank and suit comparisons | `src/game/cards.test.ts` | Passing |
-| 3.2 | Random recipient, two stump passes, uneven hands | `src/game/engine.test.ts`, `src/game/dealing.test.ts` | Engine passing for 2–8 seats; UI pending |
-| 3.3 | One-time 10-second reveal, last recipient leads | `dealing.test.ts`, `runtime/runtime.test.ts` | Engine/runtime deadline and suspension passing; UI/projections pending |
+| 3.2 | Random recipient, two stump passes, uneven hands | `src/game/engine.test.ts`, `src/game/dealing.test.ts`, `src/projections/live.test.ts`, `src/projections/actions.test.ts` | Engine passing for 2–8 seats; private initial-notice refresh boundary and redacted draw observations passing at 2/4/8; transport/UI pending |
+| 3.3 | One-time 10-second reveal, last recipient leads | `dealing.test.ts`, `runtime/runtime.test.ts`, `projections/live.test.ts`, `projections/actions.test.ts` | Timed projection hides suspended/expired reveal, resumes remainder and excludes permanent public action reveal; transport/UI pending |
 | 3.4 | Out-of-turn draw, random reinsertion, deferred penalties | `dealing.test.ts`, `claim-scopes.test.ts` | Engine passing, including spoken claims and deferred cancellation |
 | 5 | Fixed N, beat top, take bottom, two completion paths | `rounds.test.ts` | Engine passing |
 | 6.1 | One-use rights, hand obstruction, entitlement expiry | `stumps.test.ts` | Engine passing |
 | 6.2 | Mandatory opening and penalty-updated retry | `stumps.test.ts`, `penalties.test.ts` | Engine passing |
 | 6.3 | Automatic pickup for empty participant | `rounds.test.ts` | Engine passing, including pickup chains |
-| 6.4 | Own-stump peek; no access to others | `stumps.test.ts`; projections stage 8 | Engine passing; wire privacy pending |
+| 6.4 | Own-stump peek; no access to others | `stumps.test.ts`, `projections/actions.test.ts` | Fresh-action-only private peek, duplicate/reconnect suppression and separate repeat attempt passing; wire privacy pending |
 | 7, 13.1 | Round-bound exits, one loser, simultaneous victory | `rounds.test.ts`, `stumps.test.ts` | Engine passing |
 | 8.1 | Illegal action consequences and repeated attempts | `dealing.test.ts`, `rounds.test.ts`, `stumps.test.ts`, `penalties.test.ts` | Automatic consequences and distinct repeat attempts passing |
 | 8.2, 13.2 | Scoped claims, server ordering, sequential queue | `claims.test.ts`, `claim-scopes.test.ts` | Engine command ordering/scopes passing; authenticated evidence binding in stage 8 |
 | 8.3 | Eligible voters, abstention, ties, false claim | `claims.test.ts`, runtime tests | Engine and scheduling passing; network delivery pending |
 | 8.4, 13.4 | Withdrawal, unanimity, suspended timer | `withdrawal.test.ts`, `claim-scopes.test.ts` | Passing, including queued requests and deferred verdicts |
 | 8.4, 13.5 | Incident deduplication; spoken dispute remains social | `claims.test.ts`, `withdrawal.test.ts` | Canonical-key deduplication passing; spoken semantic identity remains manual |
-| 9 | Optional private transfer, never last card, timeout refusal | `penalties.test.ts`, runtime deadline tests | Engine/scheduling passing; wire privacy pending |
+| 9 | Optional private transfer, never last card, timeout refusal | `penalties.test.ts`, runtime deadline tests, `projections/live.test.ts`, `projections/actions.test.ts` | Engine/scheduling and donor-only reservations, sender/recipient-only completed transfers/timeout passing; wire privacy pending |
 | 10.1, 13.8 | Suspension priority, multiple absences, departed winners | `runtime.test.ts`, `presence.test.ts`, `clock.test.ts` | Runtime interface passing; physical socket integration pending |
 | 10.2 | 30-second wait, replacement vote, reconnection | `replacement.test.ts`, `recovery.test.ts` | Runtime control passing; lobby/UI integration pending |
 | 10.3, 13.6 | Bot observation limits and atomic handover | `replacement.test.ts`; bot/projections in stage 10 | Controller handover passing; bot strategy/observation memory not implemented |
-| 11, 15.1 | No secrets in player views or owner history | Projections/transport, stage 8 | Planned |
+| 11, 15.1 | No secrets in player views or owner history | `src/projections/*.test.ts`; transport in stage 8 | Baseline/live/action privacy and D003 metadata-only owner history passing at 2/4/8 seats; retained branches omit even public card faces/handles; authenticated wire privacy pending |
 | 12 | Conservation, structural validity, deterministic replay | `engine.test.ts`, `invariants.test.ts`, scenario helpers, history tests | Current engine phases, nested replay and generated rollback histories passing; broader adversarial command fuzzing remains Stage 12 |
 | 13.3 | Unused stump right survives temporary cards | `stumps.test.ts` | Passing |
 | 13.7 | Third repeated meaningful state, prior wins retained | `repetition.test.ts`, `match.test.ts` | Passing at settled action checkpoints, including in-round cycles (D001 resolved) |
-| 15.2–15.5 | Owner rollback, branches, timers, chat, knowledge warning | `persistence/branches.test.ts`, `runtime/rollback.test.ts`; stages 7–9 | Owner/branch/timer/acknowledgment behavior, PostgreSQL recovery, retained chat and atomic next-match handoff passing; authenticated delivery/UI pending |
+| 15.2–15.5 | Owner rollback, branches, timers, chat, knowledge warning | `persistence/branches.test.ts`, `runtime/rollback.test.ts`, `projections/history.test.ts`; stages 7–9 | Core/durable rollback and metadata-only owner timelines/targets passing, including pre-creation ownership, inherited prefixes and closure; authenticated delivery/selector resolution/UI pending |
 | 16 | Post-game strikes, card counts, force/aim, dodges, connection handling | Stage 11a | Approved rules documented; no implementation yet; revision 1.4 repetition-loser outcome also pending |
 
 ## Scenario coverage
@@ -92,7 +92,11 @@ The engine command/event/invariant interface, runtime clock/ordering interface, 
 - `src/persistence/generated-rollback.test.ts`: 19 generated-history tests: all fixture action points for nested phases at 2/4/8 seats and sampled checkpoints of complete 2–8-seat matches, including exact state/timers and snapshot/replay equivalence.
 - `src/runtime/handoff.test.ts`: 3 tests for both rollback/handoff queue orders, commit-gated retirement and non-fatal observer errors.
 - `src/persistence/lobby.postgres.test.ts`: 11 real database scenarios plus the parent test for retained authors/text/context, chat ordering/scopes, idempotent pagination/retries, owner validation, actual successor creation/recovery, failed preparation/INSERT and rollback/start races.
-- **Total with PostgreSQL enabled: 206 passing checks**. Without `PENKY_TEST_DATABASE_URL`, 180 tests pass and both PostgreSQL parent suites are explicitly skipped. Authenticated evidence resolution, private projections, bots, the minigame and browser flows remain pending.
+- `src/projections/game.test.ts`: 11 tests for bound-seat/public/finished current views at 2/4/8 seats, opaque own-stump handles without faces, ordered public table, hidden-face substitution, redacted phase/result fields, owner non-escalation, null/mismatched snapshots, safe errors, output isolation and unknown-property exclusion. This baseline excludes transient observations, procedures/control and history; it is not wire authorization or complete resync coverage.
+- `src/projections/live.test.ts`: 9 tests using real runtime/fake-clock fixtures for 2/4/8-seat initial notices, hidden suspended/expired reveal, exact resumed time, nested withdrawal, donor-only reservation, independent replacement clock, own-only ballots, safe time/viewer errors and detached outputs.
+- `src/projections/actions.test.ts`: 14 tests for 2/4/8-seat redacted draws, fresh-only private peeks and distinct repeated clicks, private opens/transfers, immediate discard and automatic pickups, duplicate suppression, exact pre/post branch/head/replay checks, redacted diagnostics, creation/final-draw secrecy, penalty timeouts/zero-card completion and prototype-like final-responder seat IDs.
+- `src/projections/history.test.ts`: 16 tests for 2/4/8-seat metadata-only owner timelines, fixed authorization/errors, active/abandoned/nested branches and inherited origins, original owner after pre-creation rollback, closure and completed-match availability, claims/final decisions without ballot/selection leakage, public/peek/transfer card and correlated-ID redaction, state-free projection, output isolation and archive/cache recovery equivalence.
+- **Current non-database gate: 230 passing tests and 2 skipped PostgreSQL parent suites**, verified with `npm run check` for Stage 8.3 (50 projection tests total). The previous database-enabled Stage 7 gate passed 206 checks; PostgreSQL was not rerun for this projection-only increment. Authenticated evidence resolution, committed history/selector delivery, bots, the minigame and browser flows remain pending.
 
 ## Verification commands
 

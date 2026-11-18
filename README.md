@@ -30,7 +30,9 @@ The eighth engine/runtime increment completes Stage 7 for the trusted server/sto
 - Old-branch command/deadline invalidation and atomic actual-next-match handoff, including rollback closure, successor state, lobby pointer and retry receipt.
 - Retained lobby chat with immutable authors, exact text and server-derived game/branch/scope context; rollback never deletes or relabels messages.
 
-**Not playable online yet:** private player/history projections, authenticated Socket.IO transport, bot decisions, and the browser/Three.js client are still planned. Scheduling, persistence and presence rules are server-side libraries, not a running network application. Chat/action evidence references remain trusted internal inputs until transport adapters resolve them against server history.
+**Stage 8 has started:** baseline and scoped live/action projections expose only authorized data, including timed reveals, seat-private fresh peek/open/transfer observations and redacted procedures/control state. Paused reveals are hidden; peek duplicates/reconnects do not replay the face. Owner history is metadata-only across active/abandoned branches, with safe rollback selectors but no card faces/handles or previews. Ownership and finishing grant no additional card visibility. Fifty projection tests cover privacy and runtime/history integration, including 2/4/8 seats.
+
+**Not playable online yet:** authenticated Socket.IO transport, committed history/update delivery, rollback selector resolution, bot decisions, and the browser/Three.js client are still planned. Scheduling, persistence and presence rules are server-side libraries, not a running network application. Chat/action evidence references remain trusted internal inputs until transport adapters resolve them against server history.
 
 **New rules, not implemented yet:** revision 1.4 adds a post-game deck-strike minigame and makes remaining participants losers when repetition ends a match. These approved changes are tracked in Stage 11a; current result contracts still follow revision 1.3.
 
@@ -89,4 +91,4 @@ The integration suite injects database faults; never point it at a shared databa
 
 Time and bounded randomness are injected into command decisions. Their outcomes are captured in events for deterministic replay. Card IDs must be opaque and independent of card faces.
 
-Raw engine state, events, and history snapshots contain private information. They are not network payloads and must not be exposed to players or bots. Authorized projections and transport validation will be implemented before a browser client is connected.
+Raw engine state, events, and history snapshots contain private information. They are not network payloads and must not be exposed to players or bots. `projectGame`, `projectLiveGame` and `projectAction` are allowlisted server-side projection APIs, not network endpoints or bot memory. Their caller authenticates viewers, supplies committed snapshots/action pairs and trusted time, and suppresses duplicate action delivery. `projectOwnerHistory` separately projects a trusted committed history capture into metadata-only owner timelines. Its display selectors must be resolved against fresh server history; they do not authorize rollback. Transport authentication, validation and committed delivery must be implemented before a browser client is connected.

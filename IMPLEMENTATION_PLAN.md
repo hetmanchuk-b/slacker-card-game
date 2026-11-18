@@ -18,7 +18,7 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - `src/game/cards.test.ts` covers deck uniqueness and rank/suit combinations.
 - The complete game engine, server, client, durable persistence, and bots are not implemented.
 
-### Progress — increment 8
+### Progress — increment 11
 
 **New approved direction, documentation only:** rules revision 1.4 adds a post-game little-finger/deck minigame and treats all participants remaining at a repetition draw as losers, preserving earlier winners. The current implementation still follows revision 1.3 for this outcome. No minigame or result changes have been implemented. Resolve §16.5 before implementing the affected behavior; planned work is tracked in Stage 11a below.
 
@@ -29,8 +29,9 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - **Stage 5: complete for the trusted engine interface.** Scoped claims, FIFO voting, false-claim punishments, timeout abstentions, unanimous withdrawal, deferred-punishment cancellation, and episode-key deduplication are implemented. Binding chat/action references to authoritative evidence remains transport work in Stage 8.
 - **Stage 6: complete for the runtime interface.** Serialized dispatch, automatic deadlines, nested timer suspension, multiple absences, replacement voting, controller handover, idempotent receipts, and checkpoint recovery are implemented. Bot decisions remain Stage 10; durable checkpoint storage is implemented in Stage 7.
 - **Stage 7: complete for the trusted server/storage interface.** PostgreSQL persists action archives, snapshots, receipts, branch/audit metadata, controllers and timers before publication. Materialized snapshot recovery agrees with full replay. Lobby chat retains immutable author/context metadata across rollback and matches. Actual match handoff validates the observed result head and commits the old rollback closure, new initial frame, lobby pointer and start receipt atomically. Fault/race tests and generated rollback checkpoints cover nested procedures and all supported seat counts. Browser/session authentication, readiness UI and future minigame gating remain their planned later stages.
-- **Stages 8–12 (including 11a): not started.** No HTTP/Socket.IO server or browser application is claimed to exist.
-- Verification: `npm run check` passes with **206 passing checks when PostgreSQL is enabled** (180 non-database tests plus the two integration suites and their parent tests). Normal checks without the database explicitly skip both PostgreSQL suites. CI provisions PostgreSQL 18 on Linux and runs ordinary checks on Windows/Linux. `npm audit --omit=dev` is clean; the pre-existing dev-toolchain advisory is documented in `docs/postgres.md`.
+- **Stage 8: started, projections only.** Increments 8.1–8.3 add baseline views, scoped live/action disclosures, redacted procedures/control state and metadata-only owner history. D002/D003 record approved disclosure policies. Authenticated transport, committed history/update delivery, selector resolution and full resync remain incomplete.
+- **Stages 9–12 (including 11a): not started.** No HTTP/Socket.IO server or browser application is claimed to exist.
+- Verification for increment 11 / Stage 8.3: `npm run check` passes with **230 passing non-database tests and 2 explicitly skipped PostgreSQL suites**, including 16 new history projection tests (50 projection tests total). Coverage includes 2/4/8-seat metadata privacy, retained/nested branches, pre-creation owner access, archive/cache recovery equivalence and a real runtime completed-match/queued-closure flow. No database, browser or transport verification was performed in this increment. The previous Stage 7 database-enabled gate passed 206 checks; it was not rerun here. CI provisions PostgreSQL 18 on Linux and runs ordinary checks on Windows/Linux. The pre-existing dev-toolchain advisory is documented in `docs/postgres.md`; dependency audits were not rerun in this increment.
 - Full deterministic engine matches for every seat count from 2 through 8 finish and replay identically in `src/game/match.test.ts`. The formerly looping 5-seat match now draws. This is engine integration coverage, not browser/online coverage.
 - Red/green checks cover the engine behaviors plus runtime scheduling, logical clock suspension, presence reconciliation, bot-replacement control, checkpoint restoration, recovery-metadata validation, and native system adapters.
 - Increment 1 was committed and pushed as `17d2c96` before increment 2 work began.
@@ -212,7 +213,41 @@ docs/            # Rules, scenarios, architecture decisions, operations
 
 **Depends on:** Stage 7; projection contract work may begin in Stage 1.
 
-- [ ] Implement separate participant, finished-player/spectator, and owner-history projections.
+### Increment 8.1 — Minimal current-state privacy projections (complete)
+
+- [x] Add `src/projections/game.ts` with an explicit trusted viewer selector and fresh allowlisted output, without changing engine/runtime/persistence contracts.
+- [x] Expose only the bound seat's hand faces and opaque own-stump handles; other seats expose status and card counts. Public viewers receive no private cards; finishing or ownership grants no additional visibility.
+- [x] Preserve public table order, deck/discard counts and explicit safe phase/result fields. Omit trump, dealing recipient/turn hints, catalog, deck order, closed stump faces, private knowledge, procedure payloads, repetition keys, events and history.
+- [x] Verify every seat at 2/4/8 seats, hidden-face substitution, public/finished/owner boundaries, null and mismatched snapshots, safe errors, output isolation and unknown-property exclusion with 11 tests.
+
+This baseline projector's contract remains unchanged. The caller must authenticate the viewer and supply face-independent opaque card IDs. It is not a bot memory or authenticated network endpoint; the broader checklist below remains incomplete.
+
+### Increment 8.2 — Scoped disclosures and redacted procedures/control (complete)
+
+- [x] Record approved D002 policies in the rules and decision workflow: reissue the private initial notice before the first successful draw; hide reveal while suspended and resume remaining time; show illegal peeks only in fresh action responses, never duplicate/reconnect views.
+- [x] Add `projectLiveGame` with trusted injected time, explicit claim/withdrawal/penalty and presence/replacement views. Only own ballots/approval/reserved card selection are returned; no raw incident keys, other seats' reserved cards, private peek ledger, control audit or timestamps.
+- [x] Add `projectAction` for an exact committed pre/post action pair, with adjacent same-game/branch heads, deterministic replay validation and fixed errors. Observe public draws/play/automatic pickups atomically, even immediate discard; keep open/peek/transfer faces seat-private and omit public historical reveal faces.
+- [x] Suppress observations for duplicate deliveries. Keep freshness/durability classification a trusted caller obligation; no delivery ledger, transport, persistence or runtime contract changes are introduced.
+- [x] Add 14 action tests and 9 live/runtime integration tests, including 2/4/8-seat notice/draw boundaries, nested timers, private reservations/transfers/timeouts, repeated versus duplicate peeks, invalid action contexts and output isolation.
+- [x] Address independent review's prototype-like seat-ID finding with a failing regression and computed own-property response accumulation; `__proto__`, `constructor` and `toString` donors retain final-response transfer observations.
+
+The pure projectors do not establish exactly-once network delivery. Future publication must capture exact per-action pairs after successful commit, not use raw private history or assume a whole runtime job contains one action. Owner history, bot memory and authenticated resync remain separate work.
+
+### Increment 8.3 — Metadata-only owner history (complete)
+
+- [x] Record approved D003: active/abandoned branch history has action/actor/violation/claim/decision metadata only, no card faces or handles even for previously public cards; current seat visibility remains separate.
+- [x] Add `projectOwnerHistory` over a narrow trusted committed capture compatible with existing history snapshots, checking immutable original owner even after rollback before game creation. Keep runtime/persistence/live contracts unchanged.
+- [x] Project one row per completed action, inherited origin, branch labels and administrative audit. Use branch/action/claim/audit ordinals instead of raw correlated identifiers; omit state previews, private observations, ballots, selections, raw events and extra properties.
+- [x] Expose only active/open completed-action rollback selectors pinned to the displayed head. Retained futures are read-only; closure disables every target without deleting history or assuming a head-version change. Future transport must resolve selectors and enforce existing runtime authorization/warning/head/closure checks.
+- [x] Add 16 tests for 2/4/8-seat privacy, original-owner boundaries, retained/nested prefixes and rebases, pre-creation rollback, closure/post-result availability, claims/decisions without ballot leakage, private/public card redaction, fixed errors, isolation and recovery equivalence.
+
+These are pure projection APIs, not authenticated endpoints. Committed capture, selector resolution and delivery remain future integration responsibilities; neither raw snapshots nor live observations are owner-history payloads.
+
+**Next increment 8.4:** external protocol contracts and runtime validation, separating browser intents/safe envelopes from trusted internal commands. Preserve deliberate current out-of-turn attempts; never accept browser actor/owner/controller/system identities.
+
+### Remaining Stage 8 work
+
+- [x] Implement separate participant, finished-player/spectator, and owner-history projections (pure APIs; authenticated delivery remains below).
 - [ ] Keep hidden card identifiers opaque; never encode suit/rank in public stump/deck handles.
 - [ ] Give each seat only its hand and legitimately disclosed observations; remove transient reveal data after its permitted display window.
 - [ ] Redact raw events, snapshots, branch previews, error messages, and reconnect payloads, not just the main game view.

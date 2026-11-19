@@ -18,7 +18,7 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - `src/game/cards.test.ts` covers deck uniqueness and rank/suit combinations.
 - The complete game engine, server, client, durable persistence, and bots are not implemented.
 
-### Progress — increment 26
+### Progress — increment 27
 
 **New approved direction, documentation only:** rules revision 1.4 adds a post-game little-finger/deck minigame and treats all participants remaining at a repetition draw as losers, preserving earlier winners. The current implementation still follows revision 1.3 for this outcome. No minigame or result changes have been implemented. Resolve §16.5 before implementing the affected behavior; planned work is tracked in Stage 11a below.
 
@@ -29,7 +29,9 @@ This plan describes implementation, not changes to agreed rules. If implementati
 - **Stage 5: complete for the trusted engine interface.** Scoped claims, FIFO voting, false-claim punishments, timeout abstentions, unanimous withdrawal, deferred-punishment cancellation, and episode-key deduplication are implemented. Authenticated chat/action evidence binding is now implemented in Stage 8.11; browser interaction remains later work.
 - **Stage 6: complete for the runtime interface.** Serialized dispatch, automatic deadlines, nested timer suspension, multiple absences, replacement voting, controller handover, idempotent receipts, and checkpoint recovery are implemented. Bot decisions remain Stage 10; durable checkpoint storage is implemented in Stage 7.
 - **Stage 7: complete for the trusted server/storage interface.** PostgreSQL persists action archives, snapshots, receipts, branch/audit metadata, controllers and timers before publication. Materialized snapshot recovery agrees with full replay. Lobby chat retains immutable author/context metadata across rollback and matches. Actual match handoff validates the observed result head and commits the old rollback closure, new initial frame, lobby pointer and start receipt atomically. Fault/race tests and generated rollback checkpoints cover nested procedures and all supported seat counts. Durable guest/session authentication is now integrated in Stage 8.5/8.8; readiness UI and future minigame gating remain their planned later stages.
-- **Stage 8: complete for the approved server/transport scope.** Increments 8.1–8.16 implement the authenticated transport and complete external 2/4/8-seat matches. Audit 8.17 identified routing/agreements prerequisites; approved D005 now accepts private per-socket delivery and 8.18 implements durable agreement acceptance and atomic new-start gating/reset. `ready` is consent only; epochs do not change per-member, so concurrent confirmations do not conflict. No browser/product/production completeness is claimed; Stage 9 is not started. D001–D005 are resolved for these implemented scopes.
+- **Stage 8: complete for the approved server/transport scope.** Increments 8.1–8.16 implement the authenticated transport and complete external 2/4/8-seat matches. Audit 8.17 identified routing/agreements prerequisites; approved D005 now accepts private per-socket delivery and 8.18 implements durable agreement acceptance and atomic new-start gating/reset. `ready` is consent only; epochs do not change per-member, so concurrent confirmations do not conflict. No full browser/product/production completeness is claimed. D001–D005 are resolved for these implemented scopes.
+- **Stage 9: started; only 9.1 complete.** Approved 9.1–9.16 breakdown below. The HTTPS React/Vite shell confirms cookie-only guest access, canonical lobby creation and own-seat/owner identity, preserving the exact request across uncertainty/reload without replacement credentials. Joining/agreements/application sockets/gameplay remain deferred.
+- Verification for increment 27 / Stage 9.1: normal `npm run check` **301 pass/seven explicit database skips**; dedicated `npm run test:postgres` **182 pass/no skips**; database-enabled `npm run check` **483 pass/no skips**; separate real Chromium/HTTPS/PostgreSQL browser gate **nine pass**. Six new Node client tests; existing authoritative server/game/storage source unchanged. Independent read-only Reviewer found no issues (did not independently execute checks). Production dependency audit: **zero vulnerabilities**. Browser matrix/manual assistive-technology/gameplay/production acceptance not claimed.
 - Verification for increment 26 / Stage 8.18: normal `npm run check` **295 pass/seven explicit PostgreSQL suite skips**; dedicated `npm run test:postgres` **182 pass/no skips**; database-enabled `npm run check` **477 pass/no skips** on newly created disposable tmpfs PostgreSQL 18. Two protocol tests, one runtime test, four guest database scenarios, three TLS workflow scenarios plus parent and one late-withdrawal TLS scenario added; all existing external matches now explicitly accept through HTTP. Independent read-only Reviewer found no issues. One additive migration and bounded HTTP/start-ack/private handoff extensions; no dependency, engine-state/frame/checkpoint/canonical-receipt format changes.
 - Verification for increment 25 / Stage 8.17 (documentation only): freshly rerun normal `npm run check` passes **292 tests/six explicit PostgreSQL suite skips**; database-enabled gate passes **465 tests/no skips**; dedicated `npm run test:postgres` passes **173 checks/no skips** on a newly created disposable tmpfs PostgreSQL 18 container. Independent read-only Scout/Reviewer validated the evidence mapping; Reviewer found no issues and did not execute checks. No code/test behavior, requirement waiver, API, dependency, rule or schema change.
 - Verification for increment 24 / Stage 8.16: normal `npm run check` passes **292 tests/six explicit PostgreSQL suite skips**; database-enabled gate passes **465 tests/no skips**; dedicated `npm run test:postgres` passes **173 checks/no skips** on a newly created disposable tmpfs PostgreSQL 18 container. New suite contains three complete 2/4/8-seat scenarios plus parent. Independent review identified three test weaknesses; public-order donor selection, positive actor-only peek assertions and exact rollback prefix/future checks address them, and bounded follow-up approved. Test-only changes; no production API, dependency, rule, schema or persistence format changes.
@@ -622,7 +624,147 @@ Original match agreement text/epoch remains immutable after later lobby edits an
 
 ## Stage 9 — Functional browser client
 
-**Depends on:** Stage 8.
+**Depends on:** Stage 8. **Status: started; only increment 9.1 is complete.** The operator approved the following small-increment breakdown and first implementation after read-only planning/Scout investigation. React/React DOM, Vite, required type packages and test-only Playwright are approved for this functional stage; no state-management/design framework, Three.js or new gameplay/server contract is added. Client runtime socket use remains deferred to 9.4.
+
+### Approved execution and test seams
+
+Execute one cohesive increment per run, test-first through client interfaces and browser affordances, then independent review and existing repository gates. Use Node tests for browser-independent client logic, real browser/HTTPS/disposable PostgreSQL for integration, and separately recorded manual accessibility/usability evidence. Screenshots/mocks/Node TLS clients alone are not browser or multiplayer acceptance. All proposed paths below live under `src/client/` unless explicitly qualified. Import wire DTO **types**, never authoritative engine/runtime/projector implementations. Keep acknowledgments, authoritative baseline, transient observations and local interactions separate. On disconnect/resync/branch/successor, discard stale interactions and never replay missed private observations. Preserve every existing architectural invariant and D002–D005; each new deliberate attempt gets a new ID while retries preserve the original exact operation.
+
+### Increment 9.1 — HTTPS shell, guest session and lobby creation (complete)
+
+- **Goal/scope:** real browser page → cookie-only guest session → canonical lobby creation → own-seat/owner display. Minimum build/dev/test startup only; no join/agreements/socket/game controls.
+- **Dependencies/files:** Stage 8 and approved tooling/topology; `main.tsx`, `App.tsx`, HTTP creation/session module and CSS/HTML; `src/dev/` HTTPS composition/CLI; Vite/client TS/Playwright config; package/build/lint/format/CI and `tests/browser/`.
+- **Acceptance:** Secure/HttpOnly cookie, no JS credential storage; original creation key survives uncertain replies/reload; invalid/lost session is not silently replaced; show only server-returned own identity.
+- **Tests:** unit request/retry/error/storage/single-flight behavior; real browser cookie/isolation/reload/error/keyboard/narrow-viewport cases; preserve existing server build/checks.
+- **Risks:** navigation has no Origin while API POST requires it; preserve exact Origin/cookie/TLS checks through a certificate-verified loopback HTTPS development front door. Public fixture certificates are test-only, never production or OS trust.
+
+**Implemented/verified handoff:** six public client-seam tests cover durable request equality after uncertainty/reload, refresh/issuance conflicts/failures, no original-session replacement, single-flight, invalid/unavailable storage and strict response allowlisting. The missing-module test failed before implementation. A browser expiry regression also failed before wiring the existing trusted transport clock seam into the test composition, then passed; no client-controlled time endpoint was added. Nine real Chromium/HTTPS/disposable-PG cases pass, including committed response loss/reload, cookie security/guest isolation, real server expiry/rate limits, retained invalid cookie/storage denial, Origin/private-source rejection and keyboard/narrow layout. Two screenshots were inspected at 1280×720 and 360×800 viewports; this is basic visual inspection, not manual multiplayer/assistive-technology or wider-browser certification.
+
+Normal `npm run check`: **301 passed/seven explicit PG suite skips**. Dedicated `npm run test:postgres`: **182 passed/no skips**. Database-enabled repository gate: **483 passed/no skips** (301 + 182, not additive independent coverage); separate browser gate: **nine passed**. Format/lint/server+client types/server+browser builds and `git diff --check` pass. `npm audit --omit=dev`: **zero vulnerabilities**. Checks ran locally on Windows/Node 26 with newly created disposable tmpfs PostgreSQL 18, removed after verification; CI is configured to run Chromium in its Linux/Node 24+26 disposable-PG jobs but those remote jobs were not executed here. Reviewer found no issues through read-only inspection and did not independently run tests. No existing server business code, wire DTO, migration, engine rule or persistence format changed. Development startup remains a source-only loopback tool, not production hosting. See `docs/browser-client.md` for explicit TLS/DB setup and operational boundaries. Commit/push handoff is explicitly authorized by the operator after verification. **Next dependency-ready increment: 9.2 only; stop here.**
+
+### Increment 9.2 — Join and restore own membership
+
+- **Goal/scope:** join by known opaque lobby ID and restore membership after reload/another tab.
+- **Dependencies/files:** 9.1; lobby join form, membership controller and nonsecret locator/navigation.
+- **Acceptance:** derive seat/index/role from authenticated join response; existing membership survives full/running lobby; cached identity is not authority.
+- **Tests:** join/rejoin/reload/tabs, wrong/full/running lobby, lost credential.
+- **Risks:** no lobby discovery, names/code recovery, seat reassignment or guest-self endpoint; never imply recovery or silently issue/rejoin with a replacement guest.
+
+### Increment 9.3 — Agreements and acceptance
+
+- **Goal/scope:** owner exact-text editing, member own acceptance/withdrawal and read-only immutable match agreements.
+- **Dependencies/files:** 9.2; lobby agreements/acceptance views and workflow controller.
+- **Acceptance:** same-epoch concurrent confirmations, actual-change reset, identical-text no-op, stale CAS refresh without automatic retarget, active-match lock.
+- **Tests:** edit/join/start reset causes, failed mutation, concurrent tabs/confirmations and exact safe rendering.
+- **Risks:** acceptance epoch is not a whole-view version; begin with explicit refresh, not polling/autosave that consumes the shared 12/minute lobby credential budget.
+
+### Increment 9.4 — Receipt-aware connection, first start and read-only game view
+
+- **Goal/scope:** owner first start plus safe authoritative observation before gameplay gestures.
+- **Dependencies/files:** 9.3; connection adapter, bounded pending-request handling, stream reducer, start control and read-only game view.
+- **Acceptance:** install nonce acknowledger before connect; attach via resync, start with stable request/intent, resync after first acknowledgment; show only projections and handle null-state rollback without fabricating an unassigned lobby.
+- **Tests:** old acknowledgments cannot regress state; same-head controls, stale epochs, action/state ordering, disconnect/resync reset and state-only recovery.
+- **Risks:** errors/state/history lack requestId; serialize uncorrelated requests and retain uncertainty. Never buffer/replay obsolete offline gameplay or interpret unavailable as proof no game exists.
+
+### Increment 9.5 — Manual dealing and transient disclosures
+
+- **Goal/scope:** deck click, visible actual draw actors, own drawn cards and D002 initial/reveal notices.
+- **Dependencies/files:** 9.4; deck/hand/stump display and transient disclosure controller.
+- **Acceptance:** permit out-of-turn draw attempts; no inferred next-recipient indicator or permanent trump. Hide reveal on expiry/pause/disconnect/reset, never restart a ten-second window on rerender.
+- **Tests:** 2/4/8 dealing, rejected draw, notice consumption, pause/resume, expiry and duplicates.
+- **Risks:** relative client countdown is display/removal only; no authoritative clock sync or turn/legality solver.
+
+### Increment 9.6 — Penalty contribution/refusal
+
+- **Goal/scope:** complete dealing and later penalties through own-card selection or explicit refusal.
+- **Dependencies/files:** 9.5; penalty view, own selection and shared timer display.
+- **Acceptance:** no stump/last-card donation; own reservations only; completed transfers only to donor/recipient; obsolete selection cleared.
+- **Tests:** contribution/refusal/timeout/stale IDs, privacy and restored interrupted turn.
+- **Risks:** reservation is not transfer; no optimistic movement/recipient disclosure or client-computed next turn.
+
+### Increment 9.7 — Click-based play, bottom pickup and own stump
+
+- **Goal/scope:** ordinary human matches playable with card/play/take/open clicks, including permitted violations.
+- **Dependencies/files:** 9.6; hand/table/stump controls and safe command/observation feedback.
+- **Acceptance:** exactly bottom pickup; wrong-turn/wrong-beat attempts remain available; same own-stump click opens or peeks without inferred eligibility/confirmation.
+- **Tests:** scenarios 2–10, automatic pickups/frozen target/temporary empty hands, legal open and one actor-only peek without movement.
+- **Risks:** agree fresh-peek presentation lifetime/dismissal before implementation; no invented timer, permanent face journal or legality hints.
+
+### Increment 9.8 — Click/drag equivalence
+
+- **Goal/scope:** deck/hand drag as another input for the same commands.
+- **Dependencies/files:** 9.7; small gesture adapter and local interaction state.
+- **Acceptance:** one intentional gesture → one command; no following-click duplicate; cancellation sends nothing; click/keyboard alternatives survive; resets cancel gestures.
+- **Tests:** pointer/touch/cancellation/click-after-drag/keyboard/resync during drag.
+- **Risks:** accidental page-scroll suppression, duplicate attempts and optimistic card exposure.
+
+### Increment 9.9 — Retained chat
+
+- **Goal/scope:** post/read lobby chat with existing bounded request/response pages; agreements stay accessible.
+- **Dependencies/files:** 9.4 (and existing 9.3 rules view); chat view and request/cursor controller.
+- **Acceptance:** exact plain text, durable messageId retries, original author/context across rollback, last-returned-sequence paging.
+- **Tests:** lost replies/duplicates/hostile markup/byte-prefix pages/gaps/reconnect/retention.
+- **Risks:** no live push; short pages do not prove completion and old evidence must not be relabeled current.
+
+### Increment 9.10 — Claims and voting
+
+- **Goal/scope:** spoken/chat/action evidence submission and visible sequential ballots.
+- **Dependencies/files:** 9.7 and 9.9; claim form, evidence metadata selection and vote view.
+- **Acceptance:** no inferred server scope/author; exact visible IDs; own ballot only; technical failure distinct from social verdict/accepted violation.
+- **Tests:** three evidence variants, 2/4/8 votes, ties/abstention/false claims/dedup/closed scopes/boundary races.
+- **Risks:** agree spoken episode naming/reuse UX; no machine text equivalence or face-bearing replay/evidence inspector.
+
+### Increment 9.11 — Withdrawal
+
+- **Goal/scope:** request/answer withdrawal and restore suspended ballot.
+- **Dependencies/files:** 9.10; withdrawal controls and procedure/timer presentation.
+- **Acceptance:** eligible approvals, unanimity, original remaining time on denial/timeout; stale responses never retargeted.
+- **Tests:** approval/denial/silence/nested pause/queued withdrawal/punishment cutoff.
+- **Risks:** separate withdrawal and suspended-ballot timers/answer maps must not be flattened.
+
+### Increment 9.12 — Presence, reconnect and replacement controls
+
+- **Goal/scope:** user-facing suspension, multiple absences, replacement voting and human handback; no bot decisions.
+- **Dependencies/files:** 9.4, 9.6 and 9.11; presence/replacement views and existing reset handling.
+- **Acceptance:** frozen nested timers, state-only reconnect, server-checked proposal eligibility, replacement cancellation/handback.
+- **Tests:** multiple tabs/absences, strictly >30s boundary, replacement timer during pause, return cancellation and no-human pause.
+- **Risks:** no server absence timestamp is projected; use proposal feedback, not an invented authoritative countdown. Autonomous continuation remains Stage 10.
+
+### Increment 9.13 — Metadata owner timeline
+
+- **Goal/scope:** current-match owner action/branch browsing and selectable completed-action rollback targets.
+- **Dependencies/files:** 9.4 and 9.7; metadata history view and ordinal target presentation.
+- **Acceptance:** owner-only, active/abandoned labels and closure; no faces/handles/previews/other ballots, including historical own cards.
+- **Tests:** nonowner denial, finished owner, null pre-creation state, abandoned/read-only and closed targets.
+- **Risks:** frame-bounded history has no pagination; measure representative long matches early and seek separate approval if pagination is necessary.
+
+### Increment 9.14 — Owner rollback and interaction invalidation
+
+- **Goal/scope:** warning/confirmation, exact selector submission, authorized notice and usable restored client.
+- **Dependencies/files:** 9.8, 9.11, 9.12 and 9.13; rollback confirmation/notices and central interaction reset.
+- **Acceptance:** clear gestures/evidence/procedure selection and old pending work; keep chat; no private-observation replay, automatic stale-selector retarget or promise of erased human knowledge.
+- **Tests:** scenarios 17–18, stale targets/retries/retained branches/null state/disconnected restored participants/timer remainder.
+- **Risks:** presence is live, not rollbackable; cached UI is never an authoritative restored snapshot.
+
+### Increment 9.15 — Results and successor
+
+- **Goal/scope:** existing result variants and agreement-gated next match.
+- **Dependencies/files:** 9.3, 9.7 and 9.14; result/successor views and current-game transition handling.
+- **Acceptance:** honest last-player/all-won/draw display; rollback until actual next start; exact finished head/stable retry; no repeated consent reset or regression to old acknowledged match.
+- **Tests:** results, stale head/start races, failed/uncertain starts, new-member reset and state-only successor.
+- **Risks:** revision-1.4 repetition losers/minigame stay deferred; no UI-only rule substitution.
+
+### Increment 9.16 — Browser acceptance gate
+
+- **Goal/scope:** integrated functional Stage 9 verification and confirmed integration fixes only.
+- **Dependencies/files:** all earlier increments; browser suites/CI and materially affected coverage/operations docs.
+- **Acceptance:** isolated 2/4/8 browser contexts complete UI-driven matches, violations/procedures/reconnect/rollback; record manual keyboard/touch/layout/usability evidence separately.
+- **Tests:** actual HTTPS/disposable PG browsers, uncertainty/stale stream/privacy, representative agreed browser matrix and Node transport regressions.
+- **Risks:** trusted backend match-finishing/fixtures or screenshots alone are not browser acceptance; replacement orchestration does not certify Stage 10 bot continuation or production security.
+
+**Default order:** 9.1 → 9.16, one per run. Chat/history can be scheduled once their explicit prerequisites exist; this does not authorize overlapping writers. Outstanding decisions remain scoped to their increment: fresh-peek display, spoken episode UX, practical history-size handling and broader browser/visual acceptance. No new game rules, recovery/discovery APIs, live push, server timing fields or redundant routing are inferred.
+
+### Overall Stage 9 checklist
 
 - [ ] Build lobby creation/joining, seat identity, owner controls, editable house-rule text, and readiness reset.
 - [ ] Build a simple functional table before polished 3D rendering.

@@ -56,7 +56,9 @@ The eighth engine/runtime increment completes Stage 7 for the trusted server/sto
 
 **Lobby agreements/acceptance implemented:** D005 accepts the existing private per-socket routing instead of redundant Socket.IO rooms. Authenticated HTTP lobby state, owner text editing and own-seat acceptance are durable. `ready` means agreement acceptance only, not general willingness to play. The revision is an acceptance epoch: actual text changes, new members and successful starts increment it and clear all acceptances; individual confirmations do not, so members can accept concurrently. Identical text, reconnects, failed starts and accepted start retries do not reset it. New starts atomically validate all durable members (owner/disconnected included), bind immutable match agreements and clear consent. Policy denial preserves the old writer/rollback window. No lobby live push or UI is added.
 
-**Not a complete online game yet:** agreements/acceptance UI, bot decisions, and the browser/Three.js client are still planned. A TLS transport component exists, but there is no application CLI or browser application. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
+**Stage 9.1 browser shell implemented:** React/Vite over loopback HTTPS now confirms a cookie-only guest session, creates one canonical lobby and displays only own seat/owner identity. Uncertain creation survives reload with the original nonsecret reference; missing/expired original credentials are not silently replaced. Six client tests and nine real Chromium/HTTPS/PostgreSQL tests cover this bounded slice. See [browser setup and boundaries](docs/browser-client.md).
+
+**Not a complete online game yet:** joining, agreements/acceptance UI, gameplay UI, bot decisions and Three.js are still planned. A source-only HTTPS development launcher exists, not a production game-server CLI. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
 
 **New rules, not implemented yet:** revision 1.4 adds a post-game deck-strike minigame and makes remaining participants losers when repetition ends a match. These approved changes are tracked in Stage 11a; current result contracts still follow revision 1.3.
 
@@ -80,10 +82,12 @@ npm run typecheck        # Strict type checking, including tests
 npm run lint
 npm run format:check
 npm run format           # Format source and configuration files
-npm run build            # JavaScript, declarations and source maps in dist/
+npm run build            # Server JS/declarations/maps plus dist/client/ browser assets
+npm run dev              # Loopback HTTPS; explicit DB/TLS setup required (see browser guide)
+npm run test:browser     # Chromium + disposable configured database required
 ```
 
-The build contains server-side libraries, an instantiable TLS transport component and a migration CLI, not a browser application or game-server CLI. Non-database tests need no PostgreSQL. For real persistence tests, see [PostgreSQL setup](docs/postgres.md):
+The build contains server-side libraries, an instantiable TLS transport component, a migration CLI and the bounded browser shell, not a production game-server CLI. The browser dev launcher runs from source. Non-database tests need no PostgreSQL. For real persistence tests, see [PostgreSQL setup](docs/postgres.md):
 
 ```sh
 npm run db:test:up
@@ -105,6 +109,7 @@ The integration suite injects database faults; never point it at a shared databa
 - [Runtime interface and recovery policy](docs/runtime.md)
 - [Durable local game host](docs/game-host.md)
 - [Authenticated HTTPS / Socket.IO resync](docs/transport.md)
+- [Browser client and loopback HTTPS development](docs/browser-client.md)
 - [Branch history and rollback](docs/history.md)
 - [PostgreSQL setup, storage and recovery](docs/postgres.md)
 - [Lobby chat and atomic match transitions](docs/lobby-persistence.md)

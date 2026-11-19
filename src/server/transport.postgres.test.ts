@@ -106,6 +106,7 @@ function acknowledge(socket: Socket) {
 async function message(socket: Socket, payload: unknown): Promise<ServerMessage> {
   const input = payload as { requestId?: string; intent?: { type?: string } };
   const resyncing = input?.intent?.type === 'resync';
+  const history = input?.intent?.type === 'owner-history';
   const oldEpoch = latestEpoch.get(socket);
   const result = new Promise<ServerMessage>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -117,7 +118,9 @@ async function message(socket: Socket, payload: unknown): Promise<ServerMessage>
         value.type !== 'error' &&
         !(resyncing
           ? value.type === 'state' && value.delivery.epoch !== oldEpoch
-          : value.type === 'command-ack' && value.requestId === input?.requestId)
+          : history
+            ? value.type === 'owner-history'
+            : value.type === 'command-ack' && value.requestId === input?.requestId)
       )
         return;
       clearTimeout(timer);
@@ -321,6 +324,270 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
         .every((socket) => (latestState.get(socket)?.view.head.version ?? -1) >= head.version),
     );
   }
+
+  await t.test(
+    'a history request queued before resync cannot adopt its new stream generation',
+    async (t) => {
+      const context = await fixture(t, 2, 60000);
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      let invalidated!: () => void;
+      const cancelled = new Promise<void>((resolve) => {
+        invalidated = resolve;
+      });
+      const subscribe = context.host.subscribe.bind(context.host);
+      const subscription = t.mock.method(
+        context.host,
+        'subscribe',
+        async (...args: Parameters<typeof subscribe>) => {
+          const stop = await subscribe(...args);
+          return () => {
+            invalidated();
+            stop();
+          };
+        },
+      );
+      const lobbyId = context.members[0]!.lobbyId;
+      for (const socket of sockets) await message(socket, resync(lobbyId));
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const waiting = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const membership = context.access.membership.bind(context.access);
+      let blocked = false;
+      const auth = t.mock.method(
+        context.access,
+        'membership',
+        async (...args: Parameters<typeof membership>) => {
+          if (!blocked) {
+            blocked = true;
+            entered();
+            await gate;
+          }
+          return membership(...args);
+        },
+      );
+      const seen: ServerMessage[] = [];
+      sockets[0]!.on('server-message', (message: ServerMessage) => seen.push(message));
+      const pending = play(context, sockets[0]!, { type: 'take-bottom' });
+      await waiting;
+      sockets[0]!.emit('client-message', {
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        intent: { type: 'owner-history', gameId: context.start.gameId },
+      });
+      const baseline = message(sockets[0]!, resync(lobbyId));
+      try {
+        await cancelled;
+        release();
+        await pending;
+        assert.equal((await baseline).type, 'state');
+        assert.equal(
+          seen.some((message) => message.type === 'owner-history'),
+          false,
+        );
+      } finally {
+        release();
+        auth.mock.restore();
+        subscription.mock.restore();
+      }
+    },
+  );
+
+  await t.test(
+    'owner history and rollback enforce ownership, warning, exact heads and canonical retries across forks/recovery',
+    async (t) => {
+      const context = await fixture(t);
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      const lobbyId = context.members[0]!.lobbyId;
+      for (const socket of sockets) await message(socket, resync(lobbyId));
+      const historyRequest = {
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        intent: { type: 'owner-history', gameId: context.start.gameId },
+      };
+      assert.deepEqual(await message(sockets[1]!, historyRequest), {
+        protocolVersion: 1,
+        type: 'error',
+        code: 'unauthorized',
+      });
+      assert.deepEqual(
+        await message(sockets[0]!, {
+          ...historyRequest,
+          intent: { ...historyRequest.intent, gameId: 'wrong' },
+        }),
+        { protocolVersion: 1, type: 'error', code: 'wrong-game' },
+      );
+      const read = async () => (await context.host.read(lobbyId))!.snapshot;
+      const draw = async () => {
+        const snapshot = await read();
+        if (snapshot.state!.phase.type !== 'dealing') assert.fail();
+        const actor = context.members.findIndex(
+          (seat) =>
+            snapshot.state!.phase.type === 'dealing' &&
+            seat.seatId === snapshot.state!.phase.nextSeatId,
+        );
+        accepted(
+          await play(context, sockets[actor]!, {
+            type: 'draw-card',
+            branchId: snapshot.head.branchId,
+          }),
+        );
+      };
+      await draw();
+      let history = await message(sockets[0]!, historyRequest);
+      if (history.type !== 'owner-history') assert.fail();
+      const target = {
+        expected: history.view.head,
+        beforeActionVersion: history.view.head.version,
+      };
+      const request = {
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        intent: { type: 'rollback', target, knowledgeWarningAcknowledged: true },
+      };
+      const reject = (reply: ServerMessage, code: string) => {
+        if (reply.type !== 'command-ack' || reply.result.type !== 'rejected')
+          assert.fail(JSON.stringify(reply));
+        assert.equal(reply.result.code, code);
+      };
+      reject(
+        await message(sockets[0]!, {
+          ...request,
+          intent: { ...request.intent, knowledgeWarningAcknowledged: false },
+        }),
+        'warning-required',
+      );
+      reject(
+        await message(sockets[0]!, {
+          ...request,
+          intent: {
+            ...request.intent,
+            target: { ...target, expected: { ...target.expected, branch: 999 } },
+          },
+        }),
+        'unknown-target',
+      );
+      const notice: ServerMessage[] = [];
+      sockets[0]!.on('server-message', (value: ServerMessage) => {
+        if (value.type === 'rollback-notice') notice.push(value);
+      });
+      const first = accepted(await message(sockets[0]!, request), 'control');
+      reject(await message(sockets[0]!, { ...request, requestId: randomUUID() }), 'wrong-branch');
+      reject(
+        await message(sockets[0]!, {
+          ...request,
+          intent: { ...request.intent, knowledgeWarningAcknowledged: false },
+        }),
+        'command-id-reused',
+      );
+      await draw();
+      history = await message(sockets[0]!, historyRequest);
+      if (history.type !== 'owner-history') assert.fail();
+      const next = {
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        intent: {
+          type: 'rollback',
+          target: { expected: history.view.head, beforeActionVersion: history.view.head.version },
+          knowledgeWarningAcknowledged: true,
+        },
+      };
+      await draw();
+      reject(await message(sockets[0]!, next), 'version-conflict');
+      history = await message(sockets[0]!, historyRequest);
+      if (history.type !== 'owner-history') assert.fail();
+      accepted(
+        await message(sockets[0]!, {
+          ...next,
+          intent: {
+            ...next.intent,
+            target: { expected: history.view.head, beforeActionVersion: history.view.head.version },
+          },
+        }),
+        'control',
+      );
+      assert.ok(await context.host.recover(lobbyId));
+      await message(sockets[0]!, resync(lobbyId));
+      assert.deepEqual(accepted(await message(sockets[0]!, request), 'control').result, {
+        ...first.result,
+        duplicate: true,
+      });
+      history = await message(sockets[0]!, historyRequest);
+      if (history.type !== 'owner-history') assert.fail();
+      assert.equal(history.view.branches.length, 3);
+      assert.equal(history.view.head.branch, 3);
+      assert.equal(notice.length, 2, 'no replay after retry or recovery');
+    },
+  );
+
+  for (const count of [2, 4, 8])
+    await t.test(
+      `${count} seats receive a safe rollback notice, while only owner receives metadata history`,
+      async (t) => {
+        const context = await fixture(t, count);
+        const sockets = await Promise.all(
+          context.grants.map((_grant, index) => context.connect(index)),
+        );
+        const lobbyId = context.members[0]!.lobbyId;
+        for (const socket of sockets) await message(socket, resync(lobbyId));
+        const history = await message(sockets[0]!, {
+          protocolVersion: 1,
+          requestId: randomUUID(),
+          intent: { type: 'owner-history', gameId: context.start.gameId },
+        });
+        if (history.type !== 'owner-history') assert.fail(JSON.stringify(history));
+        const serialized = JSON.stringify(history);
+        for (const card of context.start.cardIds) assert.equal(serialized.includes(card), false);
+        for (const key of ['"face"', '"events"', '"state"', '"commandId"', '"branchId"'])
+          assert.equal(serialized.includes(key), false, key);
+        const seen = sockets.map(() => [] as ServerMessage[]);
+        sockets.forEach((socket, index) =>
+          socket.on('server-message', (message: ServerMessage) => seen[index]!.push(message)),
+        );
+        const request = {
+          protocolVersion: 1,
+          requestId: randomUUID(),
+          intent: {
+            type: 'rollback',
+            target: { expected: history.view.head, beforeActionVersion: 1 },
+            knowledgeWarningAcknowledged: true,
+          },
+        };
+        const first = accepted(await message(sockets[0]!, request), 'control');
+        await until(async () =>
+          seen.every((messages) => messages.some((message) => message.type === 'rollback-notice')),
+        );
+        for (const messages of seen) {
+          const notice = messages.find((message) => message.type === 'rollback-notice');
+          if (notice?.type !== 'rollback-notice') assert.fail();
+          assert.equal(notice.notice.actorId, context.members[0]!.seatId);
+          assert.deepEqual(notice.notice.target, request.intent.target);
+          assert.equal(notice.notice.head.version, 0);
+          assert.equal(notice.notice.head.branch, 2);
+          assert.equal(
+            messages.some((message) => message.type === 'owner-history'),
+            false,
+          );
+          for (const card of context.start.cardIds)
+            assert.equal(JSON.stringify(notice).includes(card), false);
+        }
+        const retry = accepted(await message(sockets[0]!, request), 'control');
+        assert.deepEqual(retry.result, { ...first.result, duplicate: true });
+        const empty = await message(sockets[0]!, {
+          protocolVersion: 1,
+          requestId: randomUUID(),
+          intent: { type: 'owner-history', gameId: context.start.gameId },
+        });
+        if (empty.type !== 'owner-history') assert.fail();
+        assert.equal(empty.view.head.version, 0);
+        assert.equal(empty.view.branches.length, 2);
+        assert.equal(seen[0]!.filter((message) => message.type === 'rollback-notice').length, 1);
+      },
+    );
 
   await t.test(
     'closed chat/action scopes cannot be relabeled; claim receipts survive scope advance and durable recovery',
@@ -1236,7 +1503,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
     },
   );
 
-  for (const kind of ['draw', 'claim'] as const)
+  for (const kind of ['draw', 'claim', 'rollback', 'history'] as const)
     for (const mode of ['disconnect', 'revoke', 'expire'] as const)
       await t.test(
         `${mode} while a ${kind} command waits in the runtime queue cannot execute through retained seat presence`,
@@ -1246,11 +1513,14 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
           for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
           const initial = (await context.host.read(context.members[0]!.lobbyId))!.snapshot;
           if (initial.state!.phase.type !== 'dealing') assert.fail();
-          const actor = context.members.findIndex(
-            (member) =>
-              initial.state!.phase.type === 'dealing' &&
-              member.seatId === initial.state!.phase.nextSeatId,
-          );
+          const actor =
+            kind === 'rollback' || kind === 'history'
+              ? 0
+              : context.members.findIndex(
+                  (member) =>
+                    initial.state!.phase.type === 'dealing' &&
+                    member.seatId === initial.state!.phase.nextSeatId,
+                );
           const keeper = await context.connect(actor);
           await message(keeper, resync(context.members[0]!.lobbyId));
           let release!: () => void;
@@ -1281,18 +1551,34 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
           sockets[actor]!.emit('client-message', {
             protocolVersion: 1,
             requestId,
-            intent: {
-              ...(kind === 'draw'
-                ? { type: 'draw-card' }
-                : {
-                    type: 'submit-claim',
-                    accusedId: context.members[(actor + 1) % 2]!.seatId,
-                    reason: 'Queued claim',
-                    evidence: { type: 'spoken', key: 'queued' },
-                  }),
-              gameId: context.start.gameId,
-              branchId: context.start.branchId,
-            },
+            intent:
+              kind === 'rollback'
+                ? {
+                    type: 'rollback',
+                    target: {
+                      expected: {
+                        gameId: context.start.gameId,
+                        branch: 1,
+                        version: initial.head.version,
+                      },
+                      beforeActionVersion: 1,
+                    },
+                    knowledgeWarningAcknowledged: true,
+                  }
+                : kind === 'history'
+                  ? { type: 'owner-history', gameId: context.start.gameId }
+                  : {
+                      ...(kind === 'draw'
+                        ? { type: 'draw-card' }
+                        : {
+                            type: 'submit-claim',
+                            accusedId: context.members[(actor + 1) % 2]!.seatId,
+                            reason: 'Queued claim',
+                            evidence: { type: 'spoken', key: 'queued' },
+                          }),
+                      gameId: context.start.gameId,
+                      branchId: context.start.branchId,
+                    },
           });
           await until(
             async () =>
@@ -1342,10 +1628,13 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
             },
           );
           assert.equal(
-            received.some((reply) => reply.type === 'command-ack'),
+            received.some(
+              (reply) => reply.type === 'command-ack' || reply.type === 'owner-history',
+            ),
             false,
           );
-          if (mode === 'disconnect') accepted(await play(context, keeper, { type: 'draw-card' }));
+          if (mode === 'disconnect' && (kind === 'draw' || kind === 'claim'))
+            accepted(await play(context, keeper, { type: 'draw-card' }));
         },
       );
 
@@ -2434,7 +2723,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
   );
 
   await t.test(
-    'deferred admin, malformed and oversized payloads never dispatch game actions',
+    'deferred chat, malformed and oversized payloads never dispatch game actions',
     async (t) => {
       const context = await fixture(t);
       const socket = await context.connect();
@@ -2444,8 +2733,10 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
         protocolVersion: 1,
         requestId: randomUUID(),
         intent: {
-          type: 'owner-history',
-          gameId: context.start.gameId,
+          type: 'chat-history',
+          lobbyId: context.members[0]!.lobbyId,
+          afterSequence: '0',
+          limit: 10,
         },
       };
       assert.deepEqual(await message(socket, payload), {

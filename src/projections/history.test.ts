@@ -8,7 +8,28 @@ import { fixture } from '../runtime/testing/fixtures.ts';
 import { finishMatch } from '../runtime/testing/match.ts';
 import type { GameCommand } from '../game/contracts.ts';
 import type { CommandId } from '../game/ids.ts';
-import { projectOwnerHistory } from './history.ts';
+import { projectOwnerHistory, projectRollbackNotice } from './history.ts';
+
+test('rollback notices contain only actor and ordinal target/result, including rollback before creation', () => {
+  const { history, seats } = fixture('reveal', 4);
+  fork(history, id('command', 'draw-0'));
+  const first = projectRollbackNotice(history.snapshot().value);
+  assert.deepEqual(first, {
+    actorId: seats[0],
+    target: {
+      expected: { gameId: history.read().head.gameId, branch: 1, version: 37 },
+      beforeActionVersion: 2,
+    },
+    head: { gameId: history.read().head.gameId, branch: 2, version: 2 },
+  });
+  fork(history, id('command', 'start'), 'empty', 13000);
+  const empty = projectRollbackNotice(history.snapshot().value);
+  assert.deepEqual(empty.head, { gameId: history.read().head.gameId, branch: 3, version: 0 });
+  assert.equal(empty.target.beforeActionVersion, 1);
+  assert.equal(empty.target.expected.branch, 2);
+  for (const text of ['opaque-', 'commandId', 'branchId', 'state', 'events', 'cards', 'draw-0'])
+    assert.equal(JSON.stringify(empty).includes(text), false, text);
+});
 
 function append(history: MemoryHistory, command: GameCommand, nowMs = 11000) {
   const snapshot = history.read();

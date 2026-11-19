@@ -6,7 +6,7 @@ import { projectAction } from '../projections/actions.ts';
 import type { ActionProjectionInput } from '../projections/actions.ts';
 import type { GameViewer } from '../projections/game.ts';
 import { projectOwnerHistory } from '../projections/history.ts';
-import type { OwnerHistoryInput } from '../projections/history.ts';
+import type { HistoryHead, OwnerHistoryInput, RollbackNotice } from '../projections/history.ts';
 import { projectLiveGame } from '../projections/live.ts';
 import type { RuntimeResult, RuntimeSnapshot } from '../runtime/runtime.ts';
 import { PROTOCOL_LIMITS, PROTOCOL_VERSION, PUBLIC_REJECTIONS } from './contracts.ts';
@@ -18,6 +18,7 @@ import type {
   ErrorMessage,
   MatchStartAck,
   OwnerHistoryMessage,
+  RollbackNoticeMessage,
   PublicChatMessage,
   StateMessage,
   TechnicalError,
@@ -121,6 +122,33 @@ export function makeActionMessage(
     view: projectAction(input, viewer),
   };
 }
+/** The notice was projected from a committed fork by the host. Copy every
+ * field explicitly: extra trusted diagnostics must never become payloads.
+ */
+export function makeRollbackNoticeMessage(
+  notice: RollbackNotice,
+  delivery: Delivery,
+): RollbackNoticeMessage {
+  const head = (value: HistoryHead): HistoryHead => ({
+    gameId: value.gameId,
+    branch: value.branch,
+    version: value.version,
+  });
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    type: 'rollback-notice',
+    delivery: deliveryView(delivery),
+    notice: {
+      actorId: notice.actorId,
+      target: {
+        expected: head(notice.target.expected),
+        beforeActionVersion: notice.target.beforeActionVersion,
+      },
+      head: head(notice.head),
+    },
+  };
+}
+
 export function makeOwnerHistoryMessage(
   input: OwnerHistoryInput,
   viewer: GameViewer,

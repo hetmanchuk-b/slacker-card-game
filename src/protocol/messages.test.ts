@@ -7,6 +7,7 @@ import { fixture } from '../runtime/testing/fixtures.ts';
 import { projectLiveGame } from '../projections/live.ts';
 import { projectOwnerHistory } from '../projections/history.ts';
 import {
+  makeRollbackNoticeMessage,
   makeStateMessage,
   makeActionMessage,
   makeOwnerHistoryMessage,
@@ -21,6 +22,34 @@ import type { RuntimeResult, RuntimeSnapshot } from '../runtime/runtime.ts';
 
 const delivery = { epoch: 'server-epoch', sequence: 3 };
 const requestId = id('command', 'request');
+
+test('rollback envelopes copy only allowlisted ordinal metadata, not extra private fields', () => {
+  const head = { gameId: id('game', 'game'), branch: 2, version: 0, private: 'SECRET' };
+  const input = {
+    actorId: id('seat', 'owner'),
+    target: {
+      expected: { ...head, branch: 1, version: 3 },
+      beforeActionVersion: 1,
+      private: 'SECRET',
+    },
+    head,
+    private: 'SECRET',
+  };
+  const message = makeRollbackNoticeMessage(input, delivery);
+  assert.deepEqual(message, {
+    protocolVersion: 1,
+    type: 'rollback-notice',
+    delivery,
+    notice: {
+      actorId: input.actorId,
+      target: { expected: { gameId: head.gameId, branch: 1, version: 3 }, beforeActionVersion: 1 },
+      head: { gameId: head.gameId, branch: 2, version: 0 },
+    },
+  });
+  assert.equal(JSON.stringify(message).includes('SECRET'), false);
+  input.head.version = 10;
+  assert.equal(message.notice.head.version, 0);
+});
 
 test('state and owner-history envelopes invoke only authorized projections and copy stream metadata', () => {
   const { history, seats, clock } = fixture('reveal', 4);

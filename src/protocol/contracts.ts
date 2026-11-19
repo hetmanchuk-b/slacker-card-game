@@ -11,7 +11,7 @@ import type {
   SeatId,
 } from '../game/ids.ts';
 import type { ActionView } from '../projections/actions.ts';
-import type { HistoryHead, OwnerHistoryView } from '../projections/history.ts';
+import type { HistoryHead, OwnerHistoryView, RollbackNotice } from '../projections/history.ts';
 import type { LiveGameView } from '../projections/live.ts';
 
 export const PROTOCOL_VERSION = 1;
@@ -155,6 +155,12 @@ export type OwnerHistoryMessage = Readonly<{
   delivery: Delivery;
   view: OwnerHistoryView;
 }>;
+export type RollbackNoticeMessage = Readonly<{
+  protocolVersion: 1;
+  type: 'rollback-notice';
+  delivery: Delivery;
+  notice: RollbackNotice;
+}>;
 export type PublicChatMessage = Readonly<{
   id: MessageId;
   lobbyId: LobbyId;
@@ -197,5 +203,6 @@ export type ServerMessage =
   | StateMessage
   | ActionMessage
   | OwnerHistoryMessage
+  | RollbackNoticeMessage
   | ChatPage
   | MatchStartAck;

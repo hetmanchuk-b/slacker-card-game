@@ -104,6 +104,156 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   }
 
   await t.test(
+    'owner captures include committed same-head closure and dispatch still enforces it',
+    async (t) => {
+      const { host, clock, member, request } = await setup(t);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        for (let index = 0; index < 36; index++) {
+          const phase = runtime.read().state!.phase;
+          if (phase.type !== 'dealing') assert.fail();
+          await runtime.dispatch({
+            type: 'draw-card',
+            id: id('command', randomUUID()),
+            actorId: phase.nextSeatId,
+          });
+        }
+        await clock.advanceBy(10000);
+        await finishMatch(runtime);
+      });
+      const before = await host.observeHistory(
+        member.lobbyId,
+        request.gameId,
+        async (capture) => capture,
+      );
+      assert.equal(before.closedRollback, false);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        assert.equal(await runtime.closeForNextMatch(), true);
+      });
+      const after = await host.observeHistory(
+        member.lobbyId,
+        request.gameId,
+        async (capture) => capture,
+      );
+      assert.deepEqual(after.active.head, before.active.head);
+      assert.equal(after.closedRollback, true);
+      const result = await host.rollback(member.lobbyId, request.gameId, {
+        id: id('command', randomUUID()),
+        actorId: member.seatId,
+        target: {
+          expected: { gameId: request.gameId, branch: 1, version: after.active.head.version },
+          beforeActionVersion: 1,
+        },
+        knowledgeWarningAcknowledged: true,
+      });
+      assert.equal(result.type, 'rejected');
+      if (result.type === 'rejected') assert.equal(result.code, 'rollback-closed');
+    },
+  );
+
+  await t.test(
+    'failed durable rollback never publishes a notice or exposes its staged branch to owner capture',
+    async (t) => {
+      const { host, member, request } = await setup(t);
+      const before = await host.observeHistory(
+        member.lobbyId,
+        request.gameId,
+        async (capture) => capture,
+      );
+      const notices: HostPublication[] = [];
+      await host.subscribe(member.lobbyId, (notice) => {
+        notices.push(notice);
+      });
+      const input = {
+        id: id('command', randomUUID()),
+        actorId: member.seatId,
+        target: {
+          expected: { gameId: request.gameId, branch: 1, version: before.active.head.version },
+          beforeActionVersion: 1,
+        },
+        knowledgeWarningAcknowledged: true,
+      };
+      const remove = await failFrames(t, request.gameId);
+      await assert.rejects(host.rollback(member.lobbyId, request.gameId, input));
+      await remove();
+      await writerExited(request.gameId);
+      const recovered = await host.observeHistory(
+        member.lobbyId,
+        request.gameId,
+        async (capture) => capture,
+      );
+      assert.equal(recovered.archives.length, 0);
+      assert.equal(recovered.audit.length, 0);
+      assert.equal(recovered.parents.length, 1);
+      assert.equal(
+        notices.some((notice) => notice.type === 'publication' && notice.rollback !== undefined),
+        false,
+      );
+    },
+  );
+
+  await t.test(
+    'committed owner captures resolve ordinal rollbacks and stable retries, including before creation',
+    async (t) => {
+      const { host, member, joined, request } = await setup(t);
+      const notices: HostPublication[] = [];
+      await host.subscribe(member.lobbyId, (notice) => {
+        notices.push(notice);
+      });
+      const capture = await host.observeHistory(
+        member.lobbyId,
+        request.gameId,
+        async (capture) => capture,
+      );
+      assert.equal(capture.ownerId, member.seatId);
+      assert.ok(capture.active.head.version >= 1);
+      const rollback = {
+        id: id('command', randomUUID()),
+        actorId: member.seatId,
+        target: {
+          expected: { gameId: request.gameId, branch: 1, version: capture.active.head.version },
+          beforeActionVersion: 1,
+        },
+        knowledgeWarningAcknowledged: true,
+      };
+      await assert.rejects(
+        host.rollback(member.lobbyId, request.gameId, { ...rollback, actorId: joined.seatId }),
+      );
+      const first = await host.rollback(member.lobbyId, request.gameId, rollback);
+      assert.equal(first.type, 'accepted');
+      const empty = await host.observeHistory(
+        member.lobbyId,
+        request.gameId,
+        async (capture) => capture,
+      );
+      assert.equal(empty.active.head.version, 0);
+      assert.equal(empty.ownerId, member.seatId);
+      const fresh = notices.filter((notice) => notice.type === 'publication' && notice.rollback);
+      assert.equal(fresh.length, 1);
+      if (fresh[0]!.type !== 'publication') assert.fail();
+      assert.equal(fresh[0]!.rollback!.target.beforeActionVersion, 1);
+      assert.deepEqual(await host.rollback(member.lobbyId, request.gameId, rollback), {
+        ...first,
+        duplicate: true,
+      });
+      await host.recover(member.lobbyId);
+      assert.deepEqual(await host.rollback(member.lobbyId, request.gameId, rollback), {
+        ...first,
+        duplicate: true,
+      });
+      const collision = await host.rollback(member.lobbyId, request.gameId, {
+        ...rollback,
+        knowledgeWarningAcknowledged: false,
+      });
+      assert.equal(collision.type, 'rejected');
+      if (collision.type === 'rejected') assert.equal(collision.code, 'command-id-reused');
+      assert.equal(
+        notices.filter((notice) => notice.type === 'publication' && notice.rollback).length,
+        1,
+      );
+    },
+  );
+
+  await t.test(
     'lobby subscriptions invalidate retired writers and rebind state-only after recovery without action replay',
     async (t) => {
       const { host, member, request } = await setup(t);

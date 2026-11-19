@@ -13,12 +13,15 @@ import type {
   RuntimePublication,
 } from '../runtime/runtime.ts';
 import type { HostPublication } from './game-host.ts';
+import type { RollbackNotice } from '../projections/history.ts';
 import { AcknowledgedOutbound } from './outbound.ts';
 import { RuntimeAdmissionError } from '../runtime/runtime.ts';
 import { GameHostError } from './game-host.ts';
 import { decodeClientMessage } from '../protocol/decode.ts';
 import {
   makeActionMessage,
+  makeOwnerHistoryMessage,
+  makeRollbackNoticeMessage,
   makeCommandAck,
   makeStateMessage,
   protocolError,
@@ -130,6 +133,7 @@ type Peer = {
   seatId: SeatId | null;
   publications: {
     publication: RuntimePublication;
+    rollback?: RollbackNotice;
     epoch: string;
     generation: number;
     bytes: number;
@@ -272,10 +276,11 @@ export class PenkyTransport {
         if (decoded.type === 'decoded' && decoded.message.intent.type === 'resync')
           this.#unwatch(peer);
         const watch = peer.watch;
+        const generation = peer.generation;
         peer.queued++;
         peer.pending = this.#track(
           peer.pending
-            .then(() => this.#message(peer, args[0], watch))
+            .then(() => this.#message(peer, args[0], watch, generation))
             .finally(() => {
               peer.queued--;
             }),
@@ -619,6 +624,122 @@ export class PenkyTransport {
     }
   }
 
+  async #admin(peer: Peer, message: ClientMessage, generation: number): Promise<void> {
+    const intent = message.intent;
+    if (intent.type !== 'owner-history' && intent.type !== 'rollback') return;
+    if (!peer.lobbyId || !peer.detach) {
+      this.#error(peer, 'unauthorized');
+      return;
+    }
+    const gameId = intent.type === 'owner-history' ? intent.gameId : intent.target.expected.gameId;
+    try {
+      const binding = await this.#options.access.requireOwner(
+        peer.token,
+        peer.lobbyId,
+        this.#now(),
+      );
+      if (!this.#live(peer)) return;
+      if (binding.currentGameId !== gameId) {
+        this.#error(peer, 'wrong-game');
+        return;
+      }
+      if (intent.type === 'owner-history') {
+        await peer.outbound.prepare(
+          async (emit) => {
+            if (!this.#live(peer) || generation !== peer.generation) return;
+            await this.#options.host.observeHistory(
+              peer.lobbyId!,
+              gameId,
+              async (capture, epoch) => {
+                const valid = await this.#options.access.inspectSeat(
+                  peer.token,
+                  peer.lobbyId!,
+                  this.#now(),
+                );
+                if (!valid || this.#now() >= valid.expiresAtMs) {
+                  this.#stop(peer);
+                  return;
+                }
+                if (
+                  valid.sessionId !== binding.sessionId ||
+                  valid.seatId !== capture.ownerId ||
+                  valid.seatId !== binding.seatId
+                )
+                  throw new RuntimeAdmissionError();
+                if (
+                  !this.#live(peer) ||
+                  generation !== peer.generation ||
+                  valid.currentGameId !== gameId ||
+                  (peer.epoch !== null && peer.epoch !== epoch)
+                )
+                  return;
+                emit(
+                  makeOwnerHistoryMessage(
+                    capture,
+                    { type: 'seat', seatId: valid.seatId },
+                    { epoch: `${epoch}:${peer.streamId}`, sequence: ++peer.sequence },
+                  ),
+                );
+              },
+            );
+          },
+          Math.min(65536, this.#delivery.bytes),
+          generation,
+        );
+        return;
+      }
+      const result = await this.#options.host.rollback(
+        peer.lobbyId,
+        gameId,
+        {
+          id: message.requestId,
+          actorId: binding.seatId,
+          target: intent.target,
+          knowledgeWarningAcknowledged: intent.knowledgeWarningAcknowledged,
+        },
+        {
+          controller: 'human',
+          admit: async (snapshot) => {
+            const valid = await this.#options.access.inspectSeat(
+              peer.token,
+              peer.lobbyId!,
+              this.#now(),
+            );
+            if (!valid || this.#now() >= valid.expiresAtMs) {
+              this.#stop(peer);
+              return false;
+            }
+            const seat = snapshot.connections.find((seat) => seat.seatId === binding.seatId);
+            return (
+              this.#live(peer) &&
+              valid.sessionId === binding.sessionId &&
+              valid.seatId === binding.seatId &&
+              valid.currentGameId === gameId &&
+              seat?.connected === true &&
+              seat.controller === 'human'
+            );
+          },
+        },
+      );
+      const valid = await this.#options.access.inspect(peer.token, this.#now());
+      if (!valid || this.#now() >= valid.expiresAtMs) {
+        this.#stop(peer);
+        return;
+      }
+      if (this.#live(peer)) peer.outbound.enqueue(makeCommandAck(message.requestId, result));
+    } catch (error) {
+      if (error instanceof GameHostError && error.message === 'wrong-game')
+        this.#error(peer, 'wrong-game');
+      else if (
+        (error instanceof RuntimeAdmissionError && error.code === 'unauthorized') ||
+        (error instanceof GuestAccessError &&
+          ['authentication-required', 'membership-required', 'owner-only'].includes(error.code))
+      )
+        this.#error(peer, 'unauthorized');
+      else this.#stop(peer, 'unavailable');
+    }
+  }
+
   #discardStream(peer: Peer): void {
     peer.generation++;
     peer.streamId = randomUUID();
@@ -658,7 +779,7 @@ export class PenkyTransport {
       this.#discardStream(peer);
     peer.epoch = notice.epoch;
     peer.branch = branch;
-    const bytes = Buffer.byteLength(JSON.stringify(publication));
+    const bytes = Buffer.byteLength(JSON.stringify({ publication, rollback: notice.rollback }));
     if (
       peer.publications.length + Number(peer.publishing) >= this.#delivery.jobs ||
       peer.publicationBytes + bytes > this.#delivery.captureBytes
@@ -669,6 +790,7 @@ export class PenkyTransport {
     peer.publicationBytes += bytes;
     peer.publications.push({
       publication,
+      ...(notice.rollback ? { rollback: notice.rollback } : {}),
       epoch: notice.epoch,
       generation: peer.generation,
       bytes,
@@ -683,7 +805,8 @@ export class PenkyTransport {
         const item = peer.publications.shift()!;
         try {
           const actions = item.publication.kind === 'initial' ? [] : item.publication.actions;
-          for (let index = 0; index <= actions.length; index++) {
+          const noticeCount = item.rollback ? 1 : 0;
+          for (let index = 0; index <= actions.length + noticeCount; index++) {
             if (item.generation !== peer.generation || !this.#live(peer)) break;
             await peer.outbound.prepare(
               async (emit) => {
@@ -732,8 +855,14 @@ export class PenkyTransport {
                         sequence: ++peer.sequence,
                       };
                       let message: ServerMessage;
-                      if (index < actions.length)
-                        message = makeActionMessage(actions[index]!, viewer, delivery);
+                      if (item.rollback && index === 0)
+                        message = makeRollbackNoticeMessage(item.rollback, delivery);
+                      else if (index - noticeCount < actions.length)
+                        message = makeActionMessage(
+                          actions[index - noticeCount]!,
+                          viewer,
+                          delivery,
+                        );
                       else {
                         if (item.publication.kind === 'initial') {
                           // The authorized baseline starts here, not before slow SQL.
@@ -785,11 +914,23 @@ export class PenkyTransport {
     }
   }
 
-  async #message(peer: Peer, value: unknown, watch: number): Promise<void> {
+  async #message(peer: Peer, value: unknown, watch: number, generation: number): Promise<void> {
     if (!this.#live(peer)) return;
     const decoded = decodeClientMessage(value);
     if (decoded.type !== 'decoded') {
       this.#error(peer, decoded.code);
+      return;
+    }
+    if (
+      decoded.message.intent.type === 'owner-history' ||
+      decoded.message.intent.type === 'rollback'
+    ) {
+      if (
+        decoded.message.intent.type === 'owner-history' &&
+        (watch !== peer.watch || generation !== peer.generation)
+      )
+        return;
+      await this.#admin(peer, decoded.message, generation);
       return;
     }
     if (decoded.message.intent.type !== 'resync') {

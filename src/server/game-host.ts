@@ -17,6 +17,17 @@ import type {
 import { resolveClaimEvidence } from './claim-evidence.ts';
 import { systemInputs } from '../runtime/system.ts';
 import type { GuestMembership } from './guest-access.ts';
+import { RuntimeAdmissionError } from '../runtime/runtime.ts';
+import type { RollbackCommand, RuntimeResult } from '../runtime/runtime.ts';
+import type { HistoryHead, OwnerHistoryInput, RollbackNotice } from '../projections/history.ts';
+import { projectRollbackNotice } from '../projections/history.ts';
+
+export type OwnerRollbackRequest = Readonly<{
+  id: RollbackCommand['id'];
+  actorId: RollbackCommand['actorId'];
+  target: Readonly<{ expected: HistoryHead; beforeActionVersion: number }>;
+  knowledgeWarningAcknowledged: boolean;
+}>;
 
 type Inputs = Omit<RuntimeOptions, 'history' | 'commit' | 'connectedSeatIds'>;
 type Entry = LiveMatch & { gameId: GameId; lobbyId: LobbyId; epoch: string };
@@ -24,7 +35,12 @@ type Connection = Pick<GuestMembership, 'lobbyId' | 'seatId'>;
 export type HostedSnapshot = Readonly<{ epoch: string; snapshot: RuntimeSnapshot }>;
 /** Private committed stream/lifecycle seam, never a network payload. */
 export type HostPublication =
-  | Readonly<{ type: 'publication'; epoch: string; publication: RuntimePublication }>
+  | Readonly<{
+      type: 'publication';
+      epoch: string;
+      publication: RuntimePublication;
+      rollback?: RollbackNotice;
+    }>
   | Readonly<{ type: 'invalidated'; epoch: string }>;
 type Observer = {
   active: boolean;
@@ -127,7 +143,14 @@ export class PostgresGameHost {
           observer.epoch === entry.epoch &&
           this.#entries.get(entry.gameId) === entry
         )
-          this.#notify(observer, { type: 'publication', epoch: entry.epoch, publication });
+          this.#notify(observer, {
+            type: 'publication',
+            epoch: entry.epoch,
+            publication,
+            ...(publication.kind === 'rollback'
+              ? { rollback: projectRollbackNotice(this.#history(entry)) }
+              : {}),
+          });
       },
       () => {
         try {
@@ -154,15 +177,104 @@ export class PostgresGameHost {
     expectedGameId: GameId,
     operation: (runtime: GameRuntime, epoch: string) => Promise<T>,
   ): Promise<T> {
+    return this.#withEntry(lobbyId, expectedGameId, (entry) =>
+      operation(entry.runtime, entry.epoch),
+    );
+  }
+
+  #withEntry<T>(
+    lobbyId: LobbyId,
+    expectedGameId: GameId,
+    operation: (entry: Entry) => Promise<T>,
+  ): Promise<T> {
     return this.#enqueue(async () => {
       const entry = await this.#current(lobbyId, expectedGameId);
       if (!entry) throw new GameHostError('wrong-game');
       try {
-        return await operation(entry.runtime, entry.epoch);
+        return await operation(entry);
       } catch (error) {
         if (!this.#healthy(entry)) await this.#release(entry, false);
         throw error;
       }
+    });
+  }
+
+  /** Only call from a runtime observation or synchronous committed publication.
+   * A matching head alone does not prove the staging history is committed.
+   */
+  #history(entry: Entry): OwnerHistoryInput {
+    entry.runtime.read(); // Reject a faulted draft, including a failed same-head closure.
+    const value = entry.session.history.snapshot().value;
+    const branch = ({ head, actions }: OwnerHistoryInput['active']) => ({ head, actions });
+    return {
+      active: branch(value.active),
+      archives: value.archives.map(branch),
+      parents: value.parents,
+      ownerId: value.ownerId,
+      closedRollback: value.closedRollback,
+      audit: value.audit,
+    };
+  }
+
+  /** Bounded server callback under a committed read-only queue point. Never
+   * re-enter host/runtime queues or await network delivery from the callback.
+   */
+  observeHistory<T>(
+    lobbyId: LobbyId,
+    gameId: GameId,
+    operation: (capture: OwnerHistoryInput, epoch: string) => Promise<T>,
+  ): Promise<T> {
+    return this.#withEntry(lobbyId, gameId, (entry) =>
+      entry.runtime.observe(async () => operation(this.#history(entry), entry.epoch)),
+    );
+  }
+
+  rollback(
+    lobbyId: LobbyId,
+    gameId: GameId,
+    request: OwnerRollbackRequest,
+    options: DispatchOptions = {},
+  ): Promise<RuntimeResult> {
+    const input = structuredClone(request);
+    return this.#withEntry(lobbyId, gameId, async (entry) => {
+      const resolved = await entry.runtime.observe(
+        async (snapshot): Promise<RollbackCommand | RuntimeResult> => {
+          const capture = this.#history(entry);
+          if (capture.ownerId !== input.actorId) throw new RuntimeAdmissionError();
+          const expected = input.target.expected;
+          const branchId = capture.parents[expected.branch - 1]?.[0];
+          const source = [capture.active, ...capture.archives].find(
+            (branch) => branch.head.branchId === branchId,
+          );
+          const action = source?.actions[input.target.beforeActionVersion - 1];
+          if (
+            expected.gameId !== gameId ||
+            !source ||
+            !action ||
+            input.target.beforeActionVersion < 1 ||
+            input.target.beforeActionVersion > expected.version ||
+            expected.version > source.head.version
+          )
+            return { type: 'rejected', code: 'unknown-target', head: snapshot.head };
+          // Retained source branches also reconstruct accepted retry identity.
+          // New archived/stale requests still fail dispatch's exact-head checks.
+          return {
+            type: 'rollback',
+            id: input.id,
+            actorId: input.actorId,
+            expected: { gameId, branchId: source.head.branchId, version: expected.version },
+            beforeCommandId: action.commandId,
+            knowledgeWarningAcknowledged: input.knowledgeWarningAcknowledged,
+          };
+        },
+      );
+      if (resolved.type !== 'rollback') return resolved;
+      // Never dispatch from inside observe. Preserve canonical expected head;
+      // an intervening action or same-head closure rejects instead of retargeting.
+      return entry.runtime.dispatch(resolved, {
+        controller: options.controller ?? 'human',
+        ...(options.admit ? { admit: options.admit } : {}),
+      });
     });
   }
 

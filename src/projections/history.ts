@@ -107,6 +107,28 @@ export type OwnerHistoryView = Readonly<{
   }>[];
 }>;
 
+export type RollbackNotice = Readonly<{
+  actorId: SeatId;
+  target: Readonly<{ expected: HistoryHead; beforeActionVersion: number }>;
+  head: HistoryHead;
+}>;
+
+/** Public administrative metadata only; caller supplies a fresh committed fork
+ * capture and authenticates recipients. Never a history or action replay.
+ */
+export function projectRollbackNotice(input: OwnerHistoryInput): RollbackNotice {
+  if (!input.ownerId) throw new Error('Rollback notice unavailable');
+  const view = projectOwnerHistory(input, { type: 'seat', seatId: input.ownerId });
+  const last = view.rollbacks.at(-1);
+  if (!last || last.restored.branch !== view.head.branch)
+    throw new Error('Rollback notice unavailable');
+  return {
+    actorId: last.actorId,
+    target: { expected: last.abandoned, beforeActionVersion: last.beforeAction.version },
+    head: view.head,
+  };
+}
+
 function summary(
   event: DomainEvent,
   version: number,

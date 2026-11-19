@@ -60,7 +60,11 @@ The eighth engine/runtime increment completes Stage 7 for the trusted server/sto
 
 **Stage 9.2 join/restoration implemented:** known lobby references and nonsecret URL fragments support explicit same-cookie reload/new-tab membership confirmation. Fresh guest entry requires explicit consent; restoration never issues credentials, and original creation retries remain separate. Seven additional client tests and nine additional browser cases verify join/retry/expiry, full/running admission and validation recovery.
 
-**Not a complete online game yet:** agreements/acceptance UI, gameplay UI, bot decisions and Three.js are still planned. A source-only HTTPS development launcher exists, not a production game-server CLI. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
+**Stage 9.3 agreements/acceptance UI implemented:** explicit snapshots support owner exact-text editing, own acceptance/withdrawal and separate read-only original match terms. Concurrent members accept one epoch; stale/uncertain changes require a fresh read without automatic resubmission. Seven additional client tests and eleven additional browser cases cover resets, locks, exact UTF-8/CRLF text, privacy and recoverable drafts.
+
+**Stage 9.4 connection/first start implemented:** same-origin receipt-aware WSS supports explicit attach, owner first start, immutable retries after uncertainty/reload, state-only resync and a read-only projected count/phase/control summary. Historical acknowledgments never become current state; assigned null state is not an empty lobby. Eleven additional Node tests and six browser cases cover ordering, nonce loss, retries, suspension, rollback-to-null and preserved proxy authorization.
+
+**Not a complete online game yet:** interactive dealing/card presentation/gameplay UI, bot decisions and Three.js are still planned. A source-only HTTPS development launcher exists, not a production game-server CLI. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
 
 **New rules, not implemented yet:** revision 1.4 adds a post-game deck-strike minigame and makes remaining participants losers when repetition ends a match. These approved changes are tracked in Stage 11a; current result contracts still follow revision 1.3.
 

@@ -81,7 +81,8 @@ button:hover:not(:disabled) {
 }
 button:focus-visible,
 a:focus-visible,
-input:focus-visible {
+input:focus-visible,
+textarea:focus-visible {
   outline: 3px solid #20303a;
   outline-offset: 4px;
 }
@@ -168,6 +169,46 @@ input:user-invalid {
 a {
   color: #126b54;
   overflow-wrap: anywhere;
+}
+.game-connection {
+  margin-block-start: 2rem;
+  padding-block-start: 1.5rem;
+  border-block-start: 1px solid #c0cdd3;
+}
+.connection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+.agreements {
+  margin-block-start: 2rem;
+  padding-block-start: 1.5rem;
+  border-block-start: 1px solid #c0cdd3;
+}
+.agreements label {
+  display: block;
+}
+.agreement-text {
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-block-size: 2rem;
+}
+textarea {
+  display: block;
+  inline-size: 100%;
+  max-inline-size: 100%;
+  min-block-size: 8rem;
+  resize: vertical;
+  font: inherit;
+  font-size: max(1rem, 1em);
+  padding: 0.6rem;
+  margin-block-start: 0.5rem;
+  border: 1px solid #657780;
+  border-radius: 0.3rem;
+}
+textarea:user-invalid {
+  border-color: #9f3134;
 }
 @media (max-width: 44rem) {
   main {

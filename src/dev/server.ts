@@ -1,6 +1,7 @@
 import { Agent, createServer } from 'node:https';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import type { Duplex } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
 import type { ViteDevServer } from 'vite';
@@ -40,6 +41,11 @@ export async function startBrowserDevServer(options: Options) {
       handler(req, res);
     },
   );
+  const connections = new Set<Duplex>();
+  front.on('connection', (socket) => {
+    connections.add(socket);
+    socket.once('close', () => connections.delete(socket));
+  });
   front.headersTimeout = 5000;
   front.requestTimeout = 10000;
   const host = new PostgresGameHost(options.pool);
@@ -62,6 +68,7 @@ export async function startBrowserDevServer(options: Options) {
             await new Promise<void>((resolve) => {
               front.close(() => resolve());
               front.closeAllConnections();
+              for (const socket of connections) socket.destroy();
             });
           }
         }
@@ -93,7 +100,7 @@ export async function startBrowserDevServer(options: Options) {
       logLevel: 'error',
       clearScreen: false,
       server: {
-        middlewareMode: true,
+        middlewareMode: { server: front },
         host: '127.0.0.1',
         port: actualPort,
         hmr: { server: front, protocol: 'wss', host: '127.0.0.1', clientPort: actualPort },
@@ -101,7 +108,10 @@ export async function startBrowserDevServer(options: Options) {
           strict: true,
           allow: [clientRoot, fileURLToPath(new URL('../../node_modules/', import.meta.url))],
         },
-        proxy: { '/api/': { target: upstream, changeOrigin: false, secure: true, agent } },
+        proxy: {
+          '/api/': { target: upstream, changeOrigin: false, secure: true, agent },
+          '/socket.io/': { target: upstream, ws: true, changeOrigin: false, secure: true, agent },
+        },
       },
     });
     handler = (req, res) => vite!.middlewares(req, res);

@@ -9,6 +9,8 @@ import {
   validLobbyLocator,
 } from './lobby-membership.ts';
 import type { MembershipResult } from './lobby-membership.ts';
+import { LobbyAgreements } from './LobbyAgreements.tsx';
+import { GameConnectionView } from './GameConnectionView.tsx';
 
 const messages = {
   unavailable:
@@ -72,6 +74,7 @@ export function App() {
     }
   });
   const [busy, setBusy] = useState(false);
+  const [agreementGeneration, setAgreementGeneration] = useState(0);
   const [result, setResult] = useState<CreationResult | MembershipResult | null>(null);
   const secure = window.isSecureContext && window.location.protocol === 'https:';
   async function create(event: FormEvent<HTMLFormElement>) {
@@ -214,7 +217,7 @@ export function App() {
               Open Penky over HTTPS before creating a lobby.
             </p>
           ) : null}
-          <p role="status">{busy ? 'Checking your guest session and confirming one lobby.' : ''}</p>
+          <p role="status">{busy ? 'Confirming the request with the server.' : ''}</p>
           {navigationWarning ? (
             <p role="alert">
               Lobby confirmed, but its address could not be saved. Keep the lobby reference or open
@@ -259,6 +262,25 @@ export function App() {
               <p className="quiet">
                 Seat numbers identify places in the lobby, not whose turn it is.
               </p>
+              <GameConnectionView
+                key={`game:${membership.lobbyId}:${membership.seatId}`}
+                onRouteChange={() => setAgreementGeneration((value) => value + 1)}
+                membership={membership}
+                busy={busy}
+                onBusy={(value) => {
+                  inFlight.current = value;
+                  setBusy(value);
+                }}
+              />
+              <LobbyAgreements
+                key={`${membership.lobbyId}:${membership.seatId}:ui:${agreementGeneration}`}
+                membership={membership}
+                busy={busy}
+                onBusy={(value) => {
+                  inFlight.current = value;
+                  setBusy(value);
+                }}
+              />
             </>
           ) : (
             <p className="quiet">
@@ -267,7 +289,7 @@ export function App() {
           )}
         </section>
       </main>
-      <footer>Agreements and the game table arrive in later increments.</footer>
+      <footer>Interactive dealing and play arrive in later increments.</footer>
     </>
   );
 }

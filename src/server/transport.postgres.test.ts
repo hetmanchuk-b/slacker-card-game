@@ -107,6 +107,7 @@ async function message(socket: Socket, payload: unknown): Promise<ServerMessage>
   const input = payload as { requestId?: string; intent?: { type?: string } };
   const resyncing = input?.intent?.type === 'resync';
   const history = input?.intent?.type === 'owner-history';
+  const chat = input?.intent?.type === 'post-chat' || input?.intent?.type === 'chat-history';
   const oldEpoch = latestEpoch.get(socket);
   const result = new Promise<ServerMessage>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -120,7 +121,9 @@ async function message(socket: Socket, payload: unknown): Promise<ServerMessage>
           ? value.type === 'state' && value.delivery.epoch !== oldEpoch
           : history
             ? value.type === 'owner-history'
-            : value.type === 'command-ack' && value.requestId === input?.requestId)
+            : chat
+              ? value.type === 'chat-page' && value.requestId === input?.requestId
+              : value.type === 'command-ack' && value.requestId === input?.requestId)
       )
         return;
       clearTimeout(timer);
@@ -159,6 +162,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
     count = 2,
     authPollMs = 25,
     delivery?: TransportOptions['delivery'],
+    startGame = true,
   ) {
     let now = Date.now();
     const access = new PostgresGuestAccess(pool);
@@ -200,7 +204,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
       seatIds: members[0]!.seatIds,
       cardIds: Array.from({ length: 36 }, () => id('card', randomUUID())),
     };
-    assert.equal((await host.startMatch(owner.lobbyId, start)).type, 'started');
+    if (startGame) assert.equal((await host.startMatch(owner.lobbyId, start)).type, 'started');
     const clients: Socket[] = [];
     function client(
       token: string | null,
@@ -258,7 +262,10 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
           context.members[0]!.lobbyId,
           context.start.gameId,
           async (runtime) => {
-            const result = await runtime.dispatch(command, options);
+            const result = await runtime.dispatch(command, {
+              ...options,
+              branchId: runtime.read().head.branchId,
+            });
             snapshot = runtime.read();
             return result;
           },
@@ -309,11 +316,14 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
         async (runtime) => {
           const phase = runtime.read().state!.phase;
           if (phase.type !== 'dealing') assert.fail();
-          await runtime.dispatch({
-            type: 'draw-card',
-            id: id('command', randomUUID()),
-            actorId: phase.nextSeatId,
-          });
+          await runtime.dispatch(
+            {
+              type: 'draw-card',
+              id: id('command', randomUUID()),
+              actorId: phase.nextSeatId,
+            },
+            { branchId: runtime.read().head.branchId },
+          );
         },
       );
     await context.clock.advanceBy(10000);
@@ -324,6 +334,435 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
         .every((socket) => (latestState.get(socket)?.view.head.version ?? -1) >= head.version),
     );
   }
+
+  await t.test(
+    'resync discards prepared chat history waiting for the host without disconnecting the participant',
+    async (t) => {
+      const context = await fixture(t, 2, 60000);
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      const lobbyId = context.members[0]!.lobbyId;
+      let cancelled!: () => void;
+      const cancellation = new Promise<void>((resolve) => {
+        cancelled = resolve;
+      });
+      const subscribe = context.host.subscribe.bind(context.host);
+      const subscription = t.mock.method(
+        context.host,
+        'subscribe',
+        async (...args: Parameters<typeof subscribe>) => {
+          const stop = await subscribe(...args);
+          return () => {
+            cancelled();
+            stop();
+          };
+        },
+      );
+      for (const socket of sockets) await message(socket, resync(lobbyId));
+      let release!: () => void;
+      let entered!: () => void;
+      let queued!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const waiting = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const requested = new Promise<void>((resolve) => {
+        queued = resolve;
+      });
+      const history = context.host.chatHistory.bind(context.host);
+      const historyCall = t.mock.method(
+        context.host,
+        'chatHistory',
+        (...args: Parameters<typeof history>) => {
+          queued();
+          return history(...args);
+        },
+      );
+      const blocked = context.host.withCurrent(lobbyId, context.start.gameId, async () => {
+        entered();
+        await gate;
+      });
+      await waiting;
+      const seen: ServerMessage[] = [];
+      sockets[0]!.on('server-message', (value: ServerMessage) => seen.push(value));
+      sockets[0]!.emit('client-message', {
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        intent: { type: 'chat-history', lobbyId, afterSequence: '0', limit: 100 },
+      });
+      try {
+        await requested;
+        const baseline = message(sockets[0]!, resync(lobbyId));
+        await cancellation;
+        release();
+        await blocked;
+        assert.equal((await baseline).type, 'state');
+        assert.equal(sockets[0]!.connected, true);
+        assert.equal(
+          seen.some((value) => value.type === 'chat-page'),
+          false,
+        );
+      } finally {
+        release();
+        subscription.mock.restore();
+        historyCall.mock.restore();
+      }
+    },
+  );
+
+  await t.test(
+    'chat pages obey serialized byte limits, preserve cursor order and fail fixed on an oversized trusted row',
+    async (t) => {
+      const context = await fixture(t, 2, 60000, undefined, false);
+      const socket = await context.connect();
+      const lobbyId = context.members[0]!.lobbyId;
+      await message(socket, resync(lobbyId));
+      const lobby = await PostgresLobby.open(pool, lobbyId);
+      const text = '\n'.repeat(4096);
+      const ids: string[] = [];
+      for (let index = 0; index < 20; index++) {
+        const input = {
+          id: id('message', randomUUID()),
+          authorSessionId: context.members[0]!.sessionId,
+          authorSeatId: context.members[0]!.seatId,
+          text,
+        };
+        ids.push(input.id);
+        await lobby.postChat(input, context.now());
+      }
+      let cursor = '0';
+      const seen: string[] = [];
+      for (let iteration = 0; iteration < 20; iteration++) {
+        const reply = await message(socket, {
+          protocolVersion: 1,
+          requestId: randomUUID(),
+          intent: { type: 'chat-history', lobbyId, afterSequence: cursor, limit: 100 },
+        });
+        if (reply.type !== 'chat-page') assert.fail(JSON.stringify(reply));
+        assert.ok(Buffer.byteLength(JSON.stringify(reply)) + 128 <= 65536);
+        if (!reply.messages.length) break;
+        assert.ok(reply.messages.length < 20);
+        for (const row of reply.messages) {
+          assert.equal(row.text, text);
+          seen.push(row.id);
+        }
+        cursor = reply.messages.at(-1)!.sequence;
+      }
+      assert.deepEqual(seen, ids);
+      await lobby.postChat(
+        {
+          id: id('message', randomUUID()),
+          authorSessionId: context.members[0]!.sessionId,
+          authorSeatId: context.members[0]!.seatId,
+          text: '\u0001'.repeat(20000),
+        },
+        context.now(),
+      );
+      assert.deepEqual(
+        await message(socket, {
+          protocolVersion: 1,
+          requestId: randomUUID(),
+          intent: { type: 'chat-history', lobbyId, afterSequence: cursor, limit: 100 },
+        }),
+        { protocolVersion: 1, type: 'error', code: 'unavailable' },
+      );
+      assert.equal(socket.connected, true);
+    },
+  );
+
+  await t.test(
+    'chat INSERT failure returns no accepted message, leaves gameplay healthy and permits the original-ID retry',
+    async (t) => {
+      const context = await fixture(t);
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      const lobbyId = context.members[0]!.lobbyId;
+      for (const socket of sockets) await message(socket, resync(lobbyId));
+      const before = (await context.host.read(lobbyId))!.snapshot;
+      const name = `chat_fail_${randomUUID().replaceAll('-', '')}`;
+      await pool.query(`CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.lobby_id = '${lobbyId}' THEN RAISE EXCEPTION 'PRIVATE chat failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER ${name} BEFORE INSERT ON penky_lobby_chat FOR EACH ROW EXECUTE FUNCTION ${name}()`);
+      const remove = async () => {
+        await pool.query(
+          `DROP TRIGGER IF EXISTS ${name} ON penky_lobby_chat; DROP FUNCTION IF EXISTS ${name}()`,
+        );
+      };
+      t.after(remove);
+      const input = {
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        intent: { type: 'post-chat', lobbyId, messageId: randomUUID(), text: 'Retry me' },
+      };
+      assert.deepEqual(await message(sockets[0]!, input), {
+        protocolVersion: 1,
+        type: 'error',
+        code: 'unavailable',
+      });
+      assert.deepEqual((await context.host.read(lobbyId))!.snapshot, before);
+      assert.equal(
+        await (
+          await PostgresLobby.open(pool, lobbyId)
+        ).message(id('message', input.intent.messageId)),
+        null,
+      );
+      await remove();
+      const posted = await message(sockets[0]!, input);
+      if (posted.type !== 'chat-page') assert.fail();
+      assert.equal(posted.messages.length, 1);
+      assert.equal(posted.messages[0]!.id, input.intent.messageId);
+    },
+  );
+
+  await t.test(
+    'members chat before any match without obtaining a game view, and retries retain lobby context after start',
+    async (t) => {
+      const context = await fixture(t, 2, 60000, undefined, false);
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      const lobbyId = context.members[0]!.lobbyId;
+      const seen: ServerMessage[] = [];
+      sockets[0]!.on('server-message', (value: ServerMessage) => seen.push(value));
+      for (const socket of sockets)
+        assert.deepEqual(await message(socket, resync(lobbyId)), {
+          protocolVersion: 1,
+          type: 'error',
+          code: 'unavailable',
+        });
+      const request = {
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        intent: {
+          type: 'post-chat',
+          lobbyId,
+          messageId: randomUUID(),
+          text: '  before the match  ',
+        },
+      };
+      const first = await message(sockets[0]!, request);
+      if (first.type !== 'chat-page') assert.fail();
+      assert.deepEqual(first.messages[0]!.context, {
+        head: null,
+        scope: 'lobby',
+        scopeNumber: null,
+      });
+      assert.equal(await context.host.read(lobbyId), null);
+      assert.equal(
+        seen.some((value) => value.type === 'state' || value.type === 'action'),
+        false,
+      );
+      assert.deepEqual(
+        await message(sockets[0]!, {
+          ...request,
+          intent: { ...request.intent, lobbyId: 'wrong-lobby' },
+        }),
+        { protocolVersion: 1, type: 'error', code: 'unauthorized' },
+      );
+      assert.equal((await context.host.startMatch(lobbyId, context.start)).type, 'started');
+      for (const socket of sockets) await message(socket, resync(lobbyId));
+      const retry = await message(sockets[0]!, request);
+      if (retry.type !== 'chat-page') assert.fail();
+      assert.deepEqual(retry.messages, first.messages);
+      const next = await message(sockets[1]!, {
+        ...request,
+        requestId: randomUUID(),
+        intent: { ...request.intent, messageId: randomUUID() },
+      });
+      if (next.type !== 'chat-page') assert.fail();
+      assert.equal(next.messages[0]!.context.scope, 'dealing');
+    },
+  );
+
+  await t.test(
+    'lobby-only members can chat after finishing and rollback without receiving the old match state',
+    async (t) => {
+      const context = await fixture(t);
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      const lobbyId = context.members[0]!.lobbyId;
+      for (const socket of sockets) await message(socket, resync(lobbyId));
+      await ready(context);
+      await finishHosted(context);
+      const guest = await context.access.issue(context.now());
+      const member = await context.access.joinLobby(guest.token, lobbyId, context.now());
+      const socket = context.client(guest.token);
+      await once(socket, 'connect');
+      const seen: ServerMessage[] = [];
+      socket.on('server-message', (value: ServerMessage) => seen.push(value));
+      assert.deepEqual(await message(socket, resync(lobbyId)), {
+        protocolVersion: 1,
+        type: 'error',
+        code: 'unauthorized',
+      });
+      const request = {
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        intent: {
+          type: 'post-chat',
+          lobbyId,
+          messageId: randomUUID(),
+          text: 'Lobby member, not match participant',
+        },
+      };
+      const posted = await message(socket, request);
+      if (posted.type !== 'chat-page') assert.fail();
+      assert.equal(posted.messages[0]!.authorSeatId, member.seatId);
+      assert.equal(posted.messages[0]!.context.scope, 'lobby');
+      await context.host.withCurrent(lobbyId, context.start.gameId, (runtime) =>
+        runtime.dispatch({
+          type: 'rollback',
+          id: id('command', randomUUID()),
+          actorId: context.members[0]!.seatId,
+          expected: runtime.read().head,
+          beforeCommandId: context.start.id,
+          knowledgeWarningAcknowledged: true,
+        }),
+      );
+      const page = await message(socket, {
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        intent: { type: 'chat-history', lobbyId, afterSequence: '0', limit: 100 },
+      });
+      if (page.type !== 'chat-page') assert.fail();
+      assert.deepEqual(page.messages, posted.messages);
+      assert.equal(
+        seen.some(
+          (value) =>
+            value.type === 'state' || value.type === 'action' || value.type === 'owner-history',
+        ),
+        false,
+      );
+    },
+  );
+
+  await t.test(
+    'retained post replies and evidence preserve their original branch across rollback, recovery and successor adoption',
+    async (t) => {
+      const context = await fixture(t);
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      const lobbyId = context.members[0]!.lobbyId;
+      for (const socket of sockets) await message(socket, resync(lobbyId));
+      const drawId = randomUUID();
+      accepted(await play(context, sockets[1]!, { type: 'draw-card' }, drawId));
+      const request = {
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        intent: {
+          type: 'post-chat',
+          lobbyId,
+          messageId: randomUUID(),
+          text: 'Retained abandoned evidence',
+        },
+      };
+      const original = await message(sockets[0]!, request);
+      if (original.type !== 'chat-page') assert.fail();
+      await context.host.withCurrent(lobbyId, context.start.gameId, (runtime) =>
+        runtime.dispatch({
+          type: 'rollback',
+          id: id('command', randomUUID()),
+          actorId: context.members[0]!.seatId,
+          expected: runtime.read().head,
+          beforeCommandId: id('command', drawId),
+          knowledgeWarningAcknowledged: true,
+        }),
+      );
+      let retry = await message(sockets[0]!, request);
+      if (retry.type !== 'chat-page') assert.fail();
+      assert.deepEqual(retry.messages, original.messages);
+      const fork = (await context.host.read(lobbyId))!.snapshot.head;
+      const claim = await play(context, sockets[1]!, {
+        type: 'submit-claim',
+        branchId: fork.branchId,
+        accusedId: context.members[0]!.seatId,
+        reason: 'Old chat is not current evidence',
+        evidence: { type: 'chat', messageId: request.intent.messageId },
+      });
+      if (claim.type !== 'command-ack' || claim.result.type !== 'rejected') assert.fail();
+      assert.equal(claim.result.code, 'invalid-claim');
+      await context.host.recover(lobbyId);
+      for (const socket of sockets) await message(socket, resync(lobbyId));
+      retry = await message(sockets[0]!, request);
+      if (retry.type !== 'chat-page') assert.fail();
+      assert.deepEqual(retry.messages, original.messages);
+      await ready(context);
+      await finishHosted(context);
+      const old = (await context.host.read(lobbyId))!.snapshot.head;
+      const next = {
+        ...context.start,
+        id: id('command', randomUUID()),
+        gameId: id('game', randomUUID()),
+        branchId: id('branch', randomUUID()),
+        expectedGameId: old.gameId,
+        expectedHead: old,
+      };
+      assert.equal((await context.host.startMatch(lobbyId, next)).type, 'started');
+      for (const socket of sockets) await message(socket, resync(lobbyId));
+      retry = await message(sockets[0]!, request);
+      if (retry.type !== 'chat-page') assert.fail();
+      assert.deepEqual(retry.messages, original.messages);
+    },
+  );
+
+  for (const count of [2, 4, 8])
+    await t.test(
+      `${count} lobby members post exact chat with immutable message-ID retries and ordered private-safe pages`,
+      async (t) => {
+        const context = await fixture(t, count);
+        const sockets = await Promise.all(
+          context.grants.map((_grant, index) => context.connect(index)),
+        );
+        const lobbyId = context.members[0]!.lobbyId;
+        for (const socket of sockets) await message(socket, resync(lobbyId));
+        const requestId = randomUUID();
+        const messageId = randomUUID();
+        const intent = {
+          type: 'post-chat',
+          lobbyId,
+          messageId,
+          text: '  Привіт 😀\n<script>not HTML</script>  ',
+        };
+        const input = { protocolVersion: 1, requestId, intent };
+        const first = await message(sockets[0]!, input);
+        if (first.type !== 'chat-page') assert.fail(JSON.stringify(first));
+        assert.equal(first.messages.length, 1);
+        assert.equal(first.messages[0]!.authorSeatId, context.members[0]!.seatId);
+        assert.equal(first.messages[0]!.text, intent.text);
+        assert.equal(first.messages[0]!.context.scope, 'dealing');
+        assert.equal(first.messages[0]!.context.head!.gameId, context.start.gameId);
+        assert.equal(first.messages[0]!.atMs, context.clock.now());
+        assert.equal(JSON.stringify(first).includes(context.members[0]!.sessionId), false);
+        const duplicate = await message(sockets[0]!, { ...input, requestId: randomUUID() });
+        if (duplicate.type !== 'chat-page') assert.fail();
+        assert.deepEqual(duplicate.messages, first.messages);
+        const changed = await message(sockets[0]!, {
+          ...input,
+          intent: { ...intent, text: 'changed' },
+        });
+        assert.deepEqual(changed, { protocolVersion: 1, type: 'error', code: 'unavailable' });
+        assert.deepEqual(await message(sockets[1]!, input), changed);
+        const second = await message(sockets[0]!, {
+          ...input,
+          intent: {
+            ...intent,
+            messageId: randomUUID(),
+            text: 'Second message, same correlation ID',
+          },
+        });
+        if (second.type !== 'chat-page') assert.fail();
+        const page = (afterSequence: string) =>
+          message(sockets[1]!, {
+            protocolVersion: 1,
+            requestId: randomUUID(),
+            intent: { type: 'chat-history', lobbyId, afterSequence, limit: 1 },
+          });
+        const one = await page('0');
+        if (one.type !== 'chat-page') assert.fail();
+        assert.deepEqual(one.messages, first.messages);
+        const two = await page(one.messages[0]!.sequence);
+        if (two.type !== 'chat-page') assert.fail();
+        assert.deepEqual(two.messages, second.messages);
+        const empty = await page(two.messages[0]!.sequence);
+        if (empty.type !== 'chat-page') assert.fail();
+        assert.deepEqual(empty.messages, []);
+      },
+    );
 
   await t.test(
     'a history request queued before resync cannot adopt its new stream generation',
@@ -1503,7 +1942,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
     },
   );
 
-  for (const kind of ['draw', 'claim', 'rollback', 'history'] as const)
+  for (const kind of ['draw', 'claim', 'rollback', 'history', 'post-chat', 'chat-history'] as const)
     for (const mode of ['disconnect', 'revoke', 'expire'] as const)
       await t.test(
         `${mode} while a ${kind} command waits in the runtime queue cannot execute through retained seat presence`,
@@ -1532,17 +1971,28 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
             entered = resolve;
           });
           let blocked!: Promise<void>;
-          await context.host.withCurrent(
-            context.members[0]!.lobbyId,
-            context.start.gameId,
-            async (runtime) => {
-              blocked = runtime.observe(async () => {
+          if (kind === 'chat-history') {
+            blocked = context.host.withCurrent(
+              context.members[0]!.lobbyId,
+              context.start.gameId,
+              async () => {
                 entered();
                 await gate;
-              });
-              await waiting;
-            },
-          );
+              },
+            );
+            await waiting;
+          } else
+            await context.host.withCurrent(
+              context.members[0]!.lobbyId,
+              context.start.gameId,
+              async (runtime) => {
+                blocked = runtime.observe(async () => {
+                  entered();
+                  await gate;
+                });
+                await waiting;
+              },
+            );
           const requestId = randomUUID();
           const received: ServerMessage[] = [];
           sockets[actor]!.on('server-message', (value: ServerMessage) => received.push(value));
@@ -1552,33 +2002,47 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
             protocolVersion: 1,
             requestId,
             intent:
-              kind === 'rollback'
+              kind === 'post-chat'
                 ? {
-                    type: 'rollback',
-                    target: {
-                      expected: {
-                        gameId: context.start.gameId,
-                        branch: 1,
-                        version: initial.head.version,
-                      },
-                      beforeActionVersion: 1,
-                    },
-                    knowledgeWarningAcknowledged: true,
+                    type: 'post-chat',
+                    lobbyId: context.members[0]!.lobbyId,
+                    messageId: requestId,
+                    text: 'Queued post',
                   }
-                : kind === 'history'
-                  ? { type: 'owner-history', gameId: context.start.gameId }
-                  : {
-                      ...(kind === 'draw'
-                        ? { type: 'draw-card' }
-                        : {
-                            type: 'submit-claim',
-                            accusedId: context.members[(actor + 1) % 2]!.seatId,
-                            reason: 'Queued claim',
-                            evidence: { type: 'spoken', key: 'queued' },
-                          }),
-                      gameId: context.start.gameId,
-                      branchId: context.start.branchId,
-                    },
+                : kind === 'chat-history'
+                  ? {
+                      type: 'chat-history',
+                      lobbyId: context.members[0]!.lobbyId,
+                      afterSequence: '0',
+                      limit: 100,
+                    }
+                  : kind === 'rollback'
+                    ? {
+                        type: 'rollback',
+                        target: {
+                          expected: {
+                            gameId: context.start.gameId,
+                            branch: 1,
+                            version: initial.head.version,
+                          },
+                          beforeActionVersion: 1,
+                        },
+                        knowledgeWarningAcknowledged: true,
+                      }
+                    : kind === 'history'
+                      ? { type: 'owner-history', gameId: context.start.gameId }
+                      : {
+                          ...(kind === 'draw'
+                            ? { type: 'draw-card' }
+                            : {
+                                type: 'submit-claim',
+                                accusedId: context.members[(actor + 1) % 2]!.seatId,
+                                reason: 'Queued claim',
+                                evidence: { type: 'spoken', key: 'queued' },
+                              }),
+                          gameId: context.start.gameId,
+                          branchId: context.start.branchId,
+                        },
           });
           await until(
             async () =>
@@ -1629,7 +2093,10 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
           );
           assert.equal(
             received.some(
-              (reply) => reply.type === 'command-ack' || reply.type === 'owner-history',
+              (reply) =>
+                reply.type === 'command-ack' ||
+                reply.type === 'owner-history' ||
+                reply.type === 'chat-page',
             ),
             false,
           );
@@ -2723,7 +3190,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
   );
 
   await t.test(
-    'deferred chat, malformed and oversized payloads never dispatch game actions',
+    'deferred start, malformed and oversized payloads never dispatch game actions',
     async (t) => {
       const context = await fixture(t);
       const socket = await context.connect();
@@ -2733,10 +3200,9 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
         protocolVersion: 1,
         requestId: randomUUID(),
         intent: {
-          type: 'chat-history',
+          type: 'start-match',
           lobbyId: context.members[0]!.lobbyId,
-          afterSequence: '0',
-          limit: 10,
+          expected: null,
         },
       };
       assert.deepEqual(await message(socket, payload), {

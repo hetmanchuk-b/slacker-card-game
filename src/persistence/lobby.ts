@@ -13,6 +13,29 @@ import type {
   ChatContext,
 } from './lobby-contracts.ts';
 
+export class ChatAdmissionError extends Error {
+  readonly code: 'unauthorized' | 'unavailable';
+  constructor(code: 'unauthorized' | 'unavailable') {
+    super('Chat admission denied');
+    this.name = 'ChatAdmissionError';
+    this.code = code;
+  }
+}
+export type ChatAdmissionOptions = Readonly<{
+  /** Trusted bounded non-reentrant gate, inside queue admission before lookup. */
+  admit?: () => boolean | Promise<boolean>;
+}>;
+export async function admitChat(options: ChatAdmissionOptions): Promise<void> {
+  if (!options.admit) return;
+  let permitted: boolean;
+  try {
+    permitted = (await options.admit()) === true;
+  } catch {
+    throw new ChatAdmissionError('unavailable');
+  }
+  if (!permitted) throw new ChatAdmissionError('unauthorized');
+}
+
 function context(snapshot: RuntimeSnapshot): ChatContext {
   const state = snapshot.state;
   if (!state || state.phase.type === 'finished')
@@ -251,8 +274,14 @@ export class PostgresLobby {
     return prior;
   }
 
-  async postChat(input: ChatInput, nowMs: number, runtime?: GameRuntime): Promise<ChatMessage> {
+  async postChat(
+    input: ChatInput,
+    nowMs: number,
+    runtime?: GameRuntime,
+    options: ChatAdmissionOptions = {},
+  ): Promise<ChatMessage> {
     const message = structuredClone(input);
+    const origin = { ...options };
     if (
       !Number.isSafeInteger(nowMs) ||
       nowMs < 0 ||
@@ -262,6 +291,7 @@ export class PostgresLobby {
     )
       throw new Error('Invalid chat input');
     const append = async (chatContext: ChatContext, atMs: number): Promise<ChatMessage> => {
+      await admitChat(origin);
       const prior = await this.#findMessage(this.#pool, message);
       if (prior) return prior;
       const client = await this.#pool.connect();

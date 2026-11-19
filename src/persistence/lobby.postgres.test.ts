@@ -9,7 +9,7 @@ import { GameRuntime } from '../runtime/runtime.ts';
 import { finishMatch } from '../runtime/testing/match.ts';
 import type { LobbyBinding, MatchStart } from './lobby-contracts.ts';
 import type { LiveMatch } from './lobby.ts';
-import { PostgresLobby } from './lobby.ts';
+import { ChatAdmissionError, PostgresLobby } from './lobby.ts';
 import { FakeClock } from '../runtime/testing/fake-clock.ts';
 import { canBeat } from '../game/cards.ts';
 
@@ -79,6 +79,63 @@ test('PostgreSQL lobby persistence', { skip: !url }, async (t) => {
     await clock.advanceBy(10000);
     await finishMatch(live.runtime);
   }
+  await t.test(
+    'chat admission runs in queue before immutable-message retries and failures do not fault gameplay',
+    async (t) => {
+      const { binding, lobby, live } = await setup(t);
+      const input = {
+        id: id('message', randomUUID()),
+        authorSessionId: binding.ownerSessionId,
+        authorSeatId: binding.ownerSeatId,
+        text: 'Exact text',
+      };
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const waiting = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const blocked = live.runtime.observe(async () => {
+        entered();
+        await gate;
+      });
+      await waiting;
+      let permitted = true;
+      const pending = lobby.postChat(input, 1000, live.runtime, { admit: () => permitted });
+      permitted = false;
+      release();
+      await blocked;
+      await assert.rejects(
+        pending,
+        (error: unknown) => error instanceof ChatAdmissionError && error.code === 'unauthorized',
+      );
+      assert.deepEqual(await lobby.messages(), []);
+      const first = await lobby.postChat(input, 1000, live.runtime, { admit: () => true });
+      await assert.rejects(
+        lobby.postChat(input, 1000, live.runtime, { admit: () => false }),
+        ChatAdmissionError,
+      );
+      await assert.rejects(
+        lobby.postChat(input, 1000, live.runtime, {
+          admit: () => {
+            throw new Error('PRIVATE SQL');
+          },
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof ChatAdmissionError);
+          assert.equal(error.code, 'unavailable');
+          assert.equal(error.cause, undefined);
+          assert.equal(error.message.includes('PRIVATE'), false);
+          return true;
+        },
+      );
+      assert.deepEqual(await lobby.messages(), [first]);
+      assert.doesNotThrow(() => live.runtime.read());
+    },
+  );
+
   await t.test(
     'chat retains original authors and verbatim text across reopening and retries',
     async () => {

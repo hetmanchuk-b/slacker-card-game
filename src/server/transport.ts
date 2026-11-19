@@ -39,6 +39,9 @@ import {
   readGuestCookie,
 } from './guest-session.ts';
 import { TransportLimiter } from './transport-limits.ts';
+import { ChatAdmissionError } from '../persistence/lobby.ts';
+import { boundedChatPage } from './chat-page.ts';
+import type { ChatMessage } from '../persistence/lobby-contracts.ts';
 
 const GAMEPLAY_TYPES = new Set([
   'draw-card',
@@ -740,6 +743,104 @@ export class PenkyTransport {
     }
   }
 
+  async #chat(
+    peer: Peer,
+    message: ClientMessage,
+    watch: number,
+    generation: number,
+  ): Promise<void> {
+    const intent = message.intent;
+    if (intent.type !== 'post-chat' && intent.type !== 'chat-history') return;
+    if (!peer.detach || peer.lobbyId !== intent.lobbyId) {
+      this.#error(peer, 'unauthorized');
+      return;
+    }
+    const history = intent.type === 'chat-history';
+    const current = () =>
+      this.#live(peer) && (!history || (watch === peer.watch && generation === peer.generation));
+    if (!current()) return;
+    try {
+      const binding = await this.#options.access.membership(
+        peer.token,
+        intent.lobbyId,
+        this.#now(),
+      );
+      const admit = async () => {
+        const valid = await this.#options.access.inspectSeat(
+          peer.token,
+          intent.lobbyId,
+          this.#now(),
+        );
+        if (!valid || this.#now() >= valid.expiresAtMs) {
+          this.#stop(peer);
+          return false;
+        }
+        return (
+          current() && valid.sessionId === binding.sessionId && valid.seatId === binding.seatId
+        );
+      };
+      if (!current()) return;
+      const posted =
+        intent.type === 'post-chat'
+          ? await this.#options.host.postChat(
+              intent.lobbyId,
+              {
+                id: intent.messageId,
+                authorSessionId: binding.sessionId,
+                authorSeatId: binding.seatId,
+                text: intent.text,
+              },
+              this.#now(),
+              { admit },
+            )
+          : null;
+      // A committed post is immutable across resync/rollback/handoff. Its reply
+      // remains correlated, never a state cursor or an unsolicited broadcast.
+      const maxBytes = Math.min(65536, this.#delivery.bytes);
+      await peer.outbound.prepare(
+        async (emit) => {
+          if (!current()) return;
+          let rows: readonly ChatMessage[];
+          try {
+            rows = posted
+              ? [posted]
+              : intent.type === 'chat-history'
+                ? await this.#options.host.chatHistory(
+                    intent.lobbyId,
+                    intent.afterSequence,
+                    intent.limit,
+                    { admit },
+                  )
+                : [];
+            if (!(await admit())) return;
+          } catch (error) {
+            // Resync/rollback can cancel a page while its host admission waits.
+            // Cancellation discards the read; it must not become wire failure
+            // and disconnect an otherwise healthy participant.
+            if (!current()) return;
+            throw error;
+          }
+          // Final authentication and projection/emission have no intervening await.
+          let reply: ServerMessage;
+          try {
+            reply = boundedChatPage(message.requestId, rows, maxBytes);
+          } catch {
+            reply = protocolError('unavailable');
+          }
+          emit(reply);
+        },
+        maxBytes,
+        history ? generation : undefined,
+      );
+    } catch (error) {
+      const unauthorized =
+        (error instanceof ChatAdmissionError && error.code === 'unauthorized') ||
+        (error instanceof GuestAccessError &&
+          ['authentication-required', 'membership-required'].includes(error.code));
+      this.#error(peer, unauthorized ? 'unauthorized' : 'unavailable');
+    }
+  }
+
   #discardStream(peer: Peer): void {
     peer.generation++;
     peer.streamId = randomUUID();
@@ -919,6 +1020,13 @@ export class PenkyTransport {
     const decoded = decodeClientMessage(value);
     if (decoded.type !== 'decoded') {
       this.#error(peer, decoded.code);
+      return;
+    }
+    if (
+      decoded.message.intent.type === 'post-chat' ||
+      decoded.message.intent.type === 'chat-history'
+    ) {
+      await this.#chat(peer, decoded.message, watch, generation);
       return;
     }
     if (

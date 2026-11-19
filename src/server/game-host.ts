@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import type { GameId, LobbyId } from '../game/ids.ts';
 import { id } from '../game/ids.ts';
-import { PostgresLobby } from '../persistence/lobby.ts';
+import { admitChat, PostgresLobby } from '../persistence/lobby.ts';
+import type { ChatAdmissionOptions } from '../persistence/lobby.ts';
+import type { ChatInput, ChatMessage } from '../persistence/lobby-contracts.ts';
 import type { LiveMatch } from '../persistence/lobby.ts';
 import type { MatchStart } from '../persistence/lobby-contracts.ts';
 import { PostgresSession } from '../persistence/postgres.ts';
@@ -275,6 +277,42 @@ export class PostgresGameHost {
         controller: options.controller ?? 'human',
         ...(options.admit ? { admit: options.admit } : {}),
       });
+    });
+  }
+
+  /** Lobby-only chat never grants game participation. Select current context
+   * inside host serialization; storage owns the single queued scope/admit job.
+   */
+  postChat(
+    lobbyId: LobbyId,
+    input: ChatInput,
+    nowMs: number,
+    options: ChatAdmissionOptions = {},
+  ): Promise<ChatMessage> {
+    const message = structuredClone(input);
+    const origin = { ...options };
+    return this.#enqueue(async () => {
+      const entry = await this.#current(lobbyId);
+      const lobby = await PostgresLobby.open(this.#pool, lobbyId);
+      try {
+        return await lobby.postChat(message, nowMs, entry?.runtime, origin);
+      } catch (error) {
+        if (entry && !this.#healthy(entry)) await this.#release(entry, false);
+        throw error;
+      }
+    });
+  }
+
+  chatHistory(
+    lobbyId: LobbyId,
+    afterSequence: string,
+    limit: number,
+    options: ChatAdmissionOptions = {},
+  ): Promise<readonly ChatMessage[]> {
+    const origin = { ...options };
+    return this.#enqueue(async () => {
+      await admitChat(origin);
+      return (await PostgresLobby.open(this.#pool, lobbyId)).messages(afterSequence, limit);
     });
   }
 

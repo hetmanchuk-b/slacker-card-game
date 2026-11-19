@@ -36,12 +36,294 @@ test('PostgreSQL guest authentication and membership', { skip: !url }, async (t)
     const joined = await access.joinLobby(guest.token, member.lobbyId, 1000);
     return { owner, member, guest, joined };
   }
+  await t.test(
+    'acceptance is epoch-scoped and concurrent members do not invalidate each other',
+    async () => {
+      const context = await setup();
+      const lobby = context.member.lobbyId;
+      const initial = await access.lobbyState(context.owner.token, lobby, 1000);
+      assert.equal(initial.revision, '1');
+      assert.equal(initial.text, '');
+      assert.equal(initial.editable, true);
+      assert.deepEqual(
+        initial.members.map((member) => member.ready),
+        [false, false],
+      );
+      const accept = (token: string) =>
+        new PostgresGuestAccess(pool).setAcceptance(token, lobby, initial.revision, true, 1000);
+      await Promise.all([accept(context.owner.token), accept(context.guest.token)]);
+      const ready = await access.lobbyState(context.owner.token, lobby, 1000);
+      assert.equal(ready.revision, initial.revision);
+      assert.deepEqual(
+        ready.members.map((member) => member.ready),
+        [true, true],
+      );
+      const identical = await access.editAgreements(
+        context.owner.token,
+        lobby,
+        ready.revision,
+        '',
+        1000,
+      );
+      assert.deepEqual(identical, ready);
+      const edited = await access.editAgreements(
+        context.owner.token,
+        lobby,
+        ready.revision,
+        'Exact agreements\n ',
+        1000,
+      );
+      assert.equal(edited.revision, '2');
+      assert.equal(edited.text, 'Exact agreements\n ');
+      assert.deepEqual(
+        edited.members.map((member) => member.ready),
+        [false, false],
+      );
+      await assert.rejects(accept(context.guest.token), { message: 'revision-conflict' });
+      await assert.rejects(
+        access.editAgreements(context.guest.token, lobby, edited.revision, 'forged', 1000),
+        { message: 'owner-only' },
+      );
+      await access.setAcceptance(context.owner.token, lobby, edited.revision, true, 1000);
+      await access.setAcceptance(context.guest.token, lobby, edited.revision, true, 1000);
+      const beforeRetry = await access.lobbyState(context.owner.token, lobby, 1000);
+      await access.joinLobby(context.guest.token, lobby, 1000);
+      assert.deepEqual(await access.lobbyState(context.owner.token, lobby, 1000), beforeRetry);
+      const fresh = await access.issue(1000);
+      await access.joinLobby(fresh.token, lobby, 1000);
+      const joined = await access.lobbyState(context.owner.token, lobby, 1000);
+      assert.equal(joined.revision, '3');
+      assert.deepEqual(
+        joined.members.map((member) => member.ready),
+        [false, false, false],
+      );
+    },
+  );
+
+  await t.test(
+    'all-member acceptance gates starts, clears atomically and never gates accepted retries',
+    async (t) => {
+      const context = await setup();
+      const lobbyId = context.member.lobbyId;
+      const lobby = await PostgresLobby.open(pool, lobbyId);
+      const clock = new FakeClock(1000);
+      const inputs = {
+        clock,
+        connectedSeatIds: context.joined.seatIds,
+        randomInt: (upper: number) => upper - 1,
+        nextCommandId: () => id('command', randomUUID()),
+      };
+      const request: MatchStart = {
+        id: id('command', randomUUID()),
+        actorSessionId: context.member.sessionId,
+        expectedGameId: null,
+        expectedHead: null,
+        gameId: id('game', randomUUID()),
+        branchId: id('branch', randomUUID()),
+        seatIds: context.joined.seatIds,
+        cardIds: Array.from({ length: 36 }, () => id('card', randomUUID())),
+      };
+      const unready = await lobby.startMatch(request, inputs);
+      if (unready.type === 'started')
+        t.after(async () => {
+          await unready.runtime.dispose();
+          await unready.session.close();
+        });
+      assert.deepEqual(unready, { type: 'rejected', code: 'not-ready' });
+      const state = await access.lobbyState(context.owner.token, lobbyId, 1000);
+      await access.setAcceptance(context.owner.token, lobbyId, state.revision, true, 1000);
+      assert.deepEqual(await lobby.startMatch(request, inputs), {
+        type: 'rejected',
+        code: 'not-ready',
+      });
+      await access.setAcceptance(context.guest.token, lobbyId, state.revision, true, 1000);
+      const live = await lobby.startMatch(request, inputs);
+      assert.ok(live.type === 'started');
+      t.after(async () => {
+        await live.runtime.dispose();
+        await live.session.close();
+      });
+      const after = await access.lobbyState(context.owner.token, lobbyId, 1000);
+      assert.equal(after.revision, '2');
+      assert.deepEqual(
+        after.members.map((member) => member.ready),
+        [false, false],
+      );
+      assert.deepEqual(after.matchAgreements, {
+        gameId: live.gameId,
+        revision: state.revision,
+        text: '',
+      });
+      assert.equal(after.editable, false);
+      await assert.rejects(
+        access.setAcceptance(context.guest.token, lobbyId, after.revision, true, 1000),
+        { message: 'workflow-locked' },
+      );
+      assert.deepEqual(await lobby.startMatch(request, inputs, live), {
+        type: 'duplicate',
+        gameId: live.gameId,
+      });
+      await finish(live, clock);
+      const editable = await access.lobbyState(context.owner.token, lobbyId, 11000);
+      await access.editAgreements(
+        context.owner.token,
+        lobbyId,
+        editable.revision,
+        'Next match only',
+        11000,
+      );
+      const next = {
+        ...request,
+        id: id('command', randomUUID()),
+        gameId: id('game', randomUUID()),
+        branchId: id('branch', randomUUID()),
+        expectedGameId: live.gameId,
+        expectedHead: live.runtime.read().head,
+      };
+      const before = live.runtime.read();
+      assert.deepEqual(await lobby.startMatch(next, inputs, live), {
+        type: 'rejected',
+        code: 'not-ready',
+      });
+      assert.deepEqual(live.runtime.read(), before);
+      const changed = await access.lobbyState(context.owner.token, lobbyId, 11000);
+      assert.equal(changed.revision, '3');
+      assert.deepEqual(changed.matchAgreements, after.matchAgreements);
+      await access.setAcceptance(context.owner.token, lobbyId, changed.revision, true, 11000);
+      await access.setAcceptance(context.guest.token, lobbyId, changed.revision, true, 11000);
+      const successor = await lobby.startMatch(next, inputs, live);
+      assert.ok(successor.type === 'started');
+      t.after(async () => {
+        await successor.runtime.dispose();
+        await successor.session.close();
+      });
+      const final = await access.lobbyState(context.owner.token, lobbyId, 11000);
+      assert.equal(final.revision, '4');
+      assert.deepEqual(final.matchAgreements, {
+        gameId: successor.gameId,
+        revision: '3',
+        text: 'Next match only',
+      });
+    },
+  );
+
+  await t.test(
+    'failed edits roll back consent and epoch; concurrent edits cannot accept stale agreements',
+    async () => {
+      const context = await setup();
+      const lobbyId = context.member.lobbyId;
+      let view = await access.lobbyState(context.owner.token, lobbyId, 1000);
+      await Promise.all(
+        [context.owner, context.guest].map((grant) =>
+          access.setAcceptance(grant.token, lobbyId, view.revision, true, 1000),
+        ),
+      );
+      view = await access.lobbyState(context.owner.token, lobbyId, 1000);
+      const fn = `acceptance_failure_${randomUUID().replaceAll('-', '')}`;
+      await pool.query(
+        `CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.lobby_id='${lobbyId}' AND NOT NEW.accepted THEN RAISE EXCEPTION 'PRIVATE acceptance failure'; END IF; RETURN NEW; END $$`,
+      );
+      await pool.query(
+        `CREATE TRIGGER ${fn} BEFORE UPDATE ON penky_lobby_members FOR EACH ROW EXECUTE FUNCTION ${fn}()`,
+      );
+      try {
+        await assert.rejects(
+          access.editAgreements(context.owner.token, lobbyId, view.revision, 'not committed', 1000),
+          { message: 'storage-unavailable' },
+        );
+        assert.deepEqual(await access.lobbyState(context.owner.token, lobbyId, 1000), view);
+      } finally {
+        await pool.query(`DROP TRIGGER ${fn} ON penky_lobby_members`);
+        await pool.query(`DROP FUNCTION ${fn}()`);
+      }
+      const outcomes = await Promise.allSettled([
+        new PostgresGuestAccess(pool).setAcceptance(
+          context.guest.token,
+          lobbyId,
+          view.revision,
+          true,
+          1000,
+        ),
+        access.editAgreements(context.owner.token, lobbyId, view.revision, 'new epoch', 1000),
+      ]);
+      assert.equal(outcomes[1]!.status, 'fulfilled');
+      const after = await access.lobbyState(context.owner.token, lobbyId, 1000);
+      assert.equal(after.text, 'new epoch');
+      assert.deepEqual(
+        after.members.map((member) => member.ready),
+        [false, false],
+      );
+      await access.setAcceptance(context.owner.token, lobbyId, after.revision, true, 1000);
+      const withdrawn = await access.setAcceptance(
+        context.owner.token,
+        lobbyId,
+        after.revision,
+        false,
+        1000,
+      );
+      assert.equal(withdrawn.revision, after.revision);
+      assert.equal(withdrawn.members[0]!.ready, false);
+    },
+  );
+
+  await t.test(
+    'rollback locks mutations but retains later lobby consent and original match agreements',
+    async (t) => {
+      const context = await setup();
+      const { live, clock } = await start(t, context);
+      await finish(live, clock);
+      const lobbyId = context.member.lobbyId;
+      const original = await access.lobbyState(context.owner.token, lobbyId, 11000);
+      const edited = await access.editAgreements(
+        context.owner.token,
+        lobbyId,
+        original.revision,
+        'For the next match',
+        11000,
+      );
+      await access.setAcceptance(context.owner.token, lobbyId, edited.revision, true, 11000);
+      const before = await access.lobbyState(context.owner.token, lobbyId, 11000);
+      const rollback = await live.runtime.dispatch({
+        type: 'rollback',
+        id: id('command', randomUUID()),
+        actorId: context.member.seatId,
+        expected: live.runtime.read().head,
+        beforeCommandId: live.session.history.read().actions.at(-1)!.commandId,
+        knowledgeWarningAcknowledged: true,
+      });
+      assert.equal(rollback.type, 'accepted');
+      const restored = await access.lobbyState(context.owner.token, lobbyId, 11000);
+      assert.deepEqual(restored, { ...before, editable: false });
+      assert.deepEqual(restored.matchAgreements, original.matchAgreements);
+      await assert.rejects(
+        access.editAgreements(
+          context.owner.token,
+          lobbyId,
+          restored.revision,
+          'during play',
+          11000,
+        ),
+        { message: 'workflow-locked' },
+      );
+      await assert.rejects(
+        access.setAcceptance(context.guest.token, lobbyId, restored.revision, true, 11000),
+        { message: 'workflow-locked' },
+      );
+    },
+  );
+
   async function start(
     t: TestContext,
     context: Awaited<ReturnType<typeof setup>>,
     seatIds = context.joined.seatIds,
   ) {
     const lobby = await PostgresLobby.open(pool, context.member.lobbyId);
+    const acceptance = await access.lobbyState(context.owner.token, context.member.lobbyId, 1000);
+    await Promise.all(
+      [context.owner, context.guest].map((grant) =>
+        access.setAcceptance(grant.token, context.member.lobbyId, acceptance.revision, true, 1000),
+      ),
+    );
     const request: MatchStart = {
       id: id('command', randomUUID()),
       actorSessionId: context.member.sessionId,
@@ -428,14 +710,14 @@ test('PostgreSQL guest authentication and membership', { skip: !url }, async (t)
         seatIds: selected,
         cardIds: Array.from({ length: 36 }, () => id('card', randomUUID())),
       };
-      await assert.rejects(
-        lobby.startMatch(request, {
+      assert.deepEqual(
+        await lobby.startMatch(request, {
           clock: new FakeClock(1000),
           connectedSeatIds: selected,
           randomInt: (upper) => upper - 1,
           nextCommandId: () => id('command', randomUUID()),
         }),
-        /Lobby roster changed/,
+        { type: 'rejected', code: 'invalid-configuration' },
       );
       assert.equal((await lobby.read()).currentGameId, null);
       assert.equal(await lobby.startReceipt(request.id), null);

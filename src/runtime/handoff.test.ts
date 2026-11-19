@@ -72,6 +72,24 @@ test('handoff admission runs inside its queue before closure and denial leaves t
   await runtime.dispose();
 });
 
+test('deferred handoff refusal preserves open history and permits a later handoff', async () => {
+  const { options, clock, history } = fixture('reveal');
+  const runtime = await GameRuntime.create(options);
+  await clock.advanceBy(10000);
+  await finishMatch(runtime);
+  const before = runtime.read();
+  const archive = history.archive();
+  assert.equal(
+    await runtime.handoff(async () => false, before.head, { deferClosure: true }),
+    false,
+  );
+  assert.deepEqual(runtime.read(), before);
+  assert.deepEqual(history.archive(), archive);
+  assert.equal(await runtime.handoff(async () => {}, before.head, { deferClosure: true }), true);
+  assert.equal(history.snapshot().value.closedRollback, true);
+  await runtime.dispose();
+});
+
 test('actual handoff waits for its transaction and retires the old runtime before queued rollback', async () => {
   const { options, clock, history, seats } = fixture('reveal');
   const runtime = await GameRuntime.create(options);

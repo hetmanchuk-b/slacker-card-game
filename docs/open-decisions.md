@@ -1,5 +1,23 @@
 # Open decisions discovered during implementation
 
+## D005 — Stage 8 acceptance and lobby agreements/readiness integration
+
+**Status:** approved and implemented in Stage 8.18. The operator accepted private per-socket routing, all-durable-member acceptance and exact reset causes, then approved the bounded server-only API/persistence proposal in principle and authorized proceeding once acceptance/epoch semantics were clarified below.
+
+**Routing resolved:** retain authenticated private per-socket host lifecycle subscriptions (`PostgresGameHost.subscribe`, `PenkyTransport.#publication/#publish`) in place of literal application Socket.IO rooms. Existing authorization, recipient isolation, reconnect and delivery tests remain enabled. No redundant routing layer is introduced.
+
+**Already approved in rules §2:** the owner edits textual agreements before a match; editing is locked during play, when text remains readable; readiness expresses agreement; changing the text resets everyone's readiness. Spoken agreements need not be recorded. These facts are not reopened. There is no readiness button between rounds (rules §6.1).
+
+**Consent, not general match readiness:** `ready` means acceptance of the current lobby agreements only. No separate general willingness-to-play flag is required by the approved rules or implemented. Every durable member, including owner and disconnected members, must accept before any new member-backed match starts. Credential loss does not delete membership or grant acceptance.
+
+**Acceptance epoch:** `revision` is a nonnegative decimal-string bigint epoch, not a whole-view version or publication cursor. It advances and all acceptances clear on actual stored text change, a genuinely new durable member, and successful new-match start. Individual true/false acceptance updates do not advance it: concurrent members confirm the same epoch without conflicts. Initial lobby revision is 0 with owner unaccepted. Same-text submissions, membership retries, disconnect/reconnect, rollback and failed starts do not reset or advance it. Stale CAS fails without mutation, even if its submitted text happens to match; matching-epoch identical text is a successful no-op while editable. Same-seat concurrent desired booleans serialize; no toggle or mutation receipt ledger is invented.
+
+**Implemented contracts:** cookie/origin-authenticated POST `/api/lobbies/state`, `/api/lobbies/agreements`, `/api/lobbies/ready`; exact shapes and errors in `transport.md`. Durable members read; only owner edits; each member updates only its own acceptance. Both mutation types are locked unless no match is assigned or the exact durable current match is verified finished. Reserved null/corrupt state is not editable. Empty verbatim text is allowed, bounded to 4096 UTF-8 bytes with no NUL/malformed Unicode; raw workflow bodies are capped at 32 KiB. Responses allowlist epoch/text/editability, ordered seat/acceptance statuses and current match's immutable agreement binding, never credentials or private cards/state. No-game socket resync remains unavailable; HTTP state is the separate lobby read seam.
+
+**Atomic start and rollback:** migration 005 adds lobby text/epoch, per-member acceptance and immutable per-game agreement records. Final lobby-locked admission checks the exact roster and every member's consent, then snapshots current text/epoch and clears consent/advances epoch in the same transaction as closure/successor/pointer/start receipt. New starts bind the final accepted epoch without extending the existing start intent. Accepted canonical retries resolve first, never re-gate or reset. Legacy zero-membership trusted lobbies remain compatible; historical bindings are not fabricated. Later edits and rollback never rewrite a match's original text/epoch or roll back current lobby consent; a restored running match locks mutations while both current lobby and original match text remain readable. Policy refusal preserves old history/writer; infrastructure failures remain fail-closed. Credential → lobby → game-head lock order and no access-SQL-lock waits on runtime queues are preserved.
+
+This resolves the server prerequisite only. Stage 9 UI/dependencies, bots, reliable delivery, accounts/recovery and revision-1.4/minigame work remain in their existing later scopes.
+
 ## D004 — Guest credentials and initial lobby admission
 
 **Status:** approved and resolved for Stage 8.5 by the user.

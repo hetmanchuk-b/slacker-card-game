@@ -487,6 +487,24 @@ test(
       }
       assert.ok(lobbyId);
       const owner = peers[0]!;
+      const acceptAll = async () => {
+        wall += 10001;
+        const state = await http(base, '/api/lobbies/state', owner.cookie, { lobbyId });
+        assert.equal(state.status, 200);
+        const revision = JSON.parse(state.body).revision;
+        const confirmations = await Promise.all(
+          peers.map((peer) => {
+            wall += 1001;
+            return http(base, '/api/lobbies/ready', peer.cookie, {
+              lobbyId,
+              expectedRevision: revision,
+              ready: true,
+            });
+          }),
+        );
+        assert.ok(confirmations.every((reply) => reply.status === 200));
+      };
+      await acceptAll();
       const startId = id('command', randomUUID());
       const startIntent = { type: 'start-match', lobbyId, expected: null } as const;
       const started = await owner.send(startIntent, startId);
@@ -570,7 +588,19 @@ test(
         }
         return result;
       };
-      return { base, peers, owner, clock, lobbyId, route, sync, command, actors, duplicateIds };
+      return {
+        base,
+        peers,
+        owner,
+        clock,
+        lobbyId,
+        route,
+        sync,
+        command,
+        actors,
+        duplicateIds,
+        acceptAll,
+      };
     }
 
     type Context = Awaited<ReturnType<typeof setup>>;
@@ -964,6 +994,7 @@ test(
                 1,
               );
           }
+          await context.acceptAll();
           const beforeSuccessor = peers.map((peer) => peer.messages.length);
           const nextId = id('command', randomUUID());
           const nextIntent = {

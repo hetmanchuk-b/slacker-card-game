@@ -206,6 +206,7 @@ export function makeMatchStartAck(
       'owner-only': 'owner-only',
       'game-mismatch': 'wrong-game',
       'match-not-finished': 'wrong-phase',
+      'not-ready': 'not-ready',
       'invalid-configuration': 'invalid-configuration',
       'command-id-reused': 'command-id-reused',
       'stale-head': 'version-conflict',

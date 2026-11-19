@@ -10,6 +10,7 @@ import type { HistoryArchive } from './memory-history.ts';
 import type { HistoryCache } from './history-cache.ts';
 import { jsonDigest } from './json-digest.ts';
 import type { LobbyBinding, MatchStart } from './lobby-contracts.ts';
+import { MatchStartRefusal } from './lobby-contracts.ts';
 
 export type StoredGame = Readonly<{
   schemaVersion: 1;
@@ -61,6 +62,7 @@ export async function migrate(pool: Pool): Promise<void> {
       '002_lobbies.sql',
       '003_guest_access.sql',
       '004_lobby_creation_requests.sql',
+      '005_lobby_acceptance.sql',
     ].map(async (name, index) => {
       const sql = await readFile(new URL(`../../migrations/${name}`, import.meta.url), 'utf8');
       return { version: index + 1, sql, checksum: createHash('sha256').update(sql).digest('hex') };
@@ -318,7 +320,13 @@ export class PostgresSession {
       request.actorSessionId !== binding.ownerSessionId
     )
       throw new Error('Invalid next-match preparation');
-    const old = oldCheckpoint ? frame(this.history, oldCheckpoint) : null;
+    // Do not close the live old history before transactional policy admission.
+    // A successful handoff persists this closed copy, then retires the runtime.
+    const closing = oldCheckpoint
+      ? MemoryHistory.restoreSnapshot(this.history.archive(), this.history.snapshot())
+      : null;
+    closing?.closeRollback();
+    const old = oldCheckpoint && closing ? frame(closing, oldCheckpoint) : null;
     if (
       old &&
       (request.expectedGameId !== this.#gameId ||
@@ -342,8 +350,10 @@ export class PostgresSession {
         current_game_id: string | null;
         owner_session_id: string;
         owner_seat_id: string;
+        agreement_text: string;
+        agreement_revision: string;
       }>(
-        'SELECT current_game_id, owner_session_id, owner_seat_id FROM penky_lobbies WHERE lobby_id = $1 FOR UPDATE',
+        'SELECT current_game_id, owner_session_id, owner_seat_id, agreement_text, agreement_revision::text FROM penky_lobbies WHERE lobby_id = $1 FOR UPDATE',
         [binding.id],
       );
       const record = room.rows[0];
@@ -358,8 +368,8 @@ export class PostgresSession {
       // Authenticated lobbies retain a durable clockwise roster. A join may win
       // after private preparation: validate again under this same lobby lock.
       // Empty membership preserves legacy trusted/internal lobby behavior.
-      const roster = await this.#client.query<{ seat_id: string }>(
-        'SELECT seat_id FROM penky_lobby_members WHERE lobby_id=$1 ORDER BY seat_index',
+      const roster = await this.#client.query<{ seat_id: string; accepted: boolean }>(
+        'SELECT seat_id,accepted FROM penky_lobby_members WHERE lobby_id=$1 ORDER BY seat_index',
         [binding.id],
       );
       if (
@@ -369,7 +379,8 @@ export class PostgresSession {
           roster.rows.map((member) => member.seat_id),
         )
       )
-        throw new Error('Lobby roster changed');
+        throw new MatchStartRefusal('invalid-configuration');
+      if (roster.rows.some((member) => !member.accepted)) throw new MatchStartRefusal('not-ready');
       if (old) await writeFrame(this.#client, old, this.#revision);
       await this.#client.query(
         'INSERT INTO penky_game_heads(game_id, root_branch_id, branch_id) VALUES ($1,$2,$2)',
@@ -384,6 +395,20 @@ export class PostgresSession {
         'INSERT INTO penky_match_starts(lobby_id, command_id, request, game_id) VALUES ($1,$2,$3::jsonb,$4)',
         [binding.id, request.id, JSON.stringify(request), request.gameId],
       );
+      if (roster.rows.length) {
+        await this.#client.query(
+          'INSERT INTO penky_match_agreements(game_id,lobby_id,agreement_revision,agreement_text) VALUES ($1,$2,$3,$4)',
+          [request.gameId, binding.id, record.agreement_revision, record.agreement_text],
+        );
+        await this.#client.query(
+          'UPDATE penky_lobby_members SET accepted=false WHERE lobby_id=$1',
+          [binding.id],
+        );
+        await this.#client.query(
+          'UPDATE penky_lobbies SET agreement_revision=agreement_revision+1 WHERE lobby_id=$1',
+          [binding.id],
+        );
+      }
       await this.#client.query("SELECT set_config('application_name', $1, false)", [
         `penky-game:${request.gameId}`,
       ]);
@@ -403,6 +428,23 @@ export class PostgresSession {
         this.#onError,
       );
     } catch (error) {
+      if (error instanceof MatchStartRefusal) {
+        try {
+          await this.#client.query('ROLLBACK');
+          if (old)
+            await this.#client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [
+              `penky:game:${request.gameId}`,
+            ]);
+        } catch (cleanup) {
+          this.#failure.error =
+            cleanup instanceof Error ? cleanup : new Error('Transition cleanup failed');
+          this.#closed = true;
+          this.#client.removeListener('error', this.#onError);
+          this.#client.release(true);
+          throw this.#failure.error;
+        }
+        throw error;
+      }
       await this.#client.query('ROLLBACK').catch(() => {});
       this.#failure.error = error instanceof Error ? error : new Error('Match transition failed');
       this.#closed = true;

@@ -194,7 +194,8 @@ export type MatchStartAck = Readonly<{
           | 'wrong-phase'
           | 'invalid-configuration'
           | 'command-id-reused'
-          | 'version-conflict';
+          | 'version-conflict'
+          | 'not-ready';
       }>;
 }>;
 export type ServerMessage =

@@ -1,4 +1,4 @@
-# Authenticated HTTPS / Socket.IO boundary — Stages 8.8–8.16
+# Authenticated HTTPS / Socket.IO boundary — Stages 8.8–8.18
 
 `src/server/transport.ts` implements `PenkyTransport` for **guest-session lifecycle, authenticated presence/private resync and a bounded gameplay-routing subset**. Socket.IO and its test-only client were explicitly approved in 8.8; the optional runtime admission guard and gameplay slice were explicitly approved in 8.9. Stage 8.10's approved bounded publisher adds authorized committed actions/live state and host lifecycle rebinding. Stage 8.11 adds authoritative claim submission. Stage 8.12 adds authenticated current-match owner history, rollback routing and metadata-only all-participant rollback notices. Stage 8.13 adds bounded membership-only retained-chat posting/history. Stage 8.14 adds canonical owner-authorized starts under the explicitly approved bounded existing-result contract. Stage 8.15 adds authenticated HTTP lobby creation/join with durable canonical creation retries. There is no browser UI or application CLI yet; matches can use the bounded owner start route. Stage 8.16 verifies complete 2/4/8-seat matches through these network APIs using isolated Node clients, not a browser application or a production deployment.
 
@@ -56,6 +56,28 @@ The additive creation mapping, lobby and owner membership commit in one transact
 Errors are fixed empty responses: 400 invalid media/encoding/body/shape, 401 missing/invalid/expired/revoked credential, 403 origin, 405 wrong method, 409 capacity or running-match admission, 429 rate limit and 503 unavailable/unknown lobby/storage failure. No rejected operation sets a cookie or exposes private diagnostics. Existing IP HTTP limits apply; create/join share an additional credential-hash bucket of 12 requests/minute, including retries/invalid bodies. Admitted commits drain on cancellation/shutdown; uncertain responses are resolved by retry, never by generating a new creation key.
 
 Verified coverage: two pure contract tests, two added real PostgreSQL creation scenarios (cross-service/process recovery, atomic receipt failure) and nine real TLS/PostgreSQL scenarios covering exact allowlists/retries/restart, auth/shape/raw-byte/rate limits and 2/4/8 admission/capacity. Browser cookie behavior and readiness/house-rule UI remain unverified/deferred. Stage 8.16's separate suite below now verifies complete external matches.
+
+## Lobby agreements and acceptance — Stage 8.18
+
+D005 approves this server-only workflow and accepts existing private per-socket delivery in place of literal rooms. These routes require an existing cookie, exact HTTPS Origin, POST and strict UTF-8 JSON, like admission routes. They do not require a socket attachment and do not change the socket intent union. Raw bodies (including chunked input) are capped at 32768 bytes; stored text is at most 4096 UTF-8 bytes, empty allowed, verbatim with no normalization/NUL/malformed Unicode. Read/edit/acceptance requests share the existing HTTP/IP and 12/minute credential lobby bucket.
+
+| Endpoint | Exact JSON body | Permission |
+| --- | --- | --- |
+| `/api/lobbies/state` | `{ lobbyId }` | Durable member |
+| `/api/lobbies/agreements` | `{ lobbyId, expectedRevision, text }` | Immutable owner |
+| `/api/lobbies/ready` | `{ lobbyId, expectedRevision, ready }` | Own durable seat only; strict boolean desired acceptance, not a toggle |
+
+Success is 200 with exactly `{ lobbyId, revision, text, editable, members: [{ seatId, position, ready }], matchAgreements: null | { gameId, revision, text } }`. All nested fields are selected explicitly; no session/credential identifiers, private game state or card observations are included. Match agreements are the immutable text/epoch accepted at the current match's start; historical pre-migration/legacy games have null rather than fabricated bindings. Original match text remains readable after later lobby edits and rollback. Cookie refresh follows successful commit and final non-refreshing credential validation, with no-store/nosniff headers. This is request/response, not live lobby push.
+
+`ready` means acceptance of the current agreements ONLY, not general match readiness. `revision` is a canonical nonnegative signed-bigint decimal string **acceptance epoch**, not a whole-view version or a reliable cursor. Initial owner-only lobbies start at epoch 0, unaccepted. Actual stored text changes, genuinely new durable members and successful member-backed match starts advance the epoch and clear every member's acceptance. Individual acceptance/withdrawal updates do not advance it, so different members can confirm the same epoch concurrently. Same-seat updates serialize with desired-state semantics. Reads may show different acceptance flags at the same epoch; clients must not cache/sequence the whole view by epoch alone.
+
+CAS is checked before equality; stale expectedRevision returns 409 without mutation, even for currently identical text. A matching-epoch identical text submission while editable is a successful no-op retaining all flags. Membership retries, disconnect/reconnect, rollback, failed starts and accepted canonical start retries do not advance/reset consent. All durable members count, including owner/disconnected members; absence never grants consent or removes a seat. Readiness loss on credential loss follows D004's retained seats/no recovery policy, not implicit acceptance or owner transfer.
+
+Both mutation routes are locked (409) while an assigned current game is not durably verified finished, including suspension or rollback before creation. Reads remain permitted. A rollback to a running match leaves later lobby text/consent untouched, locks mutations and exposes the original immutable match agreements separately. Stored state integrity failure is unavailable, never proof that editing is safe.
+
+New member-backed starts recheck the locked roster and every acceptance at final SQL admission. They bind the exact final text/epoch without adding client agreement fields to the existing start intent, then atomically write agreement binding, clear flags and advance epoch with the old closure/new frame/lobby pointer/start receipt. Exact accepted retries resolve before this gate and never clear again. Zero-membership legacy trusted starts remain compatible. Late readiness/roster denials produce fixed start rejections (`not-ready` / `invalid-configuration`) while preserving the old writer and rollback window. SQL faults still fail closed; committed consent is not reset by a failed transaction.
+
+Workflow HTTP errors are fixed empty responses: 400 invalid shape/Unicode/bounds, 401 credentials, 403 origin/nonmember/owner permission, 405 method, 409 stale epoch or locked workflow, 429 limits and 503 unavailable/storage/integrity failure. No error echoes text, private diagnostics or refreshes the cookie. Lost mutation responses can yield stale CAS on retry after an epoch change; read a fresh view rather than retargeting the old request. No mutation receipt ledger or general readiness flag is introduced.
 
 ## Socket contract
 
@@ -123,7 +145,7 @@ The existing durable receipt settles accepted IDs before current routing or new 
 
 Only allowlisted `match-start-ack` reaches the caller after non-refreshing final membership/liveness/expiry validation in a bounded outbound slot. No network receipt waits in the host/runtime queue. A committed start is not undone if its caller departs; duplicate IDs later settle uncertainty. Historical duplicate game IDs are not state cursors. Existing current-match subscribers automatically rebind committed state-only successor baselines. With no previous match subscription, clients explicitly resync after their first start acknowledgment.
 
-Readiness/house-rule editing, future minigame gating, bot policy and lobby creation/join endpoints remain deferred at their documented stages. This approved existing-result-contract transport slice is not a complete player-facing start/readiness workflow. No persistence schema, engine rule, protocol DTO or dependency changes.
+Stage 8.18 above subsequently adds durable agreements/acceptance and the final new-start consent gate; existing accepted retries retain their original contract. Browser workflow, future minigame gating and bot policy remain deferred. Lobby creation/join endpoints were implemented in Stage 8.15. This is not a complete browser start workflow. The original 8.14 slice changed no persistence schema/engine rule/protocol DTO/dependency; 8.18's additive workflow schema and safe not-ready acknowledgment are documented above.
 
 ## Committed live/action publication — Stage 8.10
 
@@ -174,6 +196,12 @@ All three matches deal 36 cards, finish within a 1000-command regression budget 
 
 The four-seat run also drives a punishable out-of-turn draw, exact retained chat retries, a chat-backed claim with canonical retry and unanimous withdrawal, episode deduplication, private penalty contribution/refusals, an illegal own peek with exactly one actor-only observation and no card movement, metadata-only owner history/nonowner denial and owner rollback/retry. It verifies the selected pre-action projections, exact inherited prefix/parent and retained abandoned future, one audit/notice, stale-branch rejection and retained original chat context. Reconnecting a participant during another ballot pauses the timer at six seconds, preserves that remainder over 31 seconds of absence and returns a state-only baseline; votes and refusal penalties then settle before ordinary play finishes.
 
-This is controlled-clock Node network integration evidence for the existing executable rules, not browser cookies, manual UI play, production randomness/load, readiness/house-rule workflows, bot decisions, all possible rule scenarios or revision-1.4 results/minigame. Stage 8 remains open for acceptance audit; no later stage is implemented by this verification slice.
+This is controlled-clock Node network integration evidence for the existing executable rules, not browser cookies, manual UI play, production randomness/load, readiness/house-rule workflows, bot decisions, all possible rule scenarios or revision-1.4 results/minigame. At this 8.16 boundary Stage 8 awaited acceptance audit; D005/8.18 subsequently resolve the routing/server-consent prerequisites. No browser/later-stage implementation is implied by these scenarios.
+
+### Acceptance audit — Stage 8.17 (documentation only)
+
+The audit in `IMPLEMENTATION_PLAN.md` maps current transport checklist/exit evidence to source and tests. Existing server privacy, retries, ordering, resync and initial technical bounds are verified within their documented supported scope. This is not browser, readiness or production acceptance. No handler, contract or test changes are introduced.
+
+At this historical audit boundary, literal rooms and agreements/readiness contracts remained approval-blocked. D005 was subsequently resolved and implemented in Stage 8.18 above: private per-socket routing is explicitly accepted and agreements/acceptance has its own HTTP state/mutation boundary plus atomic new-start gate. A no-game socket resync still returns unavailable; it has not been repurposed into a lobby-state response.
 
 The certificate/private key under `src/server/testing/` are **public, disposable test fixtures**, trusted only by these Node test clients. Never use them in deployment, install them in a system trust store, or disable global TLS verification to run the suite.

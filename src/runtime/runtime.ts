@@ -855,17 +855,25 @@ export class GameRuntime {
 
   /** Publisher must atomically store the closed old checkpoint and actual successor. */
   handoff(
-    publish: (checkpoint: RuntimeCheckpoint) => Promise<void>,
+    publish: (checkpoint: RuntimeCheckpoint) => Promise<void | false>,
     expected?: BranchHead,
-    options: Pick<DispatchOptions, 'admit'> = {},
+    options: Pick<DispatchOptions, 'admit'> & { readonly deferClosure?: boolean } = {},
   ): Promise<boolean> {
     const admit = options.admit;
+    const deferClosure = options.deferClosure === true;
     return this.#enqueue(
       async () => {
         if (this.#closed || this.#view().state?.phase.type !== 'finished') return false;
         if (expected && !isDeepStrictEqual(expected, this.#view().head)) return false;
-        this.#options.history.closeRollback();
-        await publish(this.#capture());
+        // A transactional publisher may refuse policy admission without changing
+        // history. It must persist a closed history copy on successful handoff.
+        if (!deferClosure) this.#options.history.closeRollback();
+        const committed = await publish(this.#capture());
+        if (committed === false) {
+          if (!deferClosure) throw new Error('Handoff refusal requires deferred closure');
+          return false;
+        }
+        if (deferClosure) this.#options.history.closeRollback();
         await this.#publish('handoff', false);
         this.#closed = true;
         this.#cancelTasks();

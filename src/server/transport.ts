@@ -44,6 +44,11 @@ import { ChatAdmissionError } from '../persistence/lobby.ts';
 import { boundedChatPage } from './chat-page.ts';
 import type { ChatMessage } from '../persistence/lobby-contracts.ts';
 import { decodeLobbyRequest, lobbyMembership, LOBBY_BODY_MAX_BYTES } from '../protocol/lobby.ts';
+import {
+  decodeWorkflow,
+  lobbyWorkflow,
+  WORKFLOW_BODY_MAX_BYTES,
+} from '../protocol/lobby-workflow.ts';
 
 const GAMEPLAY_TYPES = new Set([
   'draw-card',
@@ -390,7 +395,13 @@ export class PenkyTransport {
         fail(429);
         return;
       }
-      const lobbyRoute = req.url === '/api/lobbies' || req.url === '/api/lobbies/join';
+      const lobbyRoute = [
+        '/api/lobbies',
+        '/api/lobbies/join',
+        '/api/lobbies/state',
+        '/api/lobbies/agreements',
+        '/api/lobbies/ready',
+      ].includes(req.url ?? '');
       if (lobbyRoute) {
         if (req.method !== 'POST') {
           fail(405);
@@ -476,12 +487,21 @@ export class PenkyTransport {
       fail(429);
       return;
     }
+    const workflowType =
+      req.url === '/api/lobbies/state'
+        ? 'state'
+        : req.url === '/api/lobbies/agreements'
+          ? 'agreements'
+          : req.url === '/api/lobbies/ready'
+            ? 'ready'
+            : null;
+    const maxBytes = workflowType ? WORKFLOW_BODY_MAX_BYTES : LOBBY_BODY_MAX_BYTES;
     const length = req.headers['content-length'];
     if (
       !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type'] ?? '') ||
       (req.headers['content-encoding'] !== undefined &&
         req.headers['content-encoding'] !== 'identity') ||
-      (length !== undefined && (!/^\d+$/.test(length) || Number(length) > LOBBY_BODY_MAX_BYTES))
+      (length !== undefined && (!/^\d+$/.test(length) || Number(length) > maxBytes))
     ) {
       res.setHeader('Connection', 'close');
       fail(400);
@@ -491,7 +511,7 @@ export class PenkyTransport {
     let size = 0;
     for await (const chunk of req) {
       size += chunk.length;
-      if (size > LOBBY_BODY_MAX_BYTES) {
+      if (size > maxBytes) {
         res.setHeader('Connection', 'close');
         fail(400);
         return;
@@ -507,17 +527,37 @@ export class PenkyTransport {
     }
     const create = req.url === '/api/lobbies';
     const creation = create ? decodeLobbyRequest(value, 'create') : null;
-    const joining = create ? null : decodeLobbyRequest(value, 'join');
-    if (!creation && !joining) {
+    const joining = create || workflowType ? null : decodeLobbyRequest(value, 'join');
+    const workflow = workflowType ? decodeWorkflow(value, workflowType) : null;
+    if (!creation && !joining && !workflow) {
       fail(400);
       return;
     }
     try {
       // Access owns the credential -> lobby -> game-head transaction/lock order.
       // Do not enter a host/runtime queue or attach sockets while holding it.
-      const binding = creation
-        ? await this.#options.access.createLobbyFromIntent(token, creation.requestId, this.#now())
-        : await this.#options.access.joinLobby(token, joining!.lobbyId, this.#now());
+      const access = this.#options.access;
+      const binding = workflow
+        ? workflow.type === 'state'
+          ? await access.lobbyState(token, workflow.lobbyId, this.#now())
+          : workflow.type === 'agreements'
+            ? await access.editAgreements(
+                token,
+                workflow.lobbyId,
+                workflow.expectedRevision,
+                workflow.text,
+                this.#now(),
+              )
+            : await access.setAcceptance(
+                token,
+                workflow.lobbyId,
+                workflow.expectedRevision,
+                workflow.ready,
+                this.#now(),
+              )
+        : creation
+          ? await access.createLobbyFromIntent(token, creation.requestId, this.#now())
+          : await access.joinLobby(token, joining!.lobbyId, this.#now());
       if (this.#closed || res.destroyed) return;
       // An admitted commit drains, but revalidate before returning its identity.
       const valid = await this.#options.access.inspect(token, this.#now());
@@ -529,15 +569,23 @@ export class PenkyTransport {
       res.setHeader('Set-Cookie', guestCookie(token));
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.statusCode = 200;
-      res.end(JSON.stringify(lobbyMembership(binding)));
+      res.end(
+        JSON.stringify('members' in binding ? lobbyWorkflow(binding) : lobbyMembership(binding)),
+      );
     } catch (error) {
       fail(
         error instanceof GuestAccessError
           ? error.code === 'authentication-required'
             ? 401
-            : error.code === 'lobby-full' || error.code === 'match-running'
-              ? 409
-              : 503
+            : error.code === 'owner-only' || error.code === 'membership-required'
+              ? 403
+              : error.code === 'invalid-workflow'
+                ? 400
+                : ['lobby-full', 'match-running', 'revision-conflict', 'workflow-locked'].includes(
+                      error.code,
+                    )
+                  ? 409
+                  : 503
           : 503,
       );
     }

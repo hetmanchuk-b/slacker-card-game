@@ -10,6 +10,15 @@ import type {
   SessionId,
 } from '../game/ids.ts';
 
+/** Expected pre-write start denial; infrastructure failures must not use this path. */
+export class MatchStartRefusal extends Error {
+  readonly code: 'not-ready' | 'invalid-configuration';
+  constructor(code: 'not-ready' | 'invalid-configuration') {
+    super(code);
+    this.code = code;
+  }
+}
+
 export type LobbyBinding = Readonly<{
   id: LobbyId;
   ownerSessionId: SessionId;

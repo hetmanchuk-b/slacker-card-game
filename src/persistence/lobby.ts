@@ -4,6 +4,7 @@ import type { RuntimeSnapshot, RuntimeOptions } from '../runtime/runtime.ts';
 import { PostgresSession } from './postgres.ts';
 import { MemoryHistory } from './memory-history.ts';
 import type { MatchStart } from './lobby-contracts.ts';
+import { MatchStartRefusal } from './lobby-contracts.ts';
 import { GameRuntime, RuntimeAdmissionError } from '../runtime/runtime.ts';
 import type {
   LobbyBinding,
@@ -73,7 +74,8 @@ export type MatchStartResult =
         | 'match-not-finished'
         | 'invalid-configuration'
         | 'command-id-reused'
-        | 'stale-head';
+        | 'stale-head'
+        | 'not-ready';
     }>;
 
 export type MatchStartOutcome =
@@ -204,6 +206,7 @@ export class PostgresLobby {
       },
     });
     let handingOff = false;
+    const refusal: { code: MatchStartRefusal['code'] | null } = { code: null };
     try {
       const started = await runtime.dispatch({
         type: 'start-game',
@@ -222,24 +225,32 @@ export class PostgresLobby {
         handingOff = true;
         const moved = await current.runtime.handoff(
           async (oldCheckpoint) => {
-            sink.session = await current.session.startSuccessor(
-              this.#binding,
-              request,
-              history,
-              checkpoint,
-              oldCheckpoint,
-            );
+            try {
+              sink.session = await current.session.startSuccessor(
+                this.#binding,
+                request,
+                history,
+                checkpoint,
+                oldCheckpoint,
+              );
+            } catch (error) {
+              if (!(error instanceof MatchStartRefusal)) throw error;
+              refusal.code = error.code;
+              return false;
+            }
           },
           request.expectedHead ?? undefined,
-          options.admit ? { admit: options.admit } : {},
+          { deferClosure: true, ...(options.admit ? { admit: options.admit } : {}) },
         );
         if (!moved) {
           await runtime.dispose();
           return {
             type: 'rejected',
-            code: isDeepStrictEqual(request.expectedHead, current.runtime.read().head)
-              ? 'match-not-finished'
-              : 'stale-head',
+            code:
+              refusal.code ??
+              (isDeepStrictEqual(request.expectedHead, current.runtime.read().head)
+                ? 'match-not-finished'
+                : 'stale-head'),
           };
         }
       } else {
@@ -257,6 +268,7 @@ export class PostgresLobby {
     } catch (error) {
       await runtime.dispose();
       if (sink.session) await sink.session.close();
+      if (error instanceof MatchStartRefusal) return { type: 'rejected', code: error.code };
       if (handingOff && current && !(error instanceof RuntimeAdmissionError))
         await current.session.close();
       throw error;

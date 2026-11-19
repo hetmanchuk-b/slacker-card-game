@@ -6,6 +6,12 @@ This is a transport-independent contract/validation library, **not itself an HTT
 
 `src/protocol/lobby.ts` separately defines strict HTTP-body decoding and the own-membership allowlist. This does not extend the version-1 socket intent union. `POST /api/lobbies` accepts exactly `{ requestId }` (128-unit creation identity scoped to the authenticated guest); `POST /api/lobbies/join` accepts exactly `{ lobbyId }` (256-unit reference). Both require an existing cookie and exact HTTPS Origin. Responses are exactly `{ lobbyId, seatId, position, isOwner }`, without session identity, roster or game state. IDs preserve exact nonblank well-formed Unicode, with no NUL/coercion/trimming. Invalid bodies return fixed empty HTTP errors, not game punishments. `transport.md` specifies raw-byte/media/rate/status/cookie and durable retry semantics. No socket attachment is implied; clients explicitly resync afterward.
 
+### Agreements/acceptance HTTP contracts — Stage 8.18
+
+`src/protocol/lobby-workflow.ts` separately decodes POST lobby `state` (`{lobbyId}`), `agreements` (`{lobbyId,expectedRevision,text}`) and `ready` (`{lobbyId,expectedRevision,ready}`) requests. Exact data-only properties, member/owner/own-seat authentication, canonical signed-bigint decimal epochs, exact well-formed text up to 4096 UTF-8 bytes and 32 KiB raw body limits apply. Response allowlisting selects lobby text/epoch/editability, seat/acceptance statuses and the immutable current-match agreement binding. No private state/session fields or new socket intents are introduced; see `transport.md` for exact fields/statuses.
+
+`ready` is acceptance ONLY. Epochs change on text/roster/new-match resets, not per-member updates; concurrent confirmations at one epoch do not conflict. A changed epoch rejects stale mutations without replay/retargeting. Ready flags can change at the same epoch, so it is not a whole-view/delivery version. The existing start intent stays unchanged; `MatchStartAck` adds fixed `not-ready` for a genuinely new unaccepted member-backed start. Accepted start receipts bypass the new gate/reset. This is not a reliable lobby stream or browser UI.
+
 ## Incoming messages
 
 `decodeClientMessage(unknown)` accepts already-deserialized plain data records:
@@ -60,7 +66,7 @@ An approved optional runtime admission guard checks fresh credentials and curren
 
 ### Authoritative claim binding — Stage 8.11
 
-The existing `submit-claim` DTO is unchanged. Runtime queue admission authenticates before receipt lookup; exact accepted claim retries retain their original canonical scope before any new resolution. A new request resolves spoken scope at queue execution, immutable chat authors/original contexts, or initiating action actors/original action scopes. Active inherited prefixes are valid; abandoned futures and system/non-attributable references are not. Invalid provenance maps to fixed `invalid-claim`, closed scope to `scope-closed`, and resolver infrastructure failure to headless `unavailable`, without leaking evidence or creating punishment. The engine retains incident deduplication and all claim procedures. See `transport.md` and `runtime.md`. Stage 8.12 binds owner-history/rollback; Stage 8.13 binds chat creation/history; Stage 8.14 binds start-match; readiness/house-rule/minigame flows remain deferred. Stage 8.15 adds separate HTTP lobby admission as documented above.
+The existing `submit-claim` DTO is unchanged. Runtime queue admission authenticates before receipt lookup; exact accepted claim retries retain their original canonical scope before any new resolution. A new request resolves spoken scope at queue execution, immutable chat authors/original contexts, or initiating action actors/original action scopes. Active inherited prefixes are valid; abandoned futures and system/non-attributable references are not. Invalid provenance maps to fixed `invalid-claim`, closed scope to `scope-closed`, and resolver infrastructure failure to headless `unavailable`, without leaking evidence or creating punishment. The engine retains incident deduplication and all claim procedures. See `transport.md` and `runtime.md`. Stage 8.12 binds owner-history/rollback; Stage 8.13 binds chat creation/history; Stage 8.14 binds start-match; Stage 8.15 adds HTTP lobby admission and Stage 8.18 adds HTTP agreements/acceptance above; minigame and browser flows remain deferred.
 
 ### Owner history and rollback — Stage 8.12
 
@@ -90,7 +96,7 @@ The durable lobby/request receipt binds original authenticated actor and exact o
 
 A handoff guard runs before old rollback closure/mutation. False is headless unauthorized; infrastructure failure is sanitized unavailable. Neither closes rollback or creates a receipt/frame. Private preparation is discarded; admitted atomic transactions drain before safe acknowledgment. Only `makeMatchStartAck` output is emitted after final non-refreshing auth at the bounded wire slot, with no await between final validation and emission. No canonical private configuration/live runtime/session is serialized. Duplicate acknowledgments are historical, not live state cursors. Existing subscribers rebind a state-only successor baseline; first-match clients with no state subscription explicitly resync after the start acknowledgment.
 
-The operator approved this bounded existing-result contract while readiness/house rules, revision-1.4 minigame gating, UI and lobby creation/join endpoints remain deferred. No readiness values are fabricated, no minigame completion policy is added, and no full rule-complete browser start workflow is claimed.
+At the Stage 8.14 boundary, this bounded existing-result contract deferred readiness/house rules, minigame gating, UI and lobby admission. Stages 8.15/8.18 subsequently add HTTP admission and agreement-acceptance gating; minigame/UI remain deferred. No readiness values are fabricated, no minigame completion policy is added, and no full rule-complete browser start workflow is claimed.
 
 ### Committed live stream and transport receipts — Stage 8.10
 

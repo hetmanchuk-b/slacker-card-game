@@ -6,6 +6,8 @@ import type { GameId, LobbyId, SeatId, SessionId } from '../game/ids.ts';
 import { MemoryHistory } from '../persistence/memory-history.ts';
 import { PostgresSession } from '../persistence/postgres.ts';
 import { createGuestToken, guestTokenHash, GUEST_TTL_MS } from './guest-session.ts';
+import { validAgreements, validRevision } from '../protocol/lobby-workflow.ts';
+import type { LobbyWorkflow } from '../protocol/lobby-workflow.ts';
 
 type AccessCode =
   | 'invalid-time'
@@ -15,7 +17,10 @@ type AccessCode =
   | 'lobby-unavailable'
   | 'lobby-full'
   | 'match-running'
-  | 'storage-unavailable';
+  | 'storage-unavailable'
+  | 'revision-conflict'
+  | 'workflow-locked'
+  | 'invalid-workflow';
 export class GuestAccessError extends Error {
   readonly code: AccessCode;
   constructor(code: AccessCode) {
@@ -44,8 +49,10 @@ type LobbyRow = {
   owner_session_id: SessionId;
   owner_seat_id: SeatId;
   current_game_id: GameId | null;
+  agreement_text: string;
+  agreement_revision: string;
 };
-type MemberRow = { session_id: SessionId; seat_id: SeatId; seat_index: number };
+type MemberRow = { session_id: SessionId; seat_id: SeatId; seat_index: number; accepted: boolean };
 
 function time(nowMs: number): number {
   if (!Number.isSafeInteger(nowMs) || nowMs < 0 || nowMs > Number.MAX_SAFE_INTEGER - GUEST_TTL_MS)
@@ -241,14 +248,125 @@ export class PostgresGuestAccess {
           session_id: session.sessionId,
           seat_id: id('seat', randomUUID()),
           seat_index: members.length,
+          accepted: false,
         };
         await client.query(
           'INSERT INTO penky_lobby_members(lobby_id,session_id,seat_id,seat_index) VALUES ($1,$2,$3,$4)',
           [lobbyId, member.session_id, member.seat_id, member.seat_index],
         );
+        await client.query('UPDATE penky_lobby_members SET accepted=false WHERE lobby_id=$1', [
+          lobbyId,
+        ]);
+        await client.query(
+          'UPDATE penky_lobbies SET agreement_revision=agreement_revision+1 WHERE lobby_id=$1',
+          [lobbyId],
+        );
         members.push(member);
       }
       return this.#binding(session, lobbyId, lobby, members);
+    });
+  }
+
+  lobbyState(token: unknown, lobbyId: LobbyId, nowMs: number): Promise<LobbyWorkflow> {
+    return this.#workflow(token, lobbyId, nowMs);
+  }
+
+  editAgreements(
+    token: unknown,
+    lobbyId: LobbyId,
+    expectedRevision: string,
+    text: string,
+    nowMs: number,
+  ): Promise<LobbyWorkflow> {
+    if (!validRevision(expectedRevision) || !validAgreements(text))
+      throw new GuestAccessError('invalid-workflow');
+    return this.#workflow(token, lobbyId, nowMs, { expectedRevision, text });
+  }
+
+  setAcceptance(
+    token: unknown,
+    lobbyId: LobbyId,
+    expectedRevision: string,
+    ready: boolean,
+    nowMs: number,
+  ): Promise<LobbyWorkflow> {
+    if (!validRevision(expectedRevision) || typeof ready !== 'boolean')
+      throw new GuestAccessError('invalid-workflow');
+    return this.#workflow(token, lobbyId, nowMs, { expectedRevision, ready });
+  }
+
+  #workflow(
+    token: unknown,
+    lobbyId: LobbyId,
+    nowMs: number,
+    change?:
+      { expectedRevision: string; text: string } | { expectedRevision: string; ready: boolean },
+  ): Promise<LobbyWorkflow> {
+    return this.#withSession(token, nowMs, async (client, session) => {
+      const lobby = await this.#lobby(client, lobbyId);
+      const members = await this.#members(client, lobbyId, lobby);
+      const binding = this.#binding(session, lobbyId, lobby, members);
+      let editable = true;
+      try {
+        await this.#admission(client, lobby.current_game_id);
+      } catch (error) {
+        if (error instanceof GuestAccessError && error.code === 'match-running') editable = false;
+        else throw error;
+      }
+      if (change) {
+        if ('text' in change && !binding.isOwner) throw new GuestAccessError('owner-only');
+        if (change.expectedRevision !== lobby.agreement_revision)
+          throw new GuestAccessError('revision-conflict');
+        if (!editable) throw new GuestAccessError('workflow-locked');
+        if ('text' in change && change.text !== lobby.agreement_text) {
+          const updated = await client.query<{ revision: string }>(
+            'UPDATE penky_lobbies SET agreement_text=$2,agreement_revision=agreement_revision+1 WHERE lobby_id=$1 RETURNING agreement_revision::text AS revision',
+            [lobbyId, change.text],
+          );
+          lobby.agreement_revision = updated.rows[0]!.revision;
+          lobby.agreement_text = change.text;
+          await client.query('UPDATE penky_lobby_members SET accepted=false WHERE lobby_id=$1', [
+            lobbyId,
+          ]);
+          for (const member of members) member.accepted = false;
+        } else if ('ready' in change) {
+          await client.query(
+            'UPDATE penky_lobby_members SET accepted=$3 WHERE lobby_id=$1 AND session_id=$2',
+            [lobbyId, session.sessionId, change.ready],
+          );
+          members.find((member) => member.session_id === session.sessionId)!.accepted =
+            change.ready;
+        }
+      }
+      const match = lobby.current_game_id
+        ? await client.query<{
+            game_id: GameId;
+            agreement_text: string;
+            agreement_revision: string;
+          }>(
+            'SELECT game_id,agreement_text,agreement_revision::text FROM penky_match_agreements WHERE game_id=$1 AND lobby_id=$2',
+            [lobby.current_game_id, lobbyId],
+          )
+        : null;
+      const original = match?.rows[0];
+      return {
+        lobbyId,
+        revision: lobby.agreement_revision,
+        text: lobby.agreement_text,
+        editable,
+        members: members.map((member) => ({
+          seatId: member.seat_id,
+          position: member.seat_index,
+          ready: member.accepted,
+        })),
+        matchAgreements: original
+          ? {
+              gameId: original.game_id,
+              text: original.agreement_text,
+              revision: original.agreement_revision,
+            }
+          : null,
+      };
     });
   }
 
@@ -325,7 +443,7 @@ export class PostgresGuestAccess {
 
   async #lobby(client: PoolClient, lobbyId: LobbyId): Promise<LobbyRow> {
     const result = await client.query<LobbyRow>(
-      'SELECT owner_session_id,owner_seat_id,current_game_id FROM penky_lobbies WHERE lobby_id=$1 FOR UPDATE',
+      'SELECT owner_session_id,owner_seat_id,current_game_id,agreement_text,agreement_revision::text FROM penky_lobbies WHERE lobby_id=$1 FOR UPDATE',
       [lobbyId],
     );
     if (!result.rows[0]) throw new GuestAccessError('lobby-unavailable');
@@ -333,7 +451,7 @@ export class PostgresGuestAccess {
   }
   async #members(client: PoolClient, lobbyId: LobbyId, lobby: LobbyRow): Promise<MemberRow[]> {
     const result = await client.query<MemberRow>(
-      'SELECT session_id,seat_id,seat_index FROM penky_lobby_members WHERE lobby_id=$1 ORDER BY seat_index',
+      'SELECT session_id,seat_id,seat_index,accepted FROM penky_lobby_members WHERE lobby_id=$1 ORDER BY seat_index',
       [lobbyId],
     );
     const members = result.rows;

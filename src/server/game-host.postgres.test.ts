@@ -90,6 +90,12 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
       seatIds: joined.seatIds,
       cardIds: Array.from({ length: 36 }, () => id('card', randomUUID())),
     };
+    const acceptance = await access.lobbyState(owner.token, member.lobbyId, 1000);
+    await Promise.all(
+      [owner, guest].map((grant) =>
+        access.setAcceptance(grant.token, member.lobbyId, acceptance.revision, true, 1000),
+      ),
+    );
     assert.equal((await host.startMatch(member.lobbyId, request)).type, 'started');
     return {
       host,
@@ -842,7 +848,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   await t.test(
     'atomic successor is adopted without another lease; old routing and stale bindings fail',
     async (t) => {
-      const { host, clock, member, request, guest } = await setup(t);
+      const { host, clock, member, request, guest, owner } = await setup(t);
       await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
         for (let index = 0; index < 36; index++) {
           const phase = runtime.read().state!.phase;
@@ -875,6 +881,12 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
         branchId: id('branch', randomUUID()),
         seatIds: newBinding.seatIds,
       };
+      const acceptance = await access.lobbyState(owner.token, member.lobbyId, 1000);
+      await Promise.all(
+        [owner, guest, newcomer].map((grant) =>
+          access.setAcceptance(grant.token, member.lobbyId, acceptance.revision, true, 1000),
+        ),
+      );
       const remove = await failFrames(t, request.gameId);
       await assert.rejects(host.startMatch(member.lobbyId, next), { message: 'game-unavailable' });
       await remove();

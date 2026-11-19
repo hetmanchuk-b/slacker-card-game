@@ -167,6 +167,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
     authPollMs = 25,
     delivery?: TransportOptions['delivery'],
     startGame = true,
+    accept = true,
   ) {
     let now = Date.now();
     const access = new PostgresGuestAccess(pool);
@@ -208,6 +209,15 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
       seatIds: members[0]!.seatIds,
       cardIds: Array.from({ length: 36 }, () => id('card', randomUUID())),
     };
+    const acceptAll = async () => {
+      const view = await access.lobbyState(grants[0]!.token, owner.lobbyId, now);
+      await Promise.all(
+        grants.map((grant) =>
+          access.setAcceptance(grant.token, owner.lobbyId, view.revision, true, now),
+        ),
+      );
+    };
+    if (accept) await acceptAll(); // Explicit test-fixture consent, never production auto-readiness.
     if (startGame) assert.equal((await host.startMatch(owner.lobbyId, start)).type, 'started');
     const clients: Socket[] = [];
     function client(
@@ -241,6 +251,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
       access,
       host,
       clock,
+      acceptAll,
       transport,
       base,
       grants,
@@ -625,6 +636,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
         return result;
       },
     });
+    await context.acceptAll(); // A successor fixture must explicitly accept its next-match epoch.
   }
   async function play(
     context: Context,
@@ -736,8 +748,14 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
         await entered.promise;
         const grant = await context.access.issue(context.now());
         await context.access.joinLobby(grant.token, lobbyId, context.now());
+        context.grants.push(grant);
         release.resolve();
-        assert.deepEqual(await pending, { protocolVersion: 1, type: 'error', code: 'unavailable' });
+        assert.deepEqual(await pending, {
+          protocolVersion: 1,
+          type: 'match-start-ack',
+          requestId: request.requestId,
+          result: { type: 'rejected', code: 'invalid-configuration' },
+        });
         assert.equal((await (await PostgresLobby.open(pool, lobbyId)).read()).currentGameId, null);
         assert.equal(
           await (
@@ -749,10 +767,100 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
         release.resolve();
         spy.mock.restore();
       }
+      await context.acceptAll(); // The new member invalidated every old acceptance.
       const retry = await message(sockets[0]!, request);
       if (retry.type !== 'match-start-ack' || retry.result.type !== 'started') assert.fail();
       assert.equal(retry.result.duplicate, false);
       assert.equal((await context.host.read(lobbyId))!.snapshot.state!.players.length, 3);
+    },
+  );
+
+  await t.test(
+    'acceptance withdrawn after successor preparation refuses without closing the old writer',
+    async (t) => {
+      const context = await fixture(t);
+      const lobbyId = context.members[0]!.lobbyId;
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      for (const socket of sockets) await message(socket, resync(lobbyId));
+      await ready(context);
+      await finishHosted(context);
+      const before = (await context.host.read(lobbyId))!;
+      const consent = await context.access.lobbyState(
+        context.grants[0]!.token,
+        lobbyId,
+        context.now(),
+      );
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const move = PostgresSession.prototype.startSuccessor;
+      const held = t.mock.method(
+        PostgresSession.prototype,
+        'startSuccessor',
+        async function (this: PostgresSession, ...args: Parameters<typeof move>) {
+          entered.resolve();
+          await release.promise;
+          return Reflect.apply(move, this, args);
+        },
+      );
+      const request = {
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        intent: { type: 'start-match', lobbyId, expected: before.snapshot.head },
+      };
+      const pending = message(sockets[0]!, request);
+      try {
+        await entered.promise;
+        const withdrawn = await http(
+          context.base,
+          '/api/lobbies/ready',
+          'POST',
+          `${GUEST_COOKIE_NAME}=${context.grants[1]!.token}`,
+          origin,
+          JSON.stringify({ lobbyId, expectedRevision: consent.revision, ready: false }),
+          { 'Content-Type': 'application/json' },
+        );
+        assert.equal(withdrawn.status, 200);
+        release.resolve();
+        assert.deepEqual(await pending, {
+          protocolVersion: 1,
+          type: 'match-start-ack',
+          requestId: request.requestId,
+          result: { type: 'rejected', code: 'not-ready' },
+        });
+      } finally {
+        release.resolve();
+        held.mock.restore();
+      }
+      const after = (await context.host.read(lobbyId))!;
+      assert.equal(after.epoch, before.epoch);
+      assert.deepEqual(after.snapshot, before.snapshot);
+      assert.equal(
+        await context.host.observeHistory(
+          lobbyId,
+          before.snapshot.head.gameId,
+          async (capture) => capture.closedRollback,
+        ),
+        false,
+      );
+      assert.equal(
+        await (
+          await PostgresLobby.open(pool, lobbyId)
+        ).startReceipt(id('command', request.requestId)),
+        null,
+      );
+      const retained = await context.access.lobbyState(
+        context.grants[0]!.token,
+        lobbyId,
+        context.now(),
+      );
+      assert.equal(retained.revision, consent.revision);
+      assert.deepEqual(
+        retained.members.map((member) => member.ready),
+        [true, false],
+      );
+      await context.acceptAll();
+      const retry = await message(sockets[0]!, request);
+      assert.ok(retry.type === 'match-start-ack' && retry.result.type === 'started');
     },
   );
 
@@ -766,6 +874,11 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
       await ready(context);
       await finishHosted(context);
       const old = (await context.host.read(lobbyId))!.snapshot.head;
+      const consentBeforeFailure = await context.access.lobbyState(
+        context.grants[0]!.token,
+        lobbyId,
+        context.now(),
+      );
       const failedWriter = (
         await pool.query<{ pid: number }>(
           'SELECT pid FROM pg_stat_activity WHERE application_name=$1',
@@ -792,6 +905,11 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
         code: 'unavailable',
       });
       await remove();
+      assert.deepEqual(
+        await context.access.lobbyState(context.grants[0]!.token, lobbyId, context.now()),
+        consentBeforeFailure,
+        'failed storage start never resets consent or epoch',
+      );
       const lobby = await PostgresLobby.open(pool, lobbyId);
       assert.equal((await lobby.read()).currentGameId, old.gameId);
       assert.equal(await lobby.startReceipt(id('command', request.requestId)), null);

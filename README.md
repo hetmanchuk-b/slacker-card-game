@@ -58,7 +58,9 @@ The eighth engine/runtime increment completes Stage 7 for the trusted server/sto
 
 **Stage 9.1 browser shell implemented:** React/Vite over loopback HTTPS now confirms a cookie-only guest session, creates one canonical lobby and displays only own seat/owner identity. Uncertain creation survives reload with the original nonsecret reference; missing/expired original credentials are not silently replaced. Six client tests and nine real Chromium/HTTPS/PostgreSQL tests cover this bounded slice. See [browser setup and boundaries](docs/browser-client.md).
 
-**Not a complete online game yet:** joining, agreements/acceptance UI, gameplay UI, bot decisions and Three.js are still planned. A source-only HTTPS development launcher exists, not a production game-server CLI. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
+**Stage 9.2 join/restoration implemented:** known lobby references and nonsecret URL fragments support explicit same-cookie reload/new-tab membership confirmation. Fresh guest entry requires explicit consent; restoration never issues credentials, and original creation retries remain separate. Seven additional client tests and nine additional browser cases verify join/retry/expiry, full/running admission and validation recovery.
+
+**Not a complete online game yet:** agreements/acceptance UI, gameplay UI, bot decisions and Three.js are still planned. A source-only HTTPS development launcher exists, not a production game-server CLI. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
 
 **New rules, not implemented yet:** revision 1.4 adds a post-game deck-strike minigame and makes remaining participants losers when repetition ends a match. These approved changes are tracked in Stage 11a; current result contracts still follow revision 1.3.
 

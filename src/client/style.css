@@ -79,7 +79,9 @@ button {
 button:hover:not(:disabled) {
   background: #0c513f;
 }
-button:focus-visible {
+button:focus-visible,
+a:focus-visible,
+input:focus-visible {
   outline: 3px solid #20303a;
   outline-offset: 4px;
 }
@@ -127,6 +129,45 @@ footer {
 footer {
   padding-block: 1.5rem;
   border-block-start: 1px solid #c0cdd3;
+}
+.join {
+  margin-block-start: 2.5rem;
+  padding-block-start: 2rem;
+  border-block-start: 1px solid #c0cdd3;
+}
+.join label {
+  display: block;
+}
+input[type='text'] {
+  margin-block-start: 0.5rem;
+  font: inherit;
+  font-size: max(1rem, 1em);
+  inline-size: 100%;
+  min-block-size: 3rem;
+  padding: 0.6rem;
+  border: 1px solid #657780;
+  border-radius: 0.3rem;
+}
+input:user-invalid {
+  border-color: #9f3134;
+}
+.join .consent {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  padding-block: 0.5rem;
+  margin-block: 1rem;
+}
+.consent input {
+  flex: 0 0 1.25rem;
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+  margin-block-start: 0.35rem;
+  accent-color: #126b54;
+}
+a {
+  color: #126b54;
+  overflow-wrap: anywhere;
 }
 @media (max-width: 44rem) {
   main {

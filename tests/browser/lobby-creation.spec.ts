@@ -1,39 +1,6 @@
-import { test as base, expect } from '@playwright/test';
-import { readFileSync } from 'node:fs';
+import { expect } from '@playwright/test';
 import { fileURLToPath } from 'node:url';
-import { Pool } from 'pg';
-import { migrate } from '../../src/persistence/postgres.ts';
-import { startBrowserDevServer } from '../../src/dev/server.ts';
-
-const tls = {
-  key: readFileSync(new URL('../../src/server/testing/localhost-key.pem', import.meta.url)),
-  cert: readFileSync(new URL('../../src/server/testing/localhost-cert.pem', import.meta.url)),
-};
-const test = base.extend<{ origin: string; wall: { now: number } }>({
-  wall: async ({ browserName: _browserName }, use) => {
-    await use({ now: Date.now() });
-  },
-  origin: async ({ wall }, use) => {
-    const pool = new Pool({
-      connectionString: process.env.PENKY_TEST_DATABASE_URL,
-      max: 10,
-      connectionTimeoutMillis: 3000,
-      statement_timeout: 5000,
-    });
-    pool.on('error', () => {});
-    try {
-      await migrate(pool);
-      const server = await startBrowserDevServer({ pool, tls, port: 0, now: () => wall.now });
-      try {
-        await use(server.origin);
-      } finally {
-        await server.close();
-      }
-    } finally {
-      await pool.end();
-    }
-  },
-});
+import { test } from './fixtures.ts';
 
 test('a real HTTPS browser creates a lobby and receives only its own identity', async ({
   page,

@@ -2,6 +2,10 @@
 
 This is a transport-independent contract/validation library, **not itself an HTTP/Socket.IO server**. Stages 8.8–8.10's separate `PenkyTransport` consumes resync/a bounded gameplay subset and emits safe state/action/error/command-ack envelopes; see `transport.md`. Stage 8.11 binds claim submission through authoritative queued evidence resolution; Stage 8.12 binds current-match owner-history and rollback selectors and adds the approved metadata-only rollback-notice envelope. Stage 8.13 binds authenticated retained-chat submission/history using existing DTOs; Stage 8.14 binds the existing start-match intent/ack through canonical owner-authorized orchestration. Engine/runtime commands, persistence records and projection inputs remain trusted server interfaces. A decoded intent is neither authenticated nor an accepted game action.
 
+## Lobby HTTP contracts — Stage 8.15
+
+`src/protocol/lobby.ts` separately defines strict HTTP-body decoding and the own-membership allowlist. This does not extend the version-1 socket intent union. `POST /api/lobbies` accepts exactly `{ requestId }` (128-unit creation identity scoped to the authenticated guest); `POST /api/lobbies/join` accepts exactly `{ lobbyId }` (256-unit reference). Both require an existing cookie and exact HTTPS Origin. Responses are exactly `{ lobbyId, seatId, position, isOwner }`, without session identity, roster or game state. IDs preserve exact nonblank well-formed Unicode, with no NUL/coercion/trimming. Invalid bodies return fixed empty HTTP errors, not game punishments. `transport.md` specifies raw-byte/media/rate/status/cookie and durable retry semantics. No socket attachment is implied; clients explicitly resync afterward.
+
 ## Incoming messages
 
 `decodeClientMessage(unknown)` accepts already-deserialized plain data records:
@@ -56,7 +60,7 @@ An approved optional runtime admission guard checks fresh credentials and curren
 
 ### Authoritative claim binding — Stage 8.11
 
-The existing `submit-claim` DTO is unchanged. Runtime queue admission authenticates before receipt lookup; exact accepted claim retries retain their original canonical scope before any new resolution. A new request resolves spoken scope at queue execution, immutable chat authors/original contexts, or initiating action actors/original action scopes. Active inherited prefixes are valid; abandoned futures and system/non-attributable references are not. Invalid provenance maps to fixed `invalid-claim`, closed scope to `scope-closed`, and resolver infrastructure failure to headless `unavailable`, without leaking evidence or creating punishment. The engine retains incident deduplication and all claim procedures. See `transport.md` and `runtime.md`. Stage 8.12 binds owner-history/rollback; Stage 8.13 binds chat creation/history; Stage 8.14 binds start-match; readiness/house-rule/minigame and lobby-admission flows remain deferred.
+The existing `submit-claim` DTO is unchanged. Runtime queue admission authenticates before receipt lookup; exact accepted claim retries retain their original canonical scope before any new resolution. A new request resolves spoken scope at queue execution, immutable chat authors/original contexts, or initiating action actors/original action scopes. Active inherited prefixes are valid; abandoned futures and system/non-attributable references are not. Invalid provenance maps to fixed `invalid-claim`, closed scope to `scope-closed`, and resolver infrastructure failure to headless `unavailable`, without leaking evidence or creating punishment. The engine retains incident deduplication and all claim procedures. See `transport.md` and `runtime.md`. Stage 8.12 binds owner-history/rollback; Stage 8.13 binds chat creation/history; Stage 8.14 binds start-match; readiness/house-rule/minigame flows remain deferred. Stage 8.15 adds separate HTTP lobby admission as documented above.
 
 ### Owner history and rollback — Stage 8.12
 

@@ -56,7 +56,12 @@ async function writeFrame(
 /** Explicit, transactional, checksum-checked migrations; requires DDL permission. */
 export async function migrate(pool: Pool): Promise<void> {
   const migrations = await Promise.all(
-    ['001_runtime.sql', '002_lobbies.sql', '003_guest_access.sql'].map(async (name, index) => {
+    [
+      '001_runtime.sql',
+      '002_lobbies.sql',
+      '003_guest_access.sql',
+      '004_lobby_creation_requests.sql',
+    ].map(async (name, index) => {
       const sql = await readFile(new URL(`../../migrations/${name}`, import.meta.url), 'utf8');
       return { version: index + 1, sql, checksum: createHash('sha256').update(sql).digest('hex') };
     }),

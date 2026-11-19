@@ -11,7 +11,7 @@ The engine command/event/invariant interface, runtime clock/ordering interface, 
 | Specification | Behavior | Test location / planned stage | Status |
 | --- | --- | --- | --- |
 | 1 | Clockwise seats, stable identities, stack order | `engine.test.ts`, `dealing.test.ts`, `rounds.test.ts` | Engine passing |
-| 2 | Lobby rules, owner edits, readiness reset, chat | `server/guest-access.postgres.test.ts`; remaining transport/client in stages 8–9 | D004 durable membership/admission passing; authenticated membership-only retained chat, exact text/context retries and bounded paging passing at 2/4/8 seats; canonical owner/observed-head/roster starts also passing; readiness/edits/UI/lobby admission handlers pending |
+| 2 | Lobby rules, owner edits, readiness reset, chat | `server/guest-access.postgres.test.ts`; remaining transport/client in stages 8–9 | D004 durable membership/admission passing; authenticated membership-only retained chat, exact text/context retries and bounded paging passing at 2/4/8 seats; canonical owner/observed-head/roster starts also passing; authenticated HTTP creation/join with canonical durable retries and own-seat-only output passing; readiness/edits/UI pending |
 | 3.1, 4 | 36 unique cards, trump, rank and suit comparisons | `src/game/cards.test.ts` | Passing |
 | 3.2 | Random recipient, two stump passes, uneven hands | `src/game/engine.test.ts`, `src/game/dealing.test.ts`, `src/projections/live.test.ts`, `src/projections/actions.test.ts` | Engine passing for 2–8 seats; private initial-notice refresh boundary and redacted draw observations passing at 2/4/8, including authenticated live draw streams; UI pending |
 | 3.3 | One-time 10-second reveal, last recipient leads | `dealing.test.ts`, `runtime/runtime.test.ts`, `projections/live.test.ts`, `projections/actions.test.ts`, `server/transport.postgres.test.ts` | Timed projection hides suspended/expired reveal, resumes remainder and excludes permanent public action reveal; TLS resync/live publication suppress expired and newer-suspended reveals despite delayed authorization; UI pending |
@@ -61,6 +61,13 @@ The engine command/event/invariant interface, runtime clock/ordering interface, 
 | 17. Administrative rollback | Restore cards/turn/N, retain abandoned branch and chat | 7, 8.12 (authenticated metadata history/rollback/notices passing); UI pending |
 | 18. Rollback result and timers | Restore procedure/remaining time; live absence still pauses | 7, 8.12 (runtime/storage, authenticated admin, closure and recovery retries passing); UI pending |
 | 19. In-round cycle (D001) | Third state occurrence draws; table/discard preserved | 4 (passing) |
+
+## Stage 8.15 — authenticated lobby admission
+
+- `src/protocol/lobby.test.ts`: two tests for exact creation/join bodies, reference bounds, forbidden authority, invalid Unicode/accessors and detached own-membership allowlisting. No session, roster, current-game or extra private fields become HTTP responses.
+- `src/server/guest-access.postgres.test.ts`: two additional real PostgreSQL scenarios verify parallel cross-service creation retries, guest-scoped keys, distinct keys, fresh Node process recovery, authentication before retries, expiry/revocation and atomic receipt-failure rollback of lobby/membership/expiry refresh. Existing join/capacity/game-head/rollback/start-roster regressions remain enabled.
+- `src/server/transport.postgres.test.ts`: nine additional TLS/PostgreSQL scenarios verify concurrent creation retries, exact cookie/own-seat output, stable joins, 2/4/8-seat current membership and running-match denial, capacity races, invalid origin/body/authority/media/Unicode/raw chunked size, credential rate limits, revoked/expired retries, failed SQL without identity/cookie and retry after transport restart. No game state or socket attachment is produced by HTTP admission.
+- Independent read-only review found no issues; reviewer did not run tests. Normal repository gate: 292 passed/five explicit PostgreSQL suite skips. Database-enabled repository gate: 461 passed/no skips. Dedicated disposable-PostgreSQL suite: 169 passed/no skips. Browser/manual full-match and readiness acceptance are not inferred from these tests.
 
 ## Current executable coverage
 

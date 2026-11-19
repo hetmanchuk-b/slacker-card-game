@@ -42,6 +42,8 @@ The migration runner and first migration create:
 
 `003_guest_access.sql` adds hash-only guest credentials with stable identities/expiry/revocation and retained lobby memberships constrained to eight unique clockwise seats. It does not fabricate credentials for old trusted lobby owner strings or change private game frame formats. Authenticated match transitions recheck the durable ordered roster under the lobby lock, rejecting stale preparation. Existing applied migration files remain unchanged. See `guest-access.md`.
 
+`004_lobby_creation_requests.sql` adds the retained canonical `(session_id, request_id) -> lobby_id` creation mapping. A composite foreign key binds it to durable membership; each mapped lobby has one creation identity. The credential row serializes lookup and atomic lobby/owner/mapping insertion across service processes. Failed receipt insertion rolls back lobby, membership and credential refresh. Expiry/revocation never deletes mappings. No game frame, checkpoint or existing match-start receipt format changes. Stage 8.15 exposes this through the bounded authenticated HTTP lobby API; see `transport.md`.
+
 These are private storage records, not public projections. Checksums detect accidental corruption, not a malicious database administrator.
 
 ## Runtime use

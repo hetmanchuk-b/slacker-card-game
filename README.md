@@ -50,7 +50,9 @@ The eighth engine/runtime increment completes Stage 7 for the trusted server/sto
 
 **Canonical authenticated starts implemented:** owner intents resolve durable receipts before preparing opaque game/card IDs. Exact retries retain the originally accepted match across recovery and later successors; new starts validate observed head, finished state and the locked membership roster. Queued admission precedes rollback closure, and denial leaves the original writer usable. This is the approved bounded existing-result contract, not readiness/house-rule or future minigame gating.
 
-**Not a complete online game yet:** lobby creation/join endpoints, readiness/house-rule workflows, bot decisions, and the browser/Three.js client are still planned. A TLS transport component exists, but there is no application CLI or browser application. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
+**Authenticated lobby admission implemented:** HTTPS POST creation/join returns only own lobby/seat identity. Creation keys resolve durably to one original lobby across concurrent retries and fresh-process recovery; lobby, owner membership and mapping commit atomically. Strict JSON/UTF-8/byte/rate/origin checks and credential revalidation apply. Admission does not attach sockets or grant game visibility; clients explicitly resync afterward.
+
+**Not a complete online game yet:** readiness/house-rule workflows, bot decisions, and the browser/Three.js client are still planned. A TLS transport component exists, but there is no application CLI or browser application. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
 
 **New rules, not implemented yet:** revision 1.4 adds a post-game deck-strike minigame and makes remaining participants losers when repetition ends a match. These approved changes are tracked in Stage 11a; current result contracts still follow revision 1.3.
 

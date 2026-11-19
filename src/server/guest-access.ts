@@ -166,23 +166,68 @@ export class PostgresGuestAccess {
     }
   }
 
+  /** Resolve the authenticated request before generating any new lobby identity.
+   * The credential row serializes same-guest retries across service processes.
+   */
+  createLobbyFromIntent(
+    token: unknown,
+    requestId: string,
+    nowMs: number,
+  ): Promise<GuestMembership> {
+    if (
+      typeof requestId !== 'string' ||
+      !requestId.trim() ||
+      requestId.length > 128 ||
+      !requestId.isWellFormed() ||
+      requestId.includes('\0')
+    )
+      throw new GuestAccessError('lobby-unavailable');
+    return this.#withSession(token, nowMs, async (client, session) => {
+      const previous = await client.query<{ lobby_id: LobbyId }>(
+        'SELECT lobby_id FROM penky_lobby_creation_requests WHERE session_id=$1 AND request_id=$2',
+        [session.sessionId, requestId],
+      );
+      if (previous.rows[0]) {
+        const lobbyId = previous.rows[0].lobby_id;
+        const lobby = await this.#lobby(client, lobbyId);
+        if (lobby.owner_session_id !== session.sessionId) throw new GuestAccessError('owner-only');
+        return this.#binding(session, lobbyId, lobby, await this.#members(client, lobbyId, lobby));
+      }
+      const lobbyId = id('lobby', randomUUID());
+      const binding = await this.#createLobby(client, session, lobbyId);
+      await client.query(
+        'INSERT INTO penky_lobby_creation_requests(session_id,request_id,lobby_id) VALUES ($1,$2,$3)',
+        [session.sessionId, requestId, lobbyId],
+      );
+      return binding;
+    });
+  }
+
   /** lobbyId is a host-generated creation identity, not proof of ownership. */
   createLobby(token: unknown, lobbyId: LobbyId, nowMs: number): Promise<GuestMembership> {
-    return this.#withSession(token, nowMs, async (client, session) => {
-      const seatId = id('seat', randomUUID());
-      const inserted = await client.query(
-        'INSERT INTO penky_lobbies(lobby_id,owner_session_id,owner_seat_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING RETURNING lobby_id',
+    return this.#withSession(token, nowMs, (client, session) =>
+      this.#createLobby(client, session, lobbyId),
+    );
+  }
+
+  async #createLobby(
+    client: PoolClient,
+    session: GuestSession,
+    lobbyId: LobbyId,
+  ): Promise<GuestMembership> {
+    const seatId = id('seat', randomUUID());
+    const inserted = await client.query(
+      'INSERT INTO penky_lobbies(lobby_id,owner_session_id,owner_seat_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING RETURNING lobby_id',
+      [lobbyId, session.sessionId, seatId],
+    );
+    const lobby = await this.#lobby(client, lobbyId);
+    if (lobby.owner_session_id !== session.sessionId) throw new GuestAccessError('owner-only');
+    if (inserted.rowCount)
+      await client.query(
+        'INSERT INTO penky_lobby_members(lobby_id,session_id,seat_id,seat_index) VALUES ($1,$2,$3,0)',
         [lobbyId, session.sessionId, seatId],
       );
-      const lobby = await this.#lobby(client, lobbyId);
-      if (lobby.owner_session_id !== session.sessionId) throw new GuestAccessError('owner-only');
-      if (inserted.rowCount)
-        await client.query(
-          'INSERT INTO penky_lobby_members(lobby_id,session_id,seat_id,seat_index) VALUES ($1,$2,$3,0)',
-          [lobbyId, session.sessionId, seatId],
-        );
-      return this.#binding(session, lobbyId, lobby, await this.#members(client, lobbyId, lobby));
-    });
+    return this.#binding(session, lobbyId, lobby, await this.#members(client, lobbyId, lobby));
   }
 
   joinLobby(token: unknown, lobbyId: LobbyId, nowMs: number): Promise<GuestMembership> {

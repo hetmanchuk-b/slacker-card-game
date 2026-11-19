@@ -1,6 +1,6 @@
-# Authenticated HTTPS / Socket.IO boundary — Stages 8.8–8.14
+# Authenticated HTTPS / Socket.IO boundary — Stages 8.8–8.15
 
-`src/server/transport.ts` implements `PenkyTransport` for **guest-session lifecycle, authenticated presence/private resync and a bounded gameplay-routing subset**. Socket.IO and its test-only client were explicitly approved in 8.8; the optional runtime admission guard and gameplay slice were explicitly approved in 8.9. Stage 8.10's approved bounded publisher adds authorized committed actions/live state and host lifecycle rebinding. Stage 8.11 adds authoritative claim submission. Stage 8.12 adds authenticated current-match owner history, rollback routing and metadata-only all-participant rollback notices. Stage 8.13 adds bounded membership-only retained-chat posting/history. Stage 8.14 adds canonical owner-authorized starts under the explicitly approved bounded existing-result contract. There is no browser UI, lobby creation/join endpoint or application CLI yet. Lobbies must still be prepared through trusted server APIs; matches can use the bounded owner start route. This is not a playable online game or a production deployment.
+`src/server/transport.ts` implements `PenkyTransport` for **guest-session lifecycle, authenticated presence/private resync and a bounded gameplay-routing subset**. Socket.IO and its test-only client were explicitly approved in 8.8; the optional runtime admission guard and gameplay slice were explicitly approved in 8.9. Stage 8.10's approved bounded publisher adds authorized committed actions/live state and host lifecycle rebinding. Stage 8.11 adds authoritative claim submission. Stage 8.12 adds authenticated current-match owner history, rollback routing and metadata-only all-participant rollback notices. Stage 8.13 adds bounded membership-only retained-chat posting/history. Stage 8.14 adds canonical owner-authorized starts under the explicitly approved bounded existing-result contract. Stage 8.15 adds authenticated HTTP lobby creation/join with durable canonical creation retries. There is no browser UI or application CLI yet; matches can use the bounded owner start route. This is not a playable online game or a production deployment.
 
 ## Hosting
 
@@ -37,6 +37,25 @@ All endpoints require an allowlisted HTTPS Origin and **empty bodies**. They ret
 Issuance refuses an existing named guest cookie, even malformed, with 409 rather than silently replacing identity. Refresh without a valid credential returns 401. Delete accepts a canonical already-expired/revoked token to clear it but rejects malformed/ambiguous cookies. Other failures are fixed empty responses: 400 invalid body, 403 origin, 404 unknown route, 405 method, 429 rate limit, 503 unavailable. No exception/SQL/token diagnostics are returned. No state-changing GET exists. Browser cookie persistence/renewal requires these HTTPS responses; Socket.IO messages cannot emit Set-Cookie.
 
 D004 is unchanged: 30-day sliding lifetime, revocation/expiry without seat release or owner transfer, no name/code recovery. Credentials are accepted only from `readGuestCookie`, not socket `auth`, URLs, request identity fields or stable session IDs.
+
+## Lobby endpoints — Stage 8.15
+
+Both routes require POST, an allowed HTTPS Origin and an existing canonical guest cookie. They accept only UTF-8 `application/json` (optional `charset=utf-8`), without compression. Raw bodies, including chunked bodies, are capped at 2048 bytes. No implicit credential issuance, discovery/code system, caller-selected identity or socket attachment is added.
+
+| Endpoint | Exact body | Success |
+| --- | --- | --- |
+| `/api/lobbies` | `{ "requestId": "stable-creation-key" }` | 200 with original lobby/owner-seat identity |
+| `/api/lobbies/join` | `{ "lobbyId": "opaque-lobby-id" }` | 200 with own durable membership identity |
+
+Success JSON is exactly `{ lobbyId, seatId, position, isOwner }`. Position is the zero-based clockwise seat index, not a dealing/turn hint. No roster, current game, credential/session identity, expiry, raw membership binding or game state is returned. Successful final authentication precedes Set-Cookie refresh and synchronous response emission. Responses retain no-store/nosniff headers. Clients explicitly resync using the returned lobby ID; HTTP admission never attaches/rebinds a socket or grants old-match spectator access.
+
+Creation request IDs are exact nonblank, well-formed strings of at most 128 UTF-16 code units; join lobby references use the existing 256-unit reference limit. Neither is trimmed/normalized; NUL, extra/identity fields and invalid shapes are rejected. JSON is parsed normally before exact-field validation. Creation identity is `(authenticated stable guest, requestId)`; retries across processes/restarts return the original lobby/owner seat before generating identities. A different guest using the same key creates its own lobby, not ownership access. There are no additional creation inputs to change under a key. Join uses existing `(lobby, guest)` membership idempotence and returns the same own seat/index, including running/full matches. These are identity results, not immutable game-state cursors.
+
+The additive creation mapping, lobby and owner membership commit in one transaction under credential serialization. Failed transactions publish no identity or cookie refresh; retry the original creation key after a lost/failed response. Mappings are retained with membership, including after credential expiry/revocation; request keys are not credentials. New joins retain D004's locked capacity/current-game admission and locked-roster start checks. No access SQL locks are held while waiting for host/runtime queues.
+
+Errors are fixed empty responses: 400 invalid media/encoding/body/shape, 401 missing/invalid/expired/revoked credential, 403 origin, 405 wrong method, 409 capacity or running-match admission, 429 rate limit and 503 unavailable/unknown lobby/storage failure. No rejected operation sets a cookie or exposes private diagnostics. Existing IP HTTP limits apply; create/join share an additional credential-hash bucket of 12 requests/minute, including retries/invalid bodies. Admitted commits drain on cancellation/shutdown; uncertain responses are resolved by retry, never by generating a new creation key.
+
+Verified coverage: two pure contract tests, two added real PostgreSQL creation scenarios (cross-service/process recovery, atomic receipt failure) and nine real TLS/PostgreSQL scenarios covering exact allowlists/retries/restart, auth/shape/raw-byte/rate limits and 2/4/8 admission/capacity. Browser cookie behavior, complete external matches and readiness/house-rule UI remain unverified/deferred.
 
 ## Socket contract
 

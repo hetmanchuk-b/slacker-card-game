@@ -43,6 +43,7 @@ import { TransportLimiter } from './transport-limits.ts';
 import { ChatAdmissionError } from '../persistence/lobby.ts';
 import { boundedChatPage } from './chat-page.ts';
 import type { ChatMessage } from '../persistence/lobby-contracts.ts';
+import { decodeLobbyRequest, lobbyMembership, LOBBY_BODY_MAX_BYTES } from '../protocol/lobby.ts';
 
 const GAMEPLAY_TYPES = new Set([
   'draw-card',
@@ -164,9 +165,8 @@ export type TransportOptions = Readonly<{
   delivery?: Partial<typeof DELIVERY>;
 }>;
 
-/** TLS guest lifecycle, seat-private resync and explicit guarded gameplay subset.
- * No admin/chat/start/history handlers or lobby admission,
- * proxy trust or insecure mode.
+/** TLS guest/lobby lifecycle, seat-private resync and explicit guarded intents.
+ * No proxy trust or insecure mode.
  * The caller owns migrations, host and pool; close transport before either.
  */
 export class PenkyTransport {
@@ -390,6 +390,15 @@ export class PenkyTransport {
         fail(429);
         return;
       }
+      const lobbyRoute = req.url === '/api/lobbies' || req.url === '/api/lobbies/join';
+      if (lobbyRoute) {
+        if (req.method !== 'POST') {
+          fail(405);
+          return;
+        }
+        await this.#lobbyHttp(req, res);
+        return;
+      }
       const issue = req.url === '/api/guest/session' && req.method === 'POST';
       const refresh = req.url === '/api/guest/session/refresh' && req.method === 'POST';
       const revoke = req.url === '/api/guest/session' && req.method === 'DELETE';
@@ -449,6 +458,88 @@ export class PenkyTransport {
       res.end();
     } catch {
       if (!res.writableEnded) fail(503);
+    }
+  }
+
+  async #lobbyHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const fail = (status: number) => {
+      res.statusCode = status;
+      res.end();
+      req.resume();
+    };
+    const token = readGuestCookie(req.headers.cookie);
+    if (!token) {
+      fail(401);
+      return;
+    }
+    if (!this.#rates.take(`lobby:${guestTokenHash(token)}`, this.#now(), 12, 60000)) {
+      fail(429);
+      return;
+    }
+    const length = req.headers['content-length'];
+    if (
+      !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type'] ?? '') ||
+      (req.headers['content-encoding'] !== undefined &&
+        req.headers['content-encoding'] !== 'identity') ||
+      (length !== undefined && (!/^\d+$/.test(length) || Number(length) > LOBBY_BODY_MAX_BYTES))
+    ) {
+      res.setHeader('Connection', 'close');
+      fail(400);
+      return;
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > LOBBY_BODY_MAX_BYTES) {
+        res.setHeader('Connection', 'close');
+        fail(400);
+        return;
+      }
+      chunks.push(chunk);
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+    } catch {
+      fail(400);
+      return;
+    }
+    const create = req.url === '/api/lobbies';
+    const creation = create ? decodeLobbyRequest(value, 'create') : null;
+    const joining = create ? null : decodeLobbyRequest(value, 'join');
+    if (!creation && !joining) {
+      fail(400);
+      return;
+    }
+    try {
+      // Access owns the credential -> lobby -> game-head transaction/lock order.
+      // Do not enter a host/runtime queue or attach sockets while holding it.
+      const binding = creation
+        ? await this.#options.access.createLobbyFromIntent(token, creation.requestId, this.#now())
+        : await this.#options.access.joinLobby(token, joining!.lobbyId, this.#now());
+      if (this.#closed || res.destroyed) return;
+      // An admitted commit drains, but revalidate before returning its identity.
+      const valid = await this.#options.access.inspect(token, this.#now());
+      if (!valid || valid.expiresAtMs <= this.#now()) {
+        fail(401);
+        return;
+      }
+      if (this.#closed || res.destroyed) return;
+      res.setHeader('Set-Cookie', guestCookie(token));
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.statusCode = 200;
+      res.end(JSON.stringify(lobbyMembership(binding)));
+    } catch (error) {
+      fail(
+        error instanceof GuestAccessError
+          ? error.code === 'authentication-required'
+            ? 401
+            : error.code === 'lobby-full' || error.code === 'match-running'
+              ? 409
+              : 503
+          : 503,
+      );
     }
   }
 

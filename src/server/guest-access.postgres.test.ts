@@ -98,6 +98,97 @@ test('PostgreSQL guest authentication and membership', { skip: !url }, async (t)
   }
 
   await t.test(
+    'creation request retries retain one lobby across services and process recovery',
+    async () => {
+      const grant = await access.issue(1000);
+      const requestId = randomUUID();
+      const other = new PostgresGuestAccess(pool);
+      const results = await Promise.all([
+        access.createLobbyFromIntent(grant.token, requestId, 1000),
+        other.createLobbyFromIntent(grant.token, requestId, 1000),
+      ]);
+      assert.deepEqual(results[0], results[1]);
+      assert.equal(results[0]!.position, 0);
+      assert.equal(results[0]!.isOwner, true);
+      const source = `
+      import { Pool } from 'pg';
+      import { PostgresGuestAccess } from './src/server/guest-access.ts';
+      const pool = new Pool({ connectionString: process.env.PENKY_TEST_DATABASE_URL });
+      try {
+        const result = await new PostgresGuestAccess(pool).createLobbyFromIntent(process.env.TEST_TOKEN, process.env.TEST_REQUEST, 1000);
+        process.stdout.write(JSON.stringify(result));
+      } finally { await pool.end(); }
+    `;
+      const recovered = await new Promise<string>((resolve, reject) => {
+        const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
+          env: { ...process.env, TEST_TOKEN: grant.token, TEST_REQUEST: requestId },
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => {
+          stdout += String(chunk);
+        });
+        child.stderr.on('data', (chunk) => {
+          stderr += String(chunk);
+        });
+        child.on('error', reject);
+        child.on('exit', (code) => (code === 0 ? resolve(stdout) : reject(new Error(stderr))));
+      });
+      assert.deepEqual(JSON.parse(recovered), results[0]);
+      const separate = await access.createLobbyFromIntent(grant.token, randomUUID(), 1000);
+      assert.notEqual(separate.lobbyId, results[0]!.lobbyId);
+      const stranger = await access.issue(1000);
+      const scoped = await access.createLobbyFromIntent(stranger.token, requestId, 1000);
+      assert.notEqual(scoped.lobbyId, results[0]!.lobbyId);
+      await access.revoke(grant.token, 1000);
+      await assert.rejects(access.createLobbyFromIntent(grant.token, requestId, 1000), {
+        message: 'authentication-required',
+      });
+    },
+  );
+
+  await t.test(
+    'failed creation receipt rolls back lobby, membership and refresh before retry',
+    async () => {
+      const grant = await access.issue(1000);
+      const session = await access.inspect(grant.token, 1000);
+      const requestId = randomUUID();
+      const fn = `creation_failure_${randomUUID().replaceAll('-', '')}`;
+      await pool.query(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.request_id = '${requestId}' THEN RAISE EXCEPTION 'private creation failure'; END IF;
+      RETURN NEW; END $$`);
+      await pool.query(
+        `CREATE TRIGGER ${fn} BEFORE INSERT ON penky_lobby_creation_requests FOR EACH ROW EXECUTE FUNCTION ${fn}()`,
+      );
+      try {
+        await assert.rejects(access.createLobbyFromIntent(grant.token, requestId, 2000), {
+          message: 'storage-unavailable',
+        });
+        const unchanged = await access.inspect(grant.token, 1000);
+        assert.equal(unchanged!.expiresAtMs, session!.expiresAtMs);
+        const rows = await pool.query('SELECT 1 FROM penky_lobbies WHERE owner_session_id=$1', [
+          session!.sessionId,
+        ]);
+        assert.equal(rows.rowCount, 0);
+      } finally {
+        await pool.query(`DROP TRIGGER ${fn} ON penky_lobby_creation_requests`);
+        await pool.query(`DROP FUNCTION ${fn}()`);
+      }
+      const retried = await access.createLobbyFromIntent(grant.token, requestId, 2000);
+      assert.equal(retried.position, 0);
+      assert.equal(
+        (await access.membership(grant.token, retried.lobbyId, 2000)).seatId,
+        retried.seatId,
+      );
+      assert.deepEqual(await access.createLobbyFromIntent(grant.token, requestId, 2000), retried);
+      await assert.rejects(
+        access.createLobbyFromIntent(grant.token, requestId, 2000 + GUEST_TTL_MS),
+        { message: 'authentication-required' },
+      );
+    },
+  );
+
+  await t.test(
     'credentials persist only hashes and slide expiry without shortening on out-of-order requests',
     async () => {
       const grant = await access.issue(1000);

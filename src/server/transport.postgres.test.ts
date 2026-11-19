@@ -256,6 +256,344 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
     };
   }
 
+  await t.test(
+    'HTTP lobby creation retries and joins return only committed own-seat identity',
+    async (t) => {
+      const context = await fixture(t, 2, 60000, undefined, false);
+      const cookie = `${GUEST_COOKIE_NAME}=${context.grants[0]!.token}`;
+      const body = JSON.stringify({ requestId: randomUUID() });
+      const headers = { 'Content-Type': 'application/json' };
+      const replies = await Promise.all(
+        Array.from({ length: 3 }, () =>
+          http(context.base, '/api/lobbies', 'POST', cookie, origin, body, headers),
+        ),
+      );
+      for (const reply of replies) {
+        assert.equal(reply.status, 200);
+        assert.match(reply.cookie!, /Secure; HttpOnly; SameSite=Lax/);
+        assert.equal(reply.body, replies[0]!.body);
+      }
+      const created = JSON.parse(replies[0]!.body);
+      assert.deepEqual(Object.keys(created).sort(), ['isOwner', 'lobbyId', 'position', 'seatId']);
+      assert.equal(created.position, 0);
+      assert.equal(created.isOwner, true);
+      assert.notEqual(created.lobbyId, context.members[0]!.lobbyId);
+      const guestCookie = `${GUEST_COOKIE_NAME}=${context.grants[1]!.token}`;
+      const join = () =>
+        http(
+          context.base,
+          '/api/lobbies/join',
+          'POST',
+          guestCookie,
+          origin,
+          JSON.stringify({ lobbyId: created.lobbyId }),
+          headers,
+        );
+      const joined = await join();
+      assert.equal(joined.status, 200);
+      assert.equal((await join()).body, joined.body);
+      const member = JSON.parse(joined.body);
+      assert.deepEqual(Object.keys(member).sort(), ['isOwner', 'lobbyId', 'position', 'seatId']);
+      assert.equal(member.isOwner, false);
+      assert.equal(member.position, 1);
+      assert.notEqual(member.seatId, created.seatId);
+      const socket = await context.connect(1);
+      const unavailable = await message(socket, resync(created.lobbyId));
+      assert.equal(unavailable.type, 'error');
+      // Explicit resync establishes attachment; HTTP admission never creates a match.
+      assert.equal(
+        (await context.access.membership(context.grants[1]!.token, created.lobbyId, context.now()))
+          .currentGameId,
+        null,
+      );
+    },
+  );
+
+  await t.test(
+    'lobby HTTP rejects identity injection, invalid JSON and unbounded bodies with fixed errors',
+    async (t) => {
+      const context = await fixture(t, 2, 60000, undefined, false);
+      const cookie = `${GUEST_COOKIE_NAME}=${context.grants[0]!.token}`;
+      const headers = { 'Content-Type': 'application/json' };
+      const cases = [
+        ['{}', headers],
+        ['[]', headers],
+        ['not-json', headers],
+        [JSON.stringify({ requestId: 'x', ownerId: context.members[0]!.seatId }), headers],
+        [JSON.stringify({ requestId: 'x'.repeat(129) }), headers],
+        [JSON.stringify({ requestId: '\ud800' }), headers],
+        [JSON.stringify({ requestId: 'x' }), { 'Content-Type': 'text/plain' }],
+        [' '.repeat(2049), headers],
+      ] as const;
+      for (const [body, extra] of cases) {
+        const reply = await http(context.base, '/api/lobbies', 'POST', cookie, origin, body, extra);
+        assert.equal(reply.status, 400);
+        assert.equal(reply.body, '');
+        assert.equal(reply.cookie, undefined);
+      }
+      for (const [source, expected] of [
+        [null, 403],
+        ['https://evil.example', 403],
+      ] as const) {
+        assert.equal(
+          (
+            await http(
+              context.base,
+              '/api/lobbies',
+              'POST',
+              cookie,
+              source,
+              '{"requestId":"x"}',
+              headers,
+            )
+          ).status,
+          expected,
+        );
+      }
+      assert.equal((await http(context.base, '/api/lobbies', 'GET', cookie)).status, 405);
+      assert.equal((await http(context.base, '/api/lobbies/join', 'DELETE', cookie)).status, 405);
+      const missing = await http(
+        context.base,
+        '/api/lobbies',
+        'POST',
+        undefined,
+        origin,
+        '{"requestId":"x"}',
+        headers,
+      );
+      assert.equal(missing.status, 401);
+      assert.equal(missing.body, '');
+    },
+  );
+
+  await t.test(
+    'lobby HTTP retry authorization observes revocation and expiry without reclaiming seats',
+    async (t) => {
+      const context = await fixture(t, 2, 60000, undefined, false);
+      const headers = { 'Content-Type': 'application/json' };
+      const cookie = `${GUEST_COOKIE_NAME}=${context.grants[0]!.token}`;
+      const body = JSON.stringify({ requestId: randomUUID() });
+      const first = await http(context.base, '/api/lobbies', 'POST', cookie, origin, body, headers);
+      assert.equal(first.status, 200);
+      await context.access.revoke(context.grants[0]!.token, context.now());
+      const revoked = await http(
+        context.base,
+        '/api/lobbies',
+        'POST',
+        cookie,
+        origin,
+        body,
+        headers,
+      );
+      assert.equal(revoked.status, 401);
+      assert.equal(revoked.cookie, undefined);
+      assert.equal(revoked.body, '');
+      const outsider = `${GUEST_COOKIE_NAME}=${context.grants[1]!.token}`;
+      const joined = await http(
+        context.base,
+        '/api/lobbies/join',
+        'POST',
+        outsider,
+        origin,
+        JSON.stringify({ lobbyId: JSON.parse(first.body).lobbyId }),
+        headers,
+      );
+      assert.equal(joined.status, 200);
+      assert.equal(JSON.parse(joined.body).position, 1);
+      assert.equal(JSON.parse(joined.body).isOwner, false);
+      context.setNow(context.now() + GUEST_TTL_MS);
+      const expired = await http(
+        context.base,
+        '/api/lobbies/join',
+        'POST',
+        outsider,
+        origin,
+        JSON.stringify({ lobbyId: JSON.parse(first.body).lobbyId }),
+        headers,
+      );
+      assert.equal(expired.status, 401);
+      assert.equal(expired.cookie, undefined);
+    },
+  );
+
+  for (const count of [2, 4, 8]) {
+    await t.test(
+      `HTTP joins serialize ${count} seats and preserve running-match admission`,
+      async (t) => {
+        const context = await fixture(t, count, 60000);
+        const headers = { 'Content-Type': 'application/json' };
+        const join = (token: string) =>
+          http(
+            context.base,
+            '/api/lobbies/join',
+            'POST',
+            `${GUEST_COOKIE_NAME}=${token}`,
+            origin,
+            JSON.stringify({ lobbyId: context.members[0]!.lobbyId }),
+            headers,
+          );
+        const existing = await Promise.all(context.grants.map((grant) => join(grant.token)));
+        for (let index = 0; index < count; index++) {
+          assert.equal(existing[index]!.status, 200);
+          assert.equal(JSON.parse(existing[index]!.body).seatId, context.members[index]!.seatId);
+          assert.equal(JSON.parse(existing[index]!.body).position, index);
+        }
+        const fresh = await context.access.issue(context.now());
+        const denied = await join(fresh.token);
+        assert.equal(denied.status, 409);
+        assert.equal(denied.body, '');
+        assert.equal(denied.cookie, undefined);
+        const owner = await http(
+          context.base,
+          '/api/lobbies',
+          'POST',
+          `${GUEST_COOKIE_NAME}=${context.grants[0]!.token}`,
+          origin,
+          JSON.stringify({ requestId: randomUUID() }),
+          headers,
+        );
+        assert.equal(owner.status, 200);
+        const lobbyId = JSON.parse(owner.body).lobbyId;
+        const extras = await Promise.all(
+          Array.from({ length: 9 }, () => context.access.issue(context.now())),
+        );
+        const attempts = await Promise.all(
+          extras.map((grant) =>
+            http(
+              context.base,
+              '/api/lobbies/join',
+              'POST',
+              `${GUEST_COOKIE_NAME}=${grant.token}`,
+              origin,
+              JSON.stringify({ lobbyId }),
+              headers,
+            ),
+          ),
+        );
+        const admitted = attempts
+          .filter((reply) => reply.status === 200)
+          .map((reply) => JSON.parse(reply.body));
+        assert.equal(admitted.length, 7);
+        assert.deepEqual(admitted.map((reply) => reply.position).sort(), [1, 2, 3, 4, 5, 6, 7]);
+        assert.equal(new Set(admitted.map((reply) => reply.seatId)).size, 7);
+        assert.equal(attempts.filter((reply) => reply.status === 409).length, 2);
+      },
+    );
+  }
+
+  await t.test('lobby HTTP creation is credential rate bounded, including retries', async (t) => {
+    const context = await fixture(t, 2, 60000, undefined, false);
+    const cookie = `${GUEST_COOKIE_NAME}=${context.grants[0]!.token}`;
+    const headers = { 'Content-Type': 'application/json' };
+    const body = JSON.stringify({ requestId: randomUUID() });
+    for (let index = 0; index < 12; index++)
+      assert.equal(
+        (await http(context.base, '/api/lobbies', 'POST', cookie, origin, body, headers)).status,
+        200,
+      );
+    const limited = await http(context.base, '/api/lobbies', 'POST', cookie, origin, body, headers);
+    assert.equal(limited.status, 429);
+    assert.equal(limited.body, '');
+    assert.equal(limited.cookie, undefined);
+  });
+
+  await t.test(
+    'failed HTTP creation emits no identity; original retry survives transport restart',
+    async (t) => {
+      const context = await fixture(t, 2, 60000, undefined, false);
+      const requestId = randomUUID();
+      const body = JSON.stringify({ requestId });
+      const cookie = `${GUEST_COOKIE_NAME}=${context.grants[0]!.token}`;
+      const headers = { 'Content-Type': 'application/json' };
+      const fn = `http_creation_failure_${randomUUID().replaceAll('-', '')}`;
+      await pool.query(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.request_id = '${requestId}' THEN RAISE EXCEPTION 'PRIVATE creation failure'; END IF;
+      RETURN NEW; END $$`);
+      await pool.query(
+        `CREATE TRIGGER ${fn} BEFORE INSERT ON penky_lobby_creation_requests FOR EACH ROW EXECUTE FUNCTION ${fn}()`,
+      );
+      try {
+        const failed = await http(
+          context.base,
+          '/api/lobbies',
+          'POST',
+          cookie,
+          origin,
+          body,
+          headers,
+        );
+        assert.equal(failed.status, 503);
+        assert.equal(failed.body, '');
+        assert.equal(failed.cookie, undefined);
+      } finally {
+        await pool.query(`DROP TRIGGER ${fn} ON penky_lobby_creation_requests`);
+        await pool.query(`DROP FUNCTION ${fn}()`);
+      }
+      const accepted = await http(
+        context.base,
+        '/api/lobbies',
+        'POST',
+        cookie,
+        origin,
+        body,
+        headers,
+      );
+      assert.equal(accepted.status, 200);
+      await context.transport.close();
+      const replacement = new PenkyTransport({
+        access: new PostgresGuestAccess(pool),
+        host: context.host,
+        tls: { key, cert },
+        origins: [origin],
+        now: context.now,
+      });
+      t.after(() => replacement.close());
+      const base = await replacement.listen(0, '127.0.0.1');
+      const recovered = await http(base, '/api/lobbies', 'POST', cookie, origin, body, headers);
+      assert.equal(recovered.status, 200);
+      assert.equal(recovered.body, accepted.body);
+    },
+  );
+
+  await t.test(
+    'chunked lobby bodies and invalid UTF-8 cannot bypass the raw byte boundary',
+    async (t) => {
+      const context = await fixture(t, 2, 60000, undefined, false);
+      const cookie = `${GUEST_COOKIE_NAME}=${context.grants[0]!.token}`;
+      for (const chunks of [
+        [Buffer.from('{"requestId":"'), Buffer.from([0xc0, 0xaf]), Buffer.from('"}')],
+        [Buffer.from(' '.repeat(1024)), Buffer.from(' '.repeat(1025))],
+      ]) {
+        const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+          const req = request(
+            new URL('/api/lobbies', context.base),
+            {
+              method: 'POST',
+              ca: cert,
+              headers: {
+                Origin: origin,
+                Cookie: cookie,
+                'Content-Type': 'application/json',
+                'Transfer-Encoding': 'chunked',
+              },
+            },
+            (res) => {
+              let body = '';
+              res.on('data', (chunk) => {
+                body += String(chunk);
+              });
+              res.on('end', () => resolve({ status: res.statusCode!, body }));
+            },
+          );
+          req.on('error', reject);
+          for (const chunk of chunks) req.write(chunk);
+          req.end();
+        });
+        assert.deepEqual(result, { status: 400, body: '' });
+      }
+    },
+  );
+
   type Context = Awaited<ReturnType<typeof fixture>>;
   async function finishHosted(context: Context) {
     let snapshot = (await context.host.read(context.members[0]!.lobbyId))!.snapshot;

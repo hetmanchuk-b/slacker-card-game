@@ -107,6 +107,50 @@ export class PostgresGuestAccess {
     }
   }
 
+  /** Fresh, non-refreshing seat authorization for server-initiated publication.
+   * Automatic updates must not extend an otherwise idle credential's lifetime.
+   */
+  async inspectSeat(
+    token: unknown,
+    lobbyId: LobbyId,
+    nowMs: number,
+  ): Promise<Readonly<{
+    sessionId: SessionId;
+    seatId: SeatId;
+    currentGameId: GameId | null;
+    expiresAtMs: number;
+  }> | null> {
+    time(nowMs);
+    const hash = guestTokenHash(token);
+    if (hash === null) return null;
+    try {
+      const result = await this.#pool.query<{
+        session_id: SessionId;
+        seat_id: SeatId;
+        current_game_id: GameId | null;
+        expires_at_ms: string;
+      }>(
+        `SELECT s.session_id,m.seat_id,l.current_game_id,s.expires_at_ms::text
+         FROM penky_guest_sessions s JOIN penky_lobby_members m USING(session_id)
+         JOIN penky_lobbies l USING(lobby_id)
+         WHERE s.token_hash=$1 AND m.lobby_id=$3 AND s.revoked_at_ms IS NULL
+         AND s.created_at_ms <= $2 AND s.expires_at_ms > $2`,
+        [hash, nowMs, lobbyId],
+      );
+      const row = result.rows[0];
+      return row
+        ? {
+            sessionId: row.session_id,
+            seatId: row.seat_id,
+            currentGameId: row.current_game_id,
+            expiresAtMs: Number(row.expires_at_ms),
+          }
+        : null;
+    } catch {
+      throw new GuestAccessError('storage-unavailable');
+    }
+  }
+
   async revoke(token: unknown, nowMs: number): Promise<boolean> {
     time(nowMs);
     const hash = guestTokenHash(token);

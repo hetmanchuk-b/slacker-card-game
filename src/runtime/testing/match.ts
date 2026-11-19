@@ -5,7 +5,7 @@ import type { CardId } from '../../game/ids.ts';
 import type { GameRuntime } from '../runtime.ts';
 
 /** Full-information legal test driver, never a production bot observation interface. */
-export async function finishMatch(runtime: GameRuntime): Promise<void> {
+export async function finishMatch(runtime: Pick<GameRuntime, 'read' | 'dispatch'>): Promise<void> {
   for (let sequence = 0; sequence < 1000; sequence++) {
     const state = runtime.read().state!;
     const phase = state.phase;

@@ -15,6 +15,7 @@ import { FakeClock } from '../runtime/testing/fake-clock.ts';
 import { finishMatch } from '../runtime/testing/match.ts';
 import { GUEST_COOKIE_NAME, GUEST_TTL_MS, guestTokenHash } from './guest-session.ts';
 import { PenkyTransport } from './transport.ts';
+import type { TransportOptions } from './transport.ts';
 import type { ServerMessage } from '../protocol/contracts.ts';
 
 const cert = readFileSync(new URL('./testing/localhost-cert.pem', import.meta.url));
@@ -86,10 +87,46 @@ function once(socket: Socket, event: string): Promise<unknown[]> {
   });
 }
 
+const receiptEnabled = new WeakMap<Socket, boolean>();
+const latestEpoch = new WeakMap<Socket, string>();
+const latestState = new WeakMap<Socket, Extract<ServerMessage, { type: 'state' }>>();
+function acknowledge(socket: Socket) {
+  socket.on(
+    'server-message',
+    (value: ServerMessage, receipt: string, ack?: (receipt: string) => void) => {
+      if (value.type === 'state') {
+        latestEpoch.set(socket, value.delivery.epoch);
+        latestState.set(socket, value);
+      }
+      if (receiptEnabled.get(socket) !== false) ack?.(receipt);
+    },
+  );
+}
 async function message(socket: Socket, payload: unknown): Promise<ServerMessage> {
-  const result = once(socket, 'server-message');
+  const input = payload as { requestId?: string; intent?: { type?: string } };
+  const resyncing = input?.intent?.type === 'resync';
+  const oldEpoch = latestEpoch.get(socket);
+  const result = new Promise<ServerMessage>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      socket.off('server-message', receive);
+      reject(new Error('Missing correlated response'));
+    }, 10000);
+    function receive(value: ServerMessage) {
+      if (
+        value.type !== 'error' &&
+        !(resyncing
+          ? value.type === 'state' && value.delivery.epoch !== oldEpoch
+          : value.type === 'command-ack' && value.requestId === input?.requestId)
+      )
+        return;
+      clearTimeout(timer);
+      socket.off('server-message', receive);
+      resolve(value);
+    }
+    socket.on('server-message', receive);
+  });
   socket.emit('client-message', payload);
-  return (await result)[0] as ServerMessage;
+  return result;
 }
 
 async function until(check: () => Promise<boolean>) {
@@ -101,7 +138,7 @@ async function until(check: () => Promise<boolean>) {
   assert.fail('Timed out waiting for observable transport state');
 }
 
-test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 }, async (t) => {
+test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }, async (t) => {
   assert.ok(new URL(url!).pathname.endsWith('_test'));
   const pool = new Pool({
     connectionString: url,
@@ -113,7 +150,12 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
   t.after(() => pool.end());
   await migrate(pool);
 
-  async function fixture(t: TestContext, count = 2, authPollMs = 25) {
+  async function fixture(
+    t: TestContext,
+    count = 2,
+    authPollMs = 25,
+    delivery?: TransportOptions['delivery'],
+  ) {
     let now = Date.now();
     const access = new PostgresGuestAccess(pool);
     const clock = new FakeClock(now);
@@ -131,6 +173,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
       origins: [origin],
       now: () => now,
       authPollMs,
+      ...(delivery ? { delivery } : {}),
     });
     const base = await transport.listen(0, '127.0.0.1');
     t.after(async () => {
@@ -154,6 +197,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
       cardIds: Array.from({ length: 36 }, () => id('card', randomUUID())),
     };
     assert.equal((await host.startMatch(owner.lobbyId, start)).type, 'started');
+    const clients: Socket[] = [];
     function client(
       token: string | null,
       options: { source?: string | null; auth?: object; polling?: boolean } = {},
@@ -169,6 +213,8 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
         },
         auth: options.auth ?? {},
       });
+      clients.push(socket);
+      acknowledge(socket);
       t.after(() => {
         socket.disconnect();
       });
@@ -190,6 +236,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
       start,
       client,
       connect,
+      clients,
       setNow: (value: number) => {
         now = value;
       },
@@ -198,6 +245,34 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
   }
 
   type Context = Awaited<ReturnType<typeof fixture>>;
+  async function finishHosted(context: Context) {
+    let snapshot = (await context.host.read(context.members[0]!.lobbyId))!.snapshot;
+    await finishMatch({
+      read: () => snapshot,
+      dispatch: async (command, options) => {
+        const result = await context.host.withCurrent(
+          context.members[0]!.lobbyId,
+          context.start.gameId,
+          async (runtime) => {
+            const result = await runtime.dispatch(command, options);
+            snapshot = runtime.read();
+            return result;
+          },
+        );
+        // Trusted fixtures yield between atomic jobs; do not turn an entire
+        // generated match into one host callback that starves all live readers.
+        await until(async () =>
+          context.clients
+            .filter((socket) => socket.connected)
+            .every(
+              (socket) =>
+                (latestState.get(socket)?.view.head.version ?? -1) >= snapshot.head.version,
+            ),
+        );
+        return result;
+      },
+    });
+  }
   async function play(
     context: Context,
     socket: Socket,
@@ -221,6 +296,544 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
     assert.deepEqual(Object.keys(reply.result.head).sort(), ['branchId', 'gameId', 'version']);
     return { ...reply, result: reply.result };
   }
+
+  async function ready(context: Context) {
+    for (let draw = 0; draw < 36; draw++)
+      await context.host.withCurrent(
+        context.members[0]!.lobbyId,
+        context.start.gameId,
+        async (runtime) => {
+          const phase = runtime.read().state!.phase;
+          if (phase.type !== 'dealing') assert.fail();
+          await runtime.dispatch({
+            type: 'draw-card',
+            id: id('command', randomUUID()),
+            actorId: phase.nextSeatId,
+          });
+        },
+      );
+    await context.clock.advanceBy(10000);
+    const head = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.head;
+    await until(async () =>
+      context.clients
+        .filter((socket) => socket.connected)
+        .every((socket) => (latestState.get(socket)?.view.head.version ?? -1) >= head.version),
+    );
+  }
+
+  await t.test(
+    'one committed job emits its exact adjacent action pairs before final state without refreshing idle credentials',
+    async (t) => {
+      const context = await fixture(t, 2, 60000);
+      const socket = await context.connect();
+      await message(socket, resync(context.members[0]!.lobbyId));
+      await context.host.withCurrent(context.members[0]!.lobbyId, context.start.gameId, (runtime) =>
+        runtime.dispatch({
+          type: 'rollback',
+          id: id('command', randomUUID()),
+          actorId: context.members[0]!.seatId,
+          expected: runtime.read().head,
+          beforeCommandId: context.start.id,
+          knowledgeWarningAcknowledged: true,
+        }),
+      );
+      await until(async () => latestState.get(socket)?.view.state === null);
+      const before = (await context.access.inspect(context.grants[0]!.token, context.now()))!
+        .expiresAtMs;
+      context.setNow(context.now() + 5000);
+      const messages: ServerMessage[] = [];
+      socket.on('server-message', (message: ServerMessage) => messages.push(message));
+      await context.host.withCurrent(
+        context.members[0]!.lobbyId,
+        context.start.gameId,
+        async (runtime) => {
+          const result = await runtime.dispatch(
+            {
+              type: 'start-game',
+              id: id('command', randomUUID()),
+              gameId: context.start.gameId,
+              ownerId: context.members[0]!.seatId,
+              seatIds: context.members[0]!.seatIds,
+              cardIds: Array.from({ length: 36 }, () => id('card', randomUUID())),
+            },
+            { branchId: runtime.read().head.branchId },
+          );
+          assert.equal(result.type, 'accepted');
+        },
+      );
+      await until(async () =>
+        messages.some((message) => message.type === 'state' && message.view.state !== null),
+      );
+      const stream = messages.filter(
+        (message) => message.type === 'state' || message.type === 'action',
+      );
+      assert.deepEqual(
+        stream.map((message) => message.type),
+        ['action', 'action', 'state'],
+      );
+      assert.deepEqual(
+        stream.map((message) => message.view.head.version),
+        [1, 2, 2],
+      );
+      assert.equal(
+        (await context.access.inspect(context.grants[0]!.token, context.now()))!.expiresAtMs,
+        before,
+      );
+    },
+  );
+
+  await t.test(
+    'a later same-branch claim hides a reveal in an older state waiting on delivery authorization',
+    async (t) => {
+      const context = await fixture(t, 2, 60000);
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
+      for (let draw = 0; draw < 35; draw++)
+        await context.host.withCurrent(
+          context.members[0]!.lobbyId,
+          context.start.gameId,
+          async (runtime) => {
+            const phase = runtime.read().state!.phase;
+            if (phase.type !== 'dealing') assert.fail();
+            await runtime.dispatch({
+              type: 'draw-card',
+              id: id('command', randomUUID()),
+              actorId: phase.nextSeatId,
+            });
+          },
+        );
+      const head = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.head;
+      await until(
+        async () => (latestState.get(sockets[0]!)?.view.head.version ?? -1) >= head.version,
+      );
+      const received: ServerMessage[] = [];
+      sockets[0]!.on('server-message', (message: ServerMessage) => received.push(message));
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const waiting = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const query = pool.query;
+      let delayed = false;
+      const mock = t.mock.method(pool, 'query', async function (this: Pool, ...args: unknown[]) {
+        if (
+          !delayed &&
+          typeof args[0] === 'string' &&
+          args[0].includes('SELECT s.session_id,m.seat_id') &&
+          Array.isArray(args[1]) &&
+          args[1][0] === guestTokenHash(context.grants[0]!.token)
+        ) {
+          delayed = true;
+          entered();
+          await gate;
+        }
+        return Reflect.apply(query, this, args);
+      });
+      try {
+        await context.host.withCurrent(
+          context.members[0]!.lobbyId,
+          context.start.gameId,
+          async (runtime) => {
+            const phase = runtime.read().state!.phase;
+            if (phase.type !== 'dealing') assert.fail();
+            await runtime.dispatch({
+              type: 'draw-card',
+              id: id('command', randomUUID()),
+              actorId: phase.nextSeatId,
+            });
+          },
+        );
+        await waiting;
+        await context.host.withCurrent(
+          context.members[0]!.lobbyId,
+          context.start.gameId,
+          async (runtime) => {
+            const result = await runtime.dispatch({
+              type: 'submit-claim',
+              id: id('command', randomUUID()),
+              actorId: context.members[0]!.seatId,
+              accusedId: context.members[1]!.seatId,
+              reason: 'Trusted reveal pause fixture',
+              incident: { type: 'spoken', key: 'pause-reveal' },
+              scope: 'dealing',
+              scopeNumber: 0,
+            });
+            assert.equal(result.type, 'accepted');
+          },
+        );
+      } finally {
+        release();
+      }
+      await until(async () => latestState.get(sockets[0]!)?.view.procedure?.type === 'claim-vote');
+      mock.mock.restore();
+      const states = received.filter((message) => message.type === 'state');
+      assert.ok(states.length >= 2);
+      assert.ok(states.every((message) => message.view.transient.reveal === null));
+    },
+  );
+
+  await t.test(
+    'fresh peeks and completed transfers remain seat-private; resync and writer recovery do not replay them',
+    async (t) => {
+      const context = await fixture(t, 4);
+      const sockets = await Promise.all(
+        context.grants.map((_grant, index) => context.connect(index)),
+      );
+      for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
+      await ready(context);
+      const received = sockets.map(() => [] as ServerMessage[]);
+      sockets.forEach((socket, index) =>
+        socket.on('server-message', (value: ServerMessage) => received[index]!.push(value)),
+      );
+      const state = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!;
+      const peekId = randomUUID();
+      accepted(
+        await play(
+          context,
+          sockets[0]!,
+          { type: 'open-stump', cardId: state.players[0]!.stumps[0]! },
+          peekId,
+        ),
+        'violation',
+      );
+      await until(async () =>
+        received.every((messages) =>
+          messages.some(
+            (message) => message.type === 'action' && message.view.commandId === peekId,
+          ),
+        ),
+      );
+      for (const [index, messages] of received.entries()) {
+        const action = messages.find(
+          (message) => message.type === 'action' && message.view.commandId === peekId,
+        )!;
+        if (action.type !== 'action') assert.fail();
+        assert.equal(
+          action.view.observations.filter((observation) => observation.type === 'stump-peeked')
+            .length,
+          index === 0 ? 1 : 0,
+        );
+      }
+      const penalty = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!
+        .procedure;
+      if (penalty?.type !== 'penalty') assert.fail();
+      const selected = state.players[1]!.hand[0]!;
+      for (const seat of penalty.eligibleSeatIds) {
+        const index = context.members.findIndex((member) => member.seatId === seat);
+        accepted(
+          await play(context, sockets[index]!, {
+            type: 'penalty-response',
+            procedureId: penalty.timer.id,
+            cardId: index === 1 ? selected : null,
+          }),
+        );
+      }
+      await until(async () =>
+        received.every((messages) =>
+          messages.some((message) => message.type === 'state' && message.view.procedure === null),
+        ),
+      );
+      for (const [index, messages] of received.entries()) {
+        const transfers = messages.flatMap((message) =>
+          message.type === 'action'
+            ? message.view.observations.filter(
+                (observation) => observation.type === 'penalty-transfer',
+              )
+            : [],
+        );
+        assert.equal(transfers.length, index <= 1 ? 1 : 0);
+      }
+      accepted(
+        await play(
+          context,
+          sockets[0]!,
+          { type: 'open-stump', cardId: state.players[0]!.stumps[0]! },
+          peekId,
+        ),
+        'violation',
+      );
+      await message(sockets[0]!, resync(context.members[0]!.lobbyId));
+      const oldEpoch = latestEpoch.get(sockets[0]!);
+      const count = received[0]!.filter((message) => message.type === 'action').length;
+      await context.host.recover(context.members[0]!.lobbyId);
+      await until(async () => latestEpoch.get(sockets[0]!) !== oldEpoch);
+      assert.equal(received[0]!.filter((message) => message.type === 'action').length, count);
+      assert.equal(
+        received[0]!.filter(
+          (message) => message.type === 'action' && message.view.commandId === peekId,
+        ).length,
+        1,
+      );
+    },
+  );
+
+  await t.test(
+    'rollback and explicit resync invalidate private observations still awaiting delivery authorization',
+    async (t) => {
+      const context = await fixture(t, 2, 60000);
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
+      await ready(context);
+      const received: ServerMessage[] = [];
+      sockets[0]!.on('server-message', (message: ServerMessage) => received.push(message));
+      let branchId = context.start.branchId;
+      for (const mode of ['rollback', 'resync'] as const) {
+        const query = pool.query;
+        let release!: () => void;
+        let entered!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const waiting = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        let delayed = false;
+        const mock = t.mock.method(pool, 'query', async function (this: Pool, ...args: unknown[]) {
+          if (
+            !delayed &&
+            typeof args[0] === 'string' &&
+            args[0].includes('SELECT s.session_id,m.seat_id') &&
+            Array.isArray(args[1]) &&
+            args[1][0] === guestTokenHash(context.grants[0]!.token)
+          ) {
+            delayed = true;
+            entered();
+            await gate;
+          }
+          return Reflect.apply(query, this, args);
+        });
+        const state = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!;
+        const peekId = randomUUID();
+        sockets[0]!.emit('client-message', {
+          protocolVersion: 1,
+          requestId: peekId,
+          intent: {
+            type: 'open-stump',
+            gameId: context.start.gameId,
+            branchId,
+            cardId: state.players[0]!.stumps[0]!,
+          },
+        });
+        await waiting;
+        let baseline: Promise<ServerMessage> | null = null;
+        try {
+          if (mode === 'rollback') {
+            await context.host.withCurrent(
+              context.members[0]!.lobbyId,
+              context.start.gameId,
+              (runtime) =>
+                runtime.dispatch({
+                  type: 'rollback',
+                  id: id('command', randomUUID()),
+                  actorId: context.members[0]!.seatId,
+                  expected: runtime.read().head,
+                  beforeCommandId: id('command', peekId),
+                  knowledgeWarningAcknowledged: true,
+                }),
+            );
+            branchId = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.head
+              .branchId;
+          } else {
+            context.setNow(context.now() + 1001);
+            const at = context.now();
+            baseline = message(sockets[0]!, resync(context.members[0]!.lobbyId));
+            await until(
+              async () =>
+                (await context.access.inspect(context.grants[0]!.token, context.now()))!
+                  .expiresAtMs >=
+                at + GUEST_TTL_MS,
+            );
+          }
+        } finally {
+          release();
+        }
+        if (baseline) await baseline;
+        await until(async () => latestState.get(sockets[0]!)?.view.head.branchId === branchId);
+        mock.mock.restore();
+        assert.equal(
+          received.some(
+            (message) => message.type === 'action' && message.view.commandId === peekId,
+          ),
+          false,
+        );
+      }
+    },
+  );
+
+  await t.test(
+    'a non-acknowledging recipient is disconnected without blocking another socket or game deadlines',
+    async (t) => {
+      const context = await fixture(t, 2, 60000, { ackTimeoutMs: 1000 });
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
+      receiptEnabled.set(sockets[1]!, false);
+      const ended = once(sockets[1]!, 'disconnect');
+      accepted(await play(context, sockets[0]!, { type: 'draw-card' }), 'violation');
+      await context.host.withCurrent(
+        context.members[0]!.lobbyId,
+        context.start.gameId,
+        async (runtime) => {
+          await runtime.dispatch({
+            type: 'submit-claim',
+            id: id('command', randomUUID()),
+            actorId: context.members[0]!.seatId,
+            accusedId: context.members[1]!.seatId,
+            reason: 'Timer fixture',
+            incident: { type: 'spoken', key: 'timer-fixture' },
+            scope: 'dealing',
+            scopeNumber: 0,
+          });
+          await context.clock.advanceBy(10000);
+          assert.equal(runtime.read().state!.claims[0]!.resolution, 'tied');
+        },
+      );
+      await ended;
+      assert.equal(sockets[0]!.connected, true);
+      const returned = await context.connect(1);
+      const baseline = await message(returned, resync(context.members[0]!.lobbyId));
+      if (baseline.type !== 'state') assert.fail();
+      assert.equal(baseline.delivery.sequence, 1);
+    },
+  );
+
+  await t.test(
+    'forged transport receipts disconnect only their sender and never credit additional buffered frames',
+    async (t) => {
+      const context = await fixture(t);
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
+      receiptEnabled.set(sockets[1]!, false);
+      sockets[1]!.on(
+        'server-message',
+        (_message: ServerMessage, _receipt: string, ack: (value: string) => void) =>
+          ack('guessed-receipt'),
+      );
+      const ended = once(sockets[1]!, 'disconnect');
+      accepted(await play(context, sockets[0]!, { type: 'draw-card' }), 'violation');
+      await ended;
+      assert.equal(sockets[0]!.connected, true);
+      assert.equal(
+        (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!.deck.length,
+        36,
+      );
+    },
+  );
+
+  await t.test(
+    'bounded private capture overflow drops one slow reader without blocking a fast reader',
+    async (t) => {
+      const context = await fixture(t, 2, 60000, { jobs: 2 });
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
+      const query = pool.query;
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const waiting = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let delayed = false;
+      const mock = t.mock.method(pool, 'query', async function (this: Pool, ...args: unknown[]) {
+        if (
+          !delayed &&
+          typeof args[0] === 'string' &&
+          args[0].includes('SELECT s.session_id,m.seat_id') &&
+          Array.isArray(args[1]) &&
+          args[1][0] === guestTokenHash(context.grants[1]!.token)
+        ) {
+          delayed = true;
+          entered();
+          await gate;
+        }
+        return Reflect.apply(query, this, args);
+      });
+      const ended = once(sockets[1]!, 'disconnect');
+      try {
+        for (let count = 0; count < 3; count++) {
+          accepted(await play(context, sockets[0]!, { type: 'draw-card' }), 'violation');
+          if (count === 0) await waiting;
+          const head = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.head;
+          await until(
+            async () => (latestState.get(sockets[0]!)?.view.head.version ?? -1) >= head.version,
+          );
+        }
+        await ended;
+        assert.equal(sockets[0]!.connected, true);
+      } finally {
+        release();
+        mock.mock.restore();
+      }
+    },
+  );
+
+  for (const count of [2, 4, 8])
+    await t.test(
+      `${count} sockets receive ordered private committed actions followed by state, without retry replay`,
+      async (t) => {
+        const context = await fixture(t, count);
+        const sockets = await Promise.all(
+          context.grants.map((_grant, index) => context.connect(index)),
+        );
+        for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
+        // Closed-stump draws never disclose a face, even to their owner. Move
+        // through both stump passes before testing a seat-private hand draw.
+        for (let draw = 0; draw < count * 2; draw++) {
+          const state = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!;
+          if (state.phase.type !== 'dealing') assert.fail();
+          const actor = context.members.findIndex(
+            (member) => state.phase.type === 'dealing' && member.seatId === state.phase.nextSeatId,
+          );
+          accepted(await play(context, sockets[actor]!, { type: 'draw-card' }));
+        }
+        for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
+        const seen = sockets.map(() => [] as ServerMessage[]);
+        sockets.forEach((socket, index) =>
+          socket.on('server-message', (value: ServerMessage) => seen[index]!.push(value)),
+        );
+        const snapshot = (await context.host.read(context.members[0]!.lobbyId))!.snapshot;
+        if (snapshot.state!.phase.type !== 'dealing') assert.fail();
+        const actor = context.members.findIndex(
+          (seat) =>
+            snapshot.state!.phase.type === 'dealing' &&
+            seat.seatId === snapshot.state!.phase.nextSeatId,
+        );
+        const requestId = randomUUID();
+        accepted(await play(context, sockets[actor]!, { type: 'draw-card' }, requestId));
+        await until(async () =>
+          seen.every((messages) => messages.some((value) => value.type === 'action')),
+        );
+        await until(async () =>
+          seen.every((messages) => messages.some((value) => value.type === 'state')),
+        );
+        for (const [index, messages] of seen.entries()) {
+          const stream = messages.filter(
+            (value) => value.type === 'action' || value.type === 'state',
+          );
+          assert.deepEqual(
+            stream.map((value) => value.type),
+            ['action', 'state'],
+          );
+          const action = stream[0]!;
+          if (action.type !== 'action') assert.fail();
+          assert.equal(action.view.commandId, requestId);
+          const draw = action.view.observations.find(
+            (observation) => observation.type === 'card-drawn',
+          );
+          if (draw?.type !== 'card-drawn') assert.fail();
+          assert.equal(draw.card !== null, index === actor);
+          assert.equal(stream[0]!.delivery.sequence + 1, stream[1]!.delivery.sequence);
+        }
+        accepted(await play(context, sockets[actor]!, { type: 'draw-card' }, requestId));
+        const baseline = await message(sockets[actor]!, resync(context.members[0]!.lobbyId));
+        assert.equal(baseline.type, 'state');
+        assert.equal(seen[actor]!.filter((value) => value.type === 'action').length, 1);
+      },
+    );
 
   for (const count of [2, 4, 8])
     await t.test(
@@ -692,12 +1305,16 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
       await message(returned, resync(context.members[0]!.lobbyId));
       const retried = accepted(await play(context, returned, { type: 'draw-card' }, requestId));
       assert.equal(retried.result.duplicate, false);
+      await until(async () =>
+        observations.some((reply) => reply.type === 'action' && reply.view.commandId === requestId),
+      );
+      const count = observations.filter((reply) => reply.type === 'action').length;
       const baseline = await message(sockets[1 - actor]!, resync(context.members[0]!.lobbyId));
       assert.equal(baseline.type, 'state');
-      assert.deepEqual(
-        observations.map((reply) => reply.type),
-        ['state'],
-        'no unsolicited action/state publication is introduced',
+      assert.equal(
+        observations.filter((reply) => reply.type === 'action').length,
+        count,
+        'resync adds no inherited action replay',
       );
     },
   );
@@ -1147,9 +1764,9 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
             });
           }
           await context.clock.advanceBy(10000);
-          await finishMatch(runtime);
         },
       );
+      await finishHosted(context);
       const lookup = context.access.membership.bind(context.access);
       let release!: () => void;
       let entered!: () => void;
@@ -1169,6 +1786,9 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
           return binding;
         },
       );
+      const successorMessages: ServerMessage[] = [];
+      sockets[1]!.on('server-message', (message: ServerMessage) => successorMessages.push(message));
+      const oldEpoch = latestEpoch.get(sockets[1]!);
       const result = message(sockets[0]!, resync(context.members[0]!.lobbyId));
       await waiting;
       const previous = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.head;
@@ -1183,6 +1803,15 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
       assert.equal(
         (await context.host.startMatch(context.members[0]!.lobbyId, next)).type,
         'started',
+      );
+      await until(async () => latestState.get(sockets[1]!)?.view.head.gameId === next.gameId);
+      assert.notEqual(latestEpoch.get(sockets[1]!), oldEpoch);
+      assert.equal(
+        successorMessages.some(
+          (message) => message.type === 'action' && message.view.head.gameId === next.gameId,
+        ),
+        false,
+        'successor installation starts with a baseline, not prepared actions',
       );
       release();
       assert.equal((await result).type, 'error');
@@ -1215,7 +1844,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
           }
         },
       );
-      const inspect = context.access.inspect.bind(context.access);
+      const inspect = context.access.inspectSeat.bind(context.access);
       let release!: () => void;
       let entered!: () => void;
       const gate = new Promise<void>((resolve) => {
@@ -1226,7 +1855,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
       });
       const mock = t.mock.method(
         context.access,
-        'inspect',
+        'inspectSeat',
         async (...args: Parameters<typeof inspect>) => {
           entered();
           await gate;
@@ -1316,6 +1945,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
       t.after(() => {
         socket.disconnect();
       });
+      acknowledge(socket);
       await once(socket, 'connect');
       const after = await message(socket, resync(context.members[0]!.lobbyId));
       if (after.type !== 'state') assert.fail();
@@ -1393,9 +2023,9 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
             });
           }
           await context.clock.advanceBy(10000);
-          await finishMatch(runtime);
         },
       );
+      await finishHosted(context);
       const newcomer = await context.access.issue(context.now());
       await context.access.joinLobby(newcomer.token, context.members[0]!.lobbyId, context.now());
       let socket = context.client(newcomer.token);
@@ -1571,6 +2201,19 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 90000 },
         (await context.host.read(context.members[0]!.lobbyId))!.snapshot.head,
         before,
       );
+    },
+  );
+
+  await t.test(
+    'resync rotates stream epochs without resetting the socket event rate budget',
+    async (t) => {
+      const context = await fixture(t, 2, 60000);
+      const socket = await context.connect();
+      const ended = once(socket, 'disconnect');
+      for (let count = 0; count < 20; count++)
+        assert.equal((await message(socket, resync(context.members[0]!.lobbyId))).type, 'state');
+      socket.emit('client-message', resync(context.members[0]!.lobbyId));
+      await ended;
     },
   );
 

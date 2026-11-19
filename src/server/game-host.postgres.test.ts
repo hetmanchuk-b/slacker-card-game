@@ -10,6 +10,7 @@ import { FakeClock } from '../runtime/testing/fake-clock.ts';
 import { finishMatch } from '../runtime/testing/match.ts';
 import { PostgresGuestAccess } from './guest-access.ts';
 import { PostgresGameHost } from './game-host.ts';
+import type { HostPublication } from './game-host.ts';
 
 const url = process.env.PENKY_TEST_DATABASE_URL;
 test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
@@ -101,6 +102,84 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
       reporters,
     };
   }
+
+  await t.test(
+    'lobby subscriptions invalidate retired writers and rebind state-only after recovery without action replay',
+    async (t) => {
+      const { host, member, request } = await setup(t);
+      const notices: HostPublication[] = [];
+      const stop = await host.subscribe(member.lobbyId, (notice) => {
+        notices.push(notice);
+      });
+      assert.equal(notices[0]!.type, 'publication');
+      const first = notices[0]!;
+      if (first.type !== 'publication') assert.fail();
+      assert.equal(first.publication.kind, 'initial');
+      assert.deepEqual(first.publication.actions, []);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        const phase = runtime.read().state!.phase;
+        if (phase.type !== 'dealing') assert.fail();
+        await runtime.dispatch({
+          type: 'draw-card',
+          id: id('command', randomUUID()),
+          actorId: phase.nextSeatId,
+        });
+      });
+      assert.equal(notices.at(-1)!.type, 'publication');
+      await host.recover(member.lobbyId);
+      const invalidated = notices.find((notice) => notice.type === 'invalidated');
+      assert.equal(invalidated?.epoch, first.epoch);
+      const baseline = notices.at(-1)!;
+      if (baseline.type !== 'publication') assert.fail();
+      assert.notEqual(baseline.epoch, first.epoch);
+      assert.equal(baseline.publication.kind, 'initial');
+      assert.deepEqual(baseline.publication.actions, []);
+      stop();
+      stop();
+      const count = notices.length;
+      await host.recover(member.lobbyId);
+      assert.equal(notices.length, count);
+    },
+  );
+
+  await t.test(
+    'host listener and reporter failures cannot block commits, recovery or other subscriptions',
+    async (t) => {
+      const { host, member, request } = await setup(t);
+      const seen: HostPublication[] = [];
+      const stopBad = await host.subscribe(
+        member.lobbyId,
+        async () => {
+          throw new Error('private listener failure');
+        },
+        () => {
+          return Promise.reject(new Error('private reporter failure'));
+        },
+      );
+      const stopGood = await host.subscribe(member.lobbyId, (notice) => {
+        seen.push(notice);
+      });
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        const phase = runtime.read().state!.phase;
+        if (phase.type !== 'dealing') assert.fail();
+        assert.equal(
+          (
+            await runtime.dispatch({
+              type: 'draw-card',
+              id: id('command', randomUUID()),
+              actorId: phase.nextSeatId,
+            })
+          ).type,
+          'accepted',
+        );
+      });
+      await host.recover(member.lobbyId);
+      assert.ok(seen.some((notice) => notice.type === 'invalidated'));
+      assert.equal(seen.at(-1)!.type, 'publication');
+      stopBad();
+      stopGood();
+    },
+  );
 
   await t.test(
     'concurrent acquisition shares a writer and epoch; competing hosts respect its lease',

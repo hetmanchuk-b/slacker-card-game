@@ -5,13 +5,20 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { TLSSocket } from 'node:tls';
 import { Server } from 'socket.io';
 import type { Socket } from 'socket.io';
-import type { LobbyId, SeatId } from '../game/ids.ts';
-import type { RuntimeCommand } from '../runtime/runtime.ts';
+import type { LobbyId, SeatId, BranchId } from '../game/ids.ts';
+import type { RuntimeCommand, RuntimePublication } from '../runtime/runtime.ts';
+import type { HostPublication } from './game-host.ts';
+import { AcknowledgedOutbound } from './outbound.ts';
 import { RuntimeAdmissionError } from '../runtime/runtime.ts';
 import { GameHostError } from './game-host.ts';
 import { decodeClientMessage } from '../protocol/decode.ts';
-import { makeCommandAck, makeStateMessage, protocolError } from '../protocol/messages.ts';
-import type { ClientMessage, TechnicalError } from '../protocol/contracts.ts';
+import {
+  makeActionMessage,
+  makeCommandAck,
+  makeStateMessage,
+  protocolError,
+} from '../protocol/messages.ts';
+import type { ClientMessage, ServerMessage, TechnicalError } from '../protocol/contracts.ts';
 import { GuestAccessError } from './guest-access.ts';
 import type { PostgresGuestAccess } from './guest-access.ts';
 import type { PostgresGameHost } from './game-host.ts';
@@ -108,6 +115,28 @@ type Peer = {
   queued: number;
   sequence: number;
   streamId: string;
+  outbound: AcknowledgedOutbound;
+  watch: number;
+  stopWatch: (() => void) | null;
+  generation: number;
+  epoch: string | null;
+  branch: BranchId | null;
+  seatId: SeatId | null;
+  publications: {
+    publication: RuntimePublication;
+    epoch: string;
+    generation: number;
+    bytes: number;
+  }[];
+  publicationBytes: number;
+  publishing: boolean;
+};
+const DELIVERY = {
+  jobs: 64,
+  captureBytes: 4194304,
+  messages: 32,
+  bytes: 262144,
+  ackTimeoutMs: 2000,
 };
 export type TransportOptions = Readonly<{
   tls: Pick<ServerOptions, 'key' | 'cert'>;
@@ -117,6 +146,8 @@ export type TransportOptions = Readonly<{
   now?: () => number;
   /** Non-refreshing durable credential check cadence, not a gameplay timer. */
   authPollMs?: number;
+  /** Trusted technical bounds, never browser configuration. */
+  delivery?: Partial<typeof DELIVERY>;
 }>;
 
 /** TLS guest lifecycle, seat-private resync and explicit guarded gameplay subset.
@@ -133,6 +164,7 @@ export class PenkyTransport {
   readonly #peers = new Set<Peer>();
   readonly #jobs = new Set<Promise<unknown>>();
   readonly #timer: ReturnType<typeof setInterval>;
+  readonly #delivery: typeof DELIVERY;
   #checking: Promise<void> | null = null;
   #closed = false;
   #closing: Promise<void> | null = null;
@@ -148,6 +180,12 @@ export class PenkyTransport {
       (options.authPollMs ?? 1000) > 60000
     )
       throw new Error('Invalid transport configuration');
+    this.#delivery = { ...DELIVERY, ...options.delivery };
+    if (
+      Object.values(this.#delivery).some((value) => !Number.isSafeInteger(value) || value < 1) ||
+      this.#delivery.ackTimeoutMs > 60000
+    )
+      throw new Error('Invalid delivery bounds');
     this.#options = { ...options, origins: [...options.origins] };
     this.#now = options.now ?? Date.now;
     this.#server = createServer(
@@ -212,7 +250,7 @@ export class PenkyTransport {
         const credential = guestTokenHash(peer.token)!;
         if (
           peer.queued >= 4 ||
-          !this.#rates.take(`socket:${peer.streamId}`, this.#now(), 20, 1000) ||
+          !this.#rates.take(`socket:${peer.socket.id}`, this.#now(), 20, 1000) ||
           !this.#rates.take(`credential:${credential}`, this.#now(), 120, 60000)
         ) {
           this.#error(peer, 'unavailable');
@@ -223,10 +261,15 @@ export class PenkyTransport {
           this.#error(peer, 'invalid-message');
           return;
         }
+        // Resync invalidates old private work at receipt, not after auth/queues.
+        const decoded = decodeClientMessage(args[0]);
+        if (decoded.type === 'decoded' && decoded.message.intent.type === 'resync')
+          this.#unwatch(peer);
+        const watch = peer.watch;
         peer.queued++;
         peer.pending = this.#track(
           peer.pending
-            .then(() => this.#message(peer, args[0]))
+            .then(() => this.#message(peer, args[0], watch))
             .finally(() => {
               peer.queued--;
             }),
@@ -420,6 +463,28 @@ export class PenkyTransport {
       queued: 0,
       sequence: 0,
       streamId: randomUUID(),
+      outbound: new AcknowledgedOutbound(
+        async (message) => {
+          // Socket.IO numeric ack IDs are predictable. Require an unpredictable
+          // per-emission receipt so speculative acks cannot fill socket buffers.
+          const receipt = randomUUID();
+          const echoed = await socket
+            .timeout(this.#delivery.ackTimeoutMs)
+            .emitWithAck('server-message', message, receipt);
+          if (echoed !== receipt) throw new Error('Invalid delivery receipt');
+        },
+        () => this.#stop(peer),
+        this.#delivery,
+      ),
+      watch: 0,
+      stopWatch: null,
+      generation: 0,
+      epoch: null,
+      branch: null,
+      seatId: null,
+      publications: [],
+      publicationBytes: 0,
+      publishing: false,
     };
     this.#peers.add(peer);
     socket.conn.once('close', () => this.#stop(peer));
@@ -441,12 +506,21 @@ export class PenkyTransport {
     return !this.#closed && !peer.closed && (!connected || peer.socket.connected);
   }
 
-  #stop(peer: Peer): void {
+  #stop(peer: Peer, finalError?: TechnicalError): void {
     if (peer.closed) return;
     peer.closed = true;
+    this.#unwatch(peer);
+    if (finalError && peer.socket.connected) {
+      void this.#track(
+        peer.outbound.finish(protocolError(finalError)).finally(() => peer.socket.disconnect(true)),
+      );
+    } else {
+      peer.outbound.close();
+      peer.socket.disconnect(true);
+    }
+    void this.#track(peer.outbound.drained());
     peer.cancellation.abort();
     this.#peers.delete(peer);
-    peer.socket.disconnect(true);
     if (peer.detach) {
       const detach = peer.detach;
       peer.detach = null;
@@ -455,7 +529,7 @@ export class PenkyTransport {
   }
 
   #error(peer: Peer, code: TechnicalError): void {
-    if (this.#live(peer)) peer.socket.emit('server-message', protocolError(code));
+    if (this.#live(peer)) peer.outbound.enqueue(protocolError(code));
   }
 
   async #gameplay(peer: Peer, message: ClientMessage): Promise<void> {
@@ -507,8 +581,7 @@ export class PenkyTransport {
           this.#stop(peer);
           return;
         }
-        if (this.#live(peer))
-          peer.socket.emit('server-message', makeCommandAck(message.requestId, result));
+        if (this.#live(peer)) peer.outbound.enqueue(makeCommandAck(message.requestId, result));
       });
     } catch (error) {
       const wrongGame = error instanceof GameHostError && error.message === 'wrong-game';
@@ -516,12 +589,178 @@ export class PenkyTransport {
         (error instanceof RuntimeAdmissionError && error.code === 'unauthorized') ||
         (error instanceof GuestAccessError &&
           ['authentication-required', 'membership-required', 'owner-only'].includes(error.code));
-      this.#error(peer, wrongGame ? 'wrong-game' : unauthorized ? 'unauthorized' : 'unavailable');
-      if (!wrongGame) this.#stop(peer);
+      if (wrongGame) this.#error(peer, 'wrong-game');
+      else this.#stop(peer, unauthorized ? 'unauthorized' : 'unavailable');
     }
   }
 
-  async #message(peer: Peer, value: unknown): Promise<void> {
+  #discardStream(peer: Peer): void {
+    peer.generation++;
+    peer.streamId = randomUUID();
+    peer.sequence = 0;
+    peer.outbound.invalidate(peer.generation);
+    for (const item of peer.publications) peer.publicationBytes -= item.bytes;
+    peer.publications = [];
+  }
+
+  #unwatch(peer: Peer): void {
+    peer.watch++;
+    peer.stopWatch?.();
+    peer.stopWatch = null;
+    this.#discardStream(peer);
+    peer.epoch = null;
+    peer.branch = null;
+  }
+
+  #publication(peer: Peer, notice: HostPublication): void {
+    if (!this.#live(peer)) return;
+    if (notice.type === 'invalidated') {
+      this.#discardStream(peer);
+      peer.epoch = null;
+      peer.branch = null;
+      // Never re-enter host synchronously/await its queue from its callback.
+      void this.#track(this.#options.host.read(peer.lobbyId!).catch(() => this.#stop(peer)));
+      return;
+    }
+    const publication = notice.publication;
+    if (publication.kind === 'handoff') {
+      this.#discardStream(peer);
+      peer.epoch = null;
+      return;
+    }
+    const branch = publication.snapshot.head.branchId;
+    if (publication.kind === 'initial' || notice.epoch !== peer.epoch || branch !== peer.branch)
+      this.#discardStream(peer);
+    peer.epoch = notice.epoch;
+    peer.branch = branch;
+    const bytes = Buffer.byteLength(JSON.stringify(publication));
+    if (
+      peer.publications.length + Number(peer.publishing) >= this.#delivery.jobs ||
+      peer.publicationBytes + bytes > this.#delivery.captureBytes
+    ) {
+      this.#stop(peer);
+      return;
+    }
+    peer.publicationBytes += bytes;
+    peer.publications.push({
+      publication,
+      epoch: notice.epoch,
+      generation: peer.generation,
+      bytes,
+    });
+    if (!peer.publishing) void this.#track(this.#publish(peer));
+  }
+
+  async #publish(peer: Peer): Promise<void> {
+    peer.publishing = true;
+    try {
+      while (this.#live(peer) && peer.publications.length) {
+        const item = peer.publications.shift()!;
+        try {
+          const actions = item.publication.kind === 'initial' ? [] : item.publication.actions;
+          for (let index = 0; index <= actions.length; index++) {
+            if (item.generation !== peer.generation || !this.#live(peer)) break;
+            await peer.outbound.prepare(
+              async (emit) => {
+                if (item.generation !== peer.generation || !this.#live(peer)) return;
+                const binding = await this.#options.access.inspectSeat(
+                  peer.token,
+                  peer.lobbyId!,
+                  this.#now(),
+                );
+                if (
+                  !binding ||
+                  binding.seatId !== peer.seatId ||
+                  this.#now() >= binding.expiresAtMs
+                ) {
+                  this.#stop(peer);
+                  return;
+                }
+                if (item.generation !== peer.generation || !this.#live(peer)) return;
+                if (binding.currentGameId !== item.publication.snapshot.head.gameId) return;
+                await this.#options.host.withCurrent(
+                  peer.lobbyId!,
+                  binding.currentGameId!,
+                  (runtime, epoch) =>
+                    runtime.observe(async (current, nowMs) => {
+                      if (
+                        item.generation !== peer.generation ||
+                        !this.#live(peer) ||
+                        epoch !== item.epoch ||
+                        current.head.branchId !== item.publication.snapshot.head.branchId
+                      )
+                        return;
+                      if (this.#now() >= binding.expiresAtMs) {
+                        this.#stop(peer);
+                        return;
+                      }
+                      const participant = current.state
+                        ? current.state.players.some((seat) => seat.id === binding.seatId)
+                        : current.connections.some((seat) => seat.seatId === binding.seatId);
+                      if (!participant) {
+                        this.#error(peer, 'unauthorized');
+                        return;
+                      }
+                      const viewer = { type: 'seat' as const, seatId: binding.seatId };
+                      const delivery = {
+                        epoch: `${epoch}:${peer.streamId}`,
+                        sequence: ++peer.sequence,
+                      };
+                      let message: ServerMessage;
+                      if (index < actions.length)
+                        message = makeActionMessage(actions[index]!, viewer, delivery);
+                      else {
+                        if (item.publication.kind === 'initial') {
+                          // The authorized baseline starts here, not before slow SQL.
+                          // Earlier queued observations are never replayed by resync.
+                          for (const queued of peer.publications)
+                            peer.publicationBytes -= queued.bytes;
+                          peer.publications = [];
+                        }
+                        message = makeStateMessage(
+                          item.publication.kind === 'initial' ? current : item.publication.snapshot,
+                          viewer,
+                          nowMs,
+                          delivery,
+                        );
+                        // A newer pause/procedure can suspend the reveal on this same
+                        // branch while an older committed state waits for delivery.
+                        const live = makeStateMessage(current, viewer, nowMs, delivery);
+                        if (
+                          !live.view.transient.reveal ||
+                          live.view.transient.reveal.timer.id !==
+                            message.view.transient.reveal?.timer.id
+                        )
+                          message = {
+                            ...message,
+                            view: {
+                              ...message.view,
+                              transient: { ...message.view.transient, reveal: null },
+                            },
+                          };
+                      }
+                      emit(message); // projection and actual emission share this prefix
+                    }),
+                );
+              },
+              Math.min(65536, this.#delivery.bytes),
+              item.generation,
+            );
+          }
+        } catch {
+          if (item.generation === peer.generation && this.#live(peer)) this.#stop(peer);
+        } finally {
+          peer.publicationBytes -= item.bytes;
+        }
+      }
+    } catch {
+      this.#stop(peer);
+    } finally {
+      peer.publishing = false;
+    }
+  }
+
+  async #message(peer: Peer, value: unknown, watch: number): Promise<void> {
     if (!this.#live(peer)) return;
     const decoded = decodeClientMessage(value);
     if (decoded.type !== 'decoded') {
@@ -553,45 +792,40 @@ export class PenkyTransport {
         this.#error(peer, 'unavailable');
         return;
       }
-      await this.#options.host.withCurrent(
+      if (!this.#live(peer) || watch !== peer.watch) return;
+      const participant = await this.#options.host.withCurrent(
         lobbyId,
         binding.currentGameId,
-        async (runtime, epoch) => {
-          // Revalidate before capturing the baseline: slow authentication must not
-          // deliver an expired reveal or a state superseded while awaiting SQL.
-          const valid = await this.#options.access.inspect(peer.token, this.#now());
-          if (!valid) {
-            this.#stop(peer);
-            return;
-          }
-          await runtime.observe(async (snapshot, nowMs) => {
-            if (!this.#live(peer)) return;
-            if (this.#now() >= valid.expiresAtMs) {
-              this.#stop(peer);
-              return;
-            }
-            const participant = snapshot.state
+        (runtime) =>
+          runtime.observe(async (snapshot) =>
+            snapshot.state
               ? snapshot.state.players.some((seat) => seat.id === binding.seatId)
-              : snapshot.connections.some((seat) => seat.seatId === binding.seatId);
-            const result = participant
-              ? makeStateMessage(snapshot, { type: 'seat', seatId: binding.seatId }, nowMs, {
-                  epoch: `${epoch}:${peer.streamId}`,
-                  sequence: ++peer.sequence,
-                })
-              : protocolError('unauthorized');
-            // No await between current-state projection and best-effort emission;
-            // no network delivery promise is awaited inside either server queue.
-            peer.socket.emit('server-message', result);
-          });
-        },
+              : snapshot.connections.some((seat) => seat.seatId === binding.seatId),
+          ),
       );
+      if (!this.#live(peer) || watch !== peer.watch) return;
+      if (!participant) {
+        this.#error(peer, 'unauthorized');
+        return;
+      }
+      peer.seatId = binding.seatId;
+      const stop = await this.#options.host.subscribe(
+        lobbyId,
+        (notice) => {
+          if (watch === peer.watch) this.#publication(peer, notice);
+        },
+        () => this.#stop(peer),
+        binding.currentGameId,
+      );
+      if (!this.#live(peer) || watch !== peer.watch) stop();
+      else peer.stopWatch = stop;
     } catch (error) {
       const unauthorized =
         error instanceof GuestAccessError &&
         ['authentication-required', 'membership-required', 'owner-only'].includes(error.code);
-      this.#error(peer, unauthorized ? 'unauthorized' : 'unavailable');
-      // A failed attachment/read must not leave a falsely present connection.
-      this.#stop(peer);
+      // Invalidate presence/private work immediately; a final fixed technical
+      // response may drain through the existing bounded wire slot before close.
+      this.#stop(peer, unauthorized ? 'unauthorized' : 'unavailable');
     }
   }
 }

@@ -56,11 +56,11 @@ Unsubscribe prevents new invocations immediately; disposal clears subscribers. A
 
 ### Capturing history and privacy
 
-Every field in `RuntimePublication` is **private server data**, not a generic browser/bot payload. Apply the existing viewer-specific projection/envelope builders only after fresh identity/seat authorization. No sockets, identity binding, transport counters or client delivery are implemented here. Stage 8.7's private host allocates writer-lifetime epochs and can install subscriptions through `withCurrent`; it does not implement network ordering/delivery.
+Every field in `RuntimePublication` is **private server data**, not a generic browser/bot payload. Apply the existing viewer-specific projection/envelope builders only after fresh identity/seat authorization. No sockets, identity binding, transport counters or client delivery are implemented here. Stage 8.7's private host allocates writer epochs; Stage 8.10's approved host lifecycle subscription now follows live replacements and forwards this private seam. Its separate transport publisher authorizes/projects and bounds delivery; no network acknowledgment is awaited by runtime listeners.
 
 Use the detached notice for later asynchronous work, not a fresh `read()` of a potentially newer game. If a host needs owner-history metadata from its concrete committed history, capture/project that sidecar **synchronously in the listener before the first await**. This synchronous prefix is still at the serialized committed point, including same-head closure. Do not re-read mutable staging history after awaiting or assume matching heads prove a closure committed. Alternatively use a separately retained, validated committed storage frame. The generic History interface is unchanged; this seam does not turn arbitrary history reads into proof of commitment.
 
-Without `commit`, publication is only authoritative in memory, not crash durable. Restore requires a new live runtime/subscription baseline; publication sequence and delivery work are not recovered from checkpoints.
+Without `commit`, publication is only authoritative in memory, not crash durable. Restore requires a new live runtime/subscription baseline; publication sequence and delivery work are not recovered from checkpoints. Stage 8.10's host observer automatically rebinds after successful replacement, with synchronous old-epoch invalidation and no recovered action replay. See `game-host.md` and `transport.md`.
 
 ## Two kinds of time
 

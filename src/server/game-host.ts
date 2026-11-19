@@ -7,7 +7,7 @@ import type { LiveMatch } from '../persistence/lobby.ts';
 import type { MatchStart } from '../persistence/lobby-contracts.ts';
 import { PostgresSession } from '../persistence/postgres.ts';
 import { GameRuntime } from '../runtime/runtime.ts';
-import type { RuntimeOptions, RuntimeSnapshot } from '../runtime/runtime.ts';
+import type { RuntimeOptions, RuntimeSnapshot, RuntimePublication } from '../runtime/runtime.ts';
 import { systemInputs } from '../runtime/system.ts';
 import type { GuestMembership } from './guest-access.ts';
 
@@ -15,6 +15,17 @@ type Inputs = Omit<RuntimeOptions, 'history' | 'commit' | 'connectedSeatIds'>;
 type Entry = LiveMatch & { gameId: GameId; lobbyId: LobbyId; epoch: string };
 type Connection = Pick<GuestMembership, 'lobbyId' | 'seatId'>;
 export type HostedSnapshot = Readonly<{ epoch: string; snapshot: RuntimeSnapshot }>;
+/** Private committed stream/lifecycle seam, never a network payload. */
+export type HostPublication =
+  | Readonly<{ type: 'publication'; epoch: string; publication: RuntimePublication }>
+  | Readonly<{ type: 'invalidated'; epoch: string }>;
+type Observer = {
+  active: boolean;
+  epoch: string | null;
+  stop: (() => void) | null;
+  receive: (notice: HostPublication) => void | Promise<void>;
+  report: (() => void) | undefined;
+};
 export class GameHostError extends Error {
   constructor(code: 'host-closed' | 'wrong-game' | 'game-unavailable') {
     super(code);
@@ -32,6 +43,7 @@ export class PostgresGameHost {
   #tail: Promise<void> = Promise.resolve();
   #entries = new Map<GameId, Entry>();
   #connections = new Set<Connection>();
+  #observers = new Map<LobbyId, Set<Observer>>();
   #closed = false;
   #closing: Promise<void> | null = null;
 
@@ -48,6 +60,83 @@ export class PostgresGameHost {
       const entry = await this.#current(lobbyId);
       return entry ? { epoch: entry.epoch, snapshot: entry.runtime.read() } : null;
     });
+  }
+
+  /** Observer lifetime follows committed live writers, not prepared successors.
+   * Callbacks must return promptly; delivery promises are never awaited.
+   */
+  subscribe(
+    lobbyId: LobbyId,
+    receive: Observer['receive'],
+    report?: () => void,
+    expectedGameId?: GameId,
+  ): Promise<() => void> {
+    return this.#enqueue(async () => {
+      const entry = await this.#current(lobbyId, expectedGameId);
+      const observer: Observer = { active: true, epoch: null, stop: null, receive, report };
+      const observers = this.#observers.get(lobbyId) ?? new Set<Observer>();
+      this.#observers.set(lobbyId, observers);
+      observers.add(observer);
+      const stop = () => {
+        if (!observer.active) return;
+        observer.active = false;
+        observer.stop?.();
+        observer.stop = null;
+        observers.delete(observer);
+        if (!observers.size) this.#observers.delete(lobbyId);
+      };
+      try {
+        if (entry) await this.#bind(observer, entry);
+      } catch (error) {
+        stop();
+        throw error;
+      }
+      return stop;
+    });
+  }
+
+  #notify(observer: Observer, notice: HostPublication): void {
+    if (!observer.active) return;
+    const report = () => {
+      try {
+        void Promise.resolve(observer.report?.()).catch(() => {});
+      } catch {
+        /* isolated */
+      }
+    };
+    try {
+      void Promise.resolve(observer.receive(notice)).catch(report);
+    } catch {
+      report();
+    }
+  }
+
+  async #bind(observer: Observer, entry: Entry): Promise<void> {
+    observer.epoch = entry.epoch;
+    const stop = await entry.runtime.subscribe(
+      (publication) => {
+        if (
+          observer.active &&
+          observer.epoch === entry.epoch &&
+          this.#entries.get(entry.gameId) === entry
+        )
+          this.#notify(observer, { type: 'publication', epoch: entry.epoch, publication });
+      },
+      () => {
+        try {
+          void Promise.resolve(observer.report?.()).catch(() => {});
+        } catch {
+          /* isolated */
+        }
+      },
+    );
+    if (observer.active && observer.epoch === entry.epoch) observer.stop = stop;
+    else stop();
+  }
+
+  async #bindObservers(entry: Entry): Promise<void> {
+    for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])])
+      if (observer.active) await this.#bind(observer, entry);
   }
 
   /** expectedGameId prevents an old intent from silently reaching a successor.
@@ -145,6 +234,7 @@ export class PostgresGameHost {
         this.#entries.set(result.gameId, entry);
         try {
           await this.#presence(entry);
+          await this.#bindObservers(entry);
         } catch {
           await this.#release(entry, false);
           throw new GameHostError('game-unavailable');
@@ -170,6 +260,12 @@ export class PostgresGameHost {
         }
       }
       this.#connections.clear();
+      for (const observers of this.#observers.values())
+        for (const observer of observers) {
+          observer.active = false;
+          observer.stop?.();
+        }
+      this.#observers.clear();
       if (failed) throw new GameHostError('game-unavailable');
     });
     this.#tail = this.#closing.catch(() => {});
@@ -264,6 +360,12 @@ export class PostgresGameHost {
       const entry: Entry = { session, runtime, gameId: currentGameId, lobbyId, epoch };
       await this.#presence(entry);
       this.#entries.set(currentGameId, entry);
+      try {
+        await this.#bindObservers(entry);
+      } catch (error) {
+        await this.#release(entry, false);
+        throw error;
+      }
       return entry;
     } catch {
       if (runtime) await runtime.dispose();
@@ -291,6 +393,13 @@ export class PostgresGameHost {
 
   async #release(entry: Entry, save: boolean): Promise<void> {
     if (this.#entries.get(entry.gameId) === entry) this.#entries.delete(entry.gameId);
+    for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])]) {
+      if (observer.epoch !== entry.epoch) continue;
+      observer.stop?.();
+      observer.stop = null;
+      observer.epoch = null;
+      this.#notify(observer, { type: 'invalidated', epoch: entry.epoch });
+    }
     try {
       if (save && this.#healthy(entry)) await entry.runtime.checkpoint();
     } finally {

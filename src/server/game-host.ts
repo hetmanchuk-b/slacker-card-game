@@ -1,9 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { Pool } from 'pg';
 import type { GameId, LobbyId } from '../game/ids.ts';
 import { id } from '../game/ids.ts';
 import { admitChat, PostgresLobby } from '../persistence/lobby.ts';
-import type { ChatAdmissionOptions } from '../persistence/lobby.ts';
+import type {
+  ChatAdmissionOptions,
+  MatchStartOutcome,
+  StartAdmissionOptions,
+} from '../persistence/lobby.ts';
 import type { ChatInput, ChatMessage } from '../persistence/lobby-contracts.ts';
 import type { LiveMatch } from '../persistence/lobby.ts';
 import type { MatchStart } from '../persistence/lobby-contracts.ts';
@@ -394,41 +399,125 @@ export class PostgresGameHost {
     });
   }
 
-  /** Trusted canonical start only. Authentication, readiness and browser-intent
-   * retry orchestration are separate future adapters. No live references escape.
+  /** Original authenticated intent only. Admission returns fresh server-owned
+   * membership, never a browser roster; callbacks must not re-enter this host.
    */
-  startMatch(lobbyId: LobbyId, input: MatchStart) {
+  startFromIntent(
+    lobbyId: LobbyId,
+    input: Pick<MatchStart, 'id' | 'actorSessionId' | 'expectedHead'>,
+    admit: () => Promise<GuestMembership | null>,
+  ): Promise<MatchStartOutcome> {
+    const intent = structuredClone(input);
+    const authorize = async () => {
+      let binding: GuestMembership | null;
+      try {
+        binding = await admit();
+      } catch {
+        throw new RuntimeAdmissionError('unavailable');
+      }
+      if (
+        !binding ||
+        binding.lobbyId !== lobbyId ||
+        !binding.isOwner ||
+        binding.sessionId !== intent.actorSessionId
+      )
+        throw new RuntimeAdmissionError();
+      return binding;
+    };
+    return this.#enqueue(async () => {
+      const binding = await authorize();
+      const lobby = await PostgresLobby.open(this.#pool, lobbyId);
+      const prior = await lobby.startReceipt(intent.id);
+      if (prior)
+        return prior.request.actorSessionId === intent.actorSessionId &&
+          isDeepStrictEqual(prior.request.expectedHead, intent.expectedHead) &&
+          prior.request.expectedGameId === (intent.expectedHead?.gameId ?? null)
+          ? { type: 'duplicate', gameId: prior.gameId }
+          : { type: 'rejected', code: 'command-id-reused' };
+      const current = await this.#current(lobbyId);
+      const snapshot = current?.runtime.read();
+      if ((snapshot?.head.gameId ?? null) !== (intent.expectedHead?.gameId ?? null))
+        return { type: 'rejected', code: 'game-mismatch' };
+      if (!isDeepStrictEqual(snapshot?.head ?? null, intent.expectedHead))
+        return { type: 'rejected', code: 'stale-head' };
+      if (current && snapshot?.state?.phase.type !== 'finished')
+        return { type: 'rejected', code: 'match-not-finished' };
+      if (
+        binding.seatIds.length < 2 ||
+        binding.seatIds.length > 8 ||
+        binding.seatIds[0] !== binding.seatId ||
+        new Set(binding.seatIds).size !== binding.seatIds.length
+      )
+        return { type: 'rejected', code: 'invalid-configuration' };
+      // Only a validated genuinely new intent allocates opaque configuration.
+      const request: MatchStart = {
+        ...intent,
+        expectedGameId: intent.expectedHead?.gameId ?? null,
+        gameId: id('game', randomUUID()),
+        branchId: id('branch', randomUUID()),
+        seatIds: [...binding.seatIds],
+        cardIds: Array.from({ length: 36 }, () => id('card', randomUUID())),
+      };
+      return this.#startCanonical(lobbyId, lobby, current, request, {
+        admit: async () => {
+          try {
+            await authorize();
+            return true;
+          } catch (error) {
+            if (error instanceof RuntimeAdmissionError && error.code === 'unauthorized')
+              return false;
+            throw error;
+          }
+        },
+      });
+    });
+  }
+
+  /** Trusted canonical start; authenticated browser intents use startFromIntent. */
+  startMatch(lobbyId: LobbyId, input: MatchStart): Promise<MatchStartOutcome> {
     const request = structuredClone(input);
     return this.#enqueue(async () => {
       const lobby = await PostgresLobby.open(this.#pool, lobbyId);
       const current = await this.#current(lobbyId);
-      const epoch = randomUUID();
+      return this.#startCanonical(lobbyId, lobby, current, request);
+    });
+  }
+
+  async #startCanonical(
+    lobbyId: LobbyId,
+    lobby: PostgresLobby,
+    current: Entry | null,
+    request: MatchStart,
+    options: StartAdmissionOptions = {},
+  ): Promise<MatchStartOutcome> {
+    const epoch = randomUUID();
+    try {
+      const result = await lobby.startMatch(
+        request,
+        {
+          ...this.#runtimeInputs(request.gameId, epoch),
+          connectedSeatIds: [],
+        },
+        current ?? undefined,
+        options,
+      );
+      if (result.type !== 'started') return result;
+      if (current) await this.#release(current, false);
+      const entry: Entry = { ...result, lobbyId, epoch };
+      this.#entries.set(result.gameId, entry);
       try {
-        const result = await lobby.startMatch(
-          request,
-          {
-            ...this.#runtimeInputs(request.gameId, epoch),
-            connectedSeatIds: [],
-          },
-          current ?? undefined,
-        );
-        if (result.type !== 'started') return result;
-        if (current) await this.#release(current, false);
-        const entry: Entry = { ...result, lobbyId, epoch };
-        this.#entries.set(result.gameId, entry);
-        try {
-          await this.#presence(entry);
-          await this.#bindObservers(entry);
-        } catch {
-          await this.#release(entry, false);
-          throw new GameHostError('game-unavailable');
-        }
-        return { type: 'started' as const, gameId: result.gameId };
+        await this.#presence(entry);
+        await this.#bindObservers(entry);
       } catch {
-        if (current && !this.#healthy(current)) await this.#release(current, false);
+        await this.#release(entry, false);
         throw new GameHostError('game-unavailable');
       }
-    });
+      return { type: 'started' as const, gameId: result.gameId };
+    } catch (error) {
+      if (current && !this.#healthy(current)) await this.#release(current, false);
+      if (error instanceof RuntimeAdmissionError) throw error;
+      throw new GameHostError('game-unavailable');
+    }
   }
 
   close(): Promise<void> {

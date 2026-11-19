@@ -5,7 +5,7 @@ import type { TestContext } from 'node:test';
 import { Pool } from 'pg';
 import { id } from '../game/ids.ts';
 import { migrate, PostgresSession } from './postgres.ts';
-import { GameRuntime } from '../runtime/runtime.ts';
+import { GameRuntime, RuntimeAdmissionError } from '../runtime/runtime.ts';
 import { finishMatch } from '../runtime/testing/match.ts';
 import type { LobbyBinding, MatchStart } from './lobby-contracts.ts';
 import type { LiveMatch } from './lobby.ts';
@@ -79,6 +79,86 @@ test('PostgreSQL lobby persistence', { skip: !url }, async (t) => {
     await clock.advanceBy(10000);
     await finishMatch(live.runtime);
   }
+  await t.test(
+    'start admission protects receipt lookup and first-match commit without leaving private preparation',
+    async (t) => {
+      const binding = {
+        id: id('lobby', randomUUID()),
+        ownerSessionId: id('session', randomUUID()),
+        ownerSeatId: id('seat', randomUUID()),
+      };
+      const lobby = await PostgresLobby.create(pool, binding);
+      const request = requestFor(binding);
+      const inputs = inputsFor(request);
+      const attempt = async (admit: () => boolean) => {
+        const result = await lobby.startMatch(request, inputs, undefined, { admit });
+        if (result.type === 'started')
+          t.after(async () => {
+            await result.runtime.dispose();
+            await result.session.close();
+          });
+        return result;
+      };
+      await assert.rejects(
+        attempt(() => false),
+        RuntimeAdmissionError,
+      );
+      let admissions = 0;
+      await assert.rejects(
+        attempt(() => ++admissions === 1),
+        RuntimeAdmissionError,
+      );
+      assert.equal(admissions, 2);
+      assert.equal(await lobby.startReceipt(request.id), null);
+      assert.equal((await lobby.read()).currentGameId, null);
+      const first = await lobby.startMatch(request, inputs, undefined, { admit: () => true });
+      if (first.type !== 'started') assert.fail();
+      t.after(async () => {
+        await first.runtime.dispose();
+        await first.session.close();
+      });
+      await assert.rejects(
+        lobby.startMatch(request, inputs, undefined, { admit: () => false }),
+        RuntimeAdmissionError,
+      );
+      assert.equal(
+        (await lobby.startMatch(request, inputs, undefined, { admit: () => true })).type,
+        'duplicate',
+      );
+    },
+  );
+
+  await t.test(
+    'denied queued successor admission leaves rollback open and the original writer usable',
+    async (t) => {
+      const { binding, lobby, live, inputs } = await setup(t);
+      await finish(live, inputs.clock);
+      const before = live.runtime.read();
+      const request = requestFor(binding, before.head.gameId, before.head);
+      let admissions = 0;
+      await assert.rejects(
+        lobby
+          .startMatch(request, inputsFor(request, inputs.clock), live, {
+            admit: () => ++admissions === 1,
+          })
+          .then((result) => {
+            if (result.type === 'started')
+              t.after(async () => {
+                await result.runtime.dispose();
+                await result.session.close();
+              });
+            return result;
+          }),
+        RuntimeAdmissionError,
+      );
+      assert.equal(admissions, 2);
+      assert.deepEqual(live.runtime.read(), before);
+      assert.equal(live.session.history.snapshot().value.closedRollback, false);
+      assert.equal(await lobby.startReceipt(request.id), null);
+      await live.runtime.checkpoint();
+    },
+  );
+
   await t.test(
     'chat admission runs in queue before immutable-message retries and failures do not fault gameplay',
     async (t) => {

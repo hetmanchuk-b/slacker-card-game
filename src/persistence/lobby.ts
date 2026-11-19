@@ -4,7 +4,7 @@ import type { RuntimeSnapshot, RuntimeOptions } from '../runtime/runtime.ts';
 import { PostgresSession } from './postgres.ts';
 import { MemoryHistory } from './memory-history.ts';
 import type { MatchStart } from './lobby-contracts.ts';
-import { GameRuntime } from '../runtime/runtime.ts';
+import { GameRuntime, RuntimeAdmissionError } from '../runtime/runtime.ts';
 import type {
   LobbyBinding,
   LobbyRecord,
@@ -36,6 +36,21 @@ export async function admitChat(options: ChatAdmissionOptions): Promise<void> {
   if (!permitted) throw new ChatAdmissionError('unauthorized');
 }
 
+export type StartAdmissionOptions = Readonly<{
+  /** Trusted bounded non-reentrant authorization; no network delivery waits. */
+  admit?: () => boolean | Promise<boolean>;
+}>;
+export async function admitStart(options: StartAdmissionOptions): Promise<void> {
+  if (!options.admit) return;
+  let permitted: boolean;
+  try {
+    permitted = (await options.admit()) === true;
+  } catch {
+    throw new RuntimeAdmissionError('unavailable');
+  }
+  if (!permitted) throw new RuntimeAdmissionError();
+}
+
 function context(snapshot: RuntimeSnapshot): ChatContext {
   const state = snapshot.state;
   if (!state || state.phase.type === 'finished')
@@ -60,6 +75,10 @@ export type MatchStartResult =
         | 'command-id-reused'
         | 'stale-head';
     }>;
+
+export type MatchStartOutcome =
+  | Readonly<{ type: 'started' | 'duplicate'; gameId: MatchStart['gameId'] }>
+  | Extract<MatchStartResult, { type: 'rejected' }>;
 
 /** Trusted server storage, not a browser authorization interface. */
 export class PostgresLobby {
@@ -124,9 +143,11 @@ export class PostgresLobby {
     input: MatchStart,
     inputs: Omit<RuntimeOptions, 'history' | 'commit'>,
     current?: LiveMatch,
+    options: StartAdmissionOptions = {},
   ): Promise<MatchStartResult> {
     const request = structuredClone(input);
-    const result = this.#startTail.then(() => this.#start(request, { ...inputs }, current));
+    const origin = { ...options };
+    const result = this.#startTail.then(() => this.#start(request, { ...inputs }, current, origin));
     this.#startTail = result.then(
       () => undefined,
       () => undefined,
@@ -150,7 +171,9 @@ export class PostgresLobby {
     request: MatchStart,
     inputs: Omit<RuntimeOptions, 'history' | 'commit'>,
     current?: LiveMatch,
+    options: StartAdmissionOptions = {},
   ): Promise<MatchStartResult> {
+    await admitStart(options);
     const room = await this.read();
     if (request.actorSessionId !== room.ownerSessionId)
       return { type: 'rejected', code: 'owner-only' };
@@ -197,15 +220,19 @@ export class PostgresLobby {
       const checkpoint = await runtime.checkpoint();
       if (current) {
         handingOff = true;
-        const moved = await current.runtime.handoff(async (oldCheckpoint) => {
-          sink.session = await current.session.startSuccessor(
-            this.#binding,
-            request,
-            history,
-            checkpoint,
-            oldCheckpoint,
-          );
-        }, request.expectedHead ?? undefined);
+        const moved = await current.runtime.handoff(
+          async (oldCheckpoint) => {
+            sink.session = await current.session.startSuccessor(
+              this.#binding,
+              request,
+              history,
+              checkpoint,
+              oldCheckpoint,
+            );
+          },
+          request.expectedHead ?? undefined,
+          options.admit ? { admit: options.admit } : {},
+        );
         if (!moved) {
           await runtime.dispose();
           return {
@@ -215,7 +242,8 @@ export class PostgresLobby {
               : 'stale-head',
           };
         }
-      } else
+      } else {
+        await admitStart(options);
         sink.session = await PostgresSession.createLobbyGame(
           this.#pool,
           this.#binding,
@@ -223,12 +251,14 @@ export class PostgresLobby {
           history,
           checkpoint,
         );
+      }
       if (!sink.session) throw new Error('Missing successor session');
       return { type: 'started', gameId: request.gameId, session: sink.session, runtime };
     } catch (error) {
       await runtime.dispose();
       if (sink.session) await sink.session.close();
-      if (handingOff && current) await current.session.close();
+      if (handingOff && current && !(error instanceof RuntimeAdmissionError))
+        await current.session.close();
       throw error;
     }
   }

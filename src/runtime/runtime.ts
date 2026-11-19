@@ -857,17 +857,34 @@ export class GameRuntime {
   handoff(
     publish: (checkpoint: RuntimeCheckpoint) => Promise<void>,
     expected?: BranchHead,
+    options: Pick<DispatchOptions, 'admit'> = {},
   ): Promise<boolean> {
-    return this.#enqueue(async () => {
-      if (this.#closed || this.#view().state?.phase.type !== 'finished') return false;
-      if (expected && !isDeepStrictEqual(expected, this.#view().head)) return false;
-      this.#options.history.closeRollback();
-      await publish(this.#capture());
-      await this.#publish('handoff', false);
-      this.#closed = true;
-      this.#cancelTasks();
-      return true;
-    }, false);
+    const admit = options.admit;
+    return this.#enqueue(
+      async () => {
+        if (this.#closed || this.#view().state?.phase.type !== 'finished') return false;
+        if (expected && !isDeepStrictEqual(expected, this.#view().head)) return false;
+        this.#options.history.closeRollback();
+        await publish(this.#capture());
+        await this.#publish('handoff', false);
+        this.#closed = true;
+        this.#cancelTasks();
+        return true;
+      },
+      false,
+      true,
+      admit
+        ? async () => {
+            let permitted: boolean;
+            try {
+              permitted = (await admit(this.read())) === true;
+            } catch {
+              throw new RuntimeAdmissionError('unavailable');
+            }
+            if (!permitted) throw new RuntimeAdmissionError();
+          }
+        : undefined,
+    );
   }
 
   /** Low-level legacy guard only. Actual starts must use handoff via PostgresLobby. */

@@ -1,7 +1,7 @@
 import type { BranchHead } from '../game/contracts.ts';
 import type { CommandId } from '../game/ids.ts';
 import type { ChatMessage } from '../persistence/lobby-contracts.ts';
-import type { MatchStartResult } from '../persistence/lobby.ts';
+import type { MatchStartOutcome } from '../persistence/lobby.ts';
 import { projectAction } from '../projections/actions.ts';
 import type { ActionProjectionInput } from '../projections/actions.ts';
 import type { GameViewer } from '../projections/game.ts';
@@ -192,7 +192,7 @@ export function makeChatPage(requestId: CommandId, messages: readonly ChatMessag
 /** Never serialize MatchStartResult directly: it can contain a live DB session/runtime. */
 export function makeMatchStartAck(
   requestId: CommandId,
-  result: MatchStartResult,
+  result: MatchStartOutcome,
 ): MatchStartAck | ErrorMessage {
   if (result.type === 'started' || result.type === 'duplicate')
     return {

@@ -21,6 +21,7 @@ import { decodeClientMessage } from '../protocol/decode.ts';
 import {
   makeActionMessage,
   makeOwnerHistoryMessage,
+  makeMatchStartAck,
   makeRollbackNoticeMessage,
   makeCommandAck,
   makeStateMessage,
@@ -841,6 +842,81 @@ export class PenkyTransport {
     }
   }
 
+  async #start(peer: Peer, message: ClientMessage): Promise<void> {
+    const intent = message.intent;
+    if (intent.type !== 'start-match') return;
+    if (!peer.detach || peer.lobbyId !== intent.lobbyId) {
+      this.#error(peer, 'unauthorized');
+      return;
+    }
+    try {
+      const binding = await this.#options.access.requireOwner(
+        peer.token,
+        intent.lobbyId,
+        this.#now(),
+      );
+      if (!this.#live(peer)) return;
+      const result = await this.#options.host.startFromIntent(
+        intent.lobbyId,
+        {
+          id: message.requestId,
+          actorSessionId: binding.sessionId,
+          expectedHead: intent.expected,
+        },
+        async () => {
+          if (!this.#live(peer)) return null;
+          try {
+            const owner = await this.#options.access.requireOwner(
+              peer.token,
+              intent.lobbyId,
+              this.#now(),
+            );
+            return this.#live(peer) &&
+              this.#now() < owner.expiresAtMs &&
+              owner.sessionId === binding.sessionId &&
+              owner.seatId === binding.seatId
+              ? owner
+              : null;
+          } catch (error) {
+            if (
+              error instanceof GuestAccessError &&
+              ['authentication-required', 'membership-required', 'owner-only'].includes(error.code)
+            )
+              return null;
+            throw error;
+          }
+        },
+      );
+      await peer.outbound.prepare(
+        async (emit) => {
+          const valid = await this.#options.access.inspectSeat(
+            peer.token,
+            intent.lobbyId,
+            this.#now(),
+          );
+          if (!valid || this.#now() >= valid.expiresAtMs) {
+            this.#stop(peer);
+            return;
+          }
+          if (
+            !this.#live(peer) ||
+            valid.sessionId !== binding.sessionId ||
+            valid.seatId !== binding.seatId
+          )
+            return;
+          emit(makeMatchStartAck(message.requestId, result));
+        },
+        Math.min(65536, this.#delivery.bytes),
+      );
+    } catch (error) {
+      const unauthorized =
+        (error instanceof RuntimeAdmissionError && error.code === 'unauthorized') ||
+        (error instanceof GuestAccessError &&
+          ['authentication-required', 'membership-required', 'owner-only'].includes(error.code));
+      this.#error(peer, unauthorized ? 'unauthorized' : 'unavailable');
+    }
+  }
+
   #discardStream(peer: Peer): void {
     peer.generation++;
     peer.streamId = randomUUID();
@@ -1027,6 +1103,10 @@ export class PenkyTransport {
       decoded.message.intent.type === 'chat-history'
     ) {
       await this.#chat(peer, decoded.message, watch, generation);
+      return;
+    }
+    if (decoded.message.intent.type === 'start-match') {
+      await this.#start(peer, decoded.message);
       return;
     }
     if (

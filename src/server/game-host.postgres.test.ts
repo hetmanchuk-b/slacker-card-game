@@ -10,6 +10,8 @@ import { FakeClock } from '../runtime/testing/fake-clock.ts';
 import { finishMatch } from '../runtime/testing/match.ts';
 import { PostgresGuestAccess } from './guest-access.ts';
 import { PostgresGameHost } from './game-host.ts';
+import { PostgresLobby } from '../persistence/lobby.ts';
+import { RuntimeAdmissionError } from '../runtime/runtime.ts';
 import type { HostPublication } from './game-host.ts';
 
 const url = process.env.PENKY_TEST_DATABASE_URL;
@@ -102,6 +104,94 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
       reporters,
     };
   }
+
+  await t.test(
+    'late start denial remains unauthorized while failed authorization remains unavailable without closing rollback',
+    async (t) => {
+      const { host, clock, member, owner, request } = await setup(t);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        for (let index = 0; index < 36; index++) {
+          const phase = runtime.read().state!.phase;
+          if (phase.type !== 'dealing') assert.fail();
+          await runtime.dispatch({
+            type: 'draw-card',
+            id: id('command', randomUUID()),
+            actorId: phase.nextSeatId,
+          });
+        }
+        await clock.advanceBy(10000);
+        await finishMatch(runtime);
+      });
+      const before = (await host.read(member.lobbyId))!.snapshot;
+      for (const [denyAt, infrastructure] of [
+        [2, false],
+        [3, false],
+        [3, true],
+      ] as const) {
+        let calls = 0;
+        const commandId = id('command', randomUUID());
+        await assert.rejects(
+          host.startFromIntent(
+            member.lobbyId,
+            { id: commandId, actorSessionId: member.sessionId, expectedHead: before.head },
+            async () => {
+              if (++calls === denyAt) {
+                if (infrastructure) throw new Error('PRIVATE SQL');
+                return null;
+              }
+              return access.requireOwner(owner.token, member.lobbyId, 1000);
+            },
+          ),
+          (error: unknown) => {
+            assert.ok(error instanceof RuntimeAdmissionError);
+            assert.equal(error.code, infrastructure ? 'unavailable' : 'unauthorized');
+            return true;
+          },
+        );
+        assert.equal(calls, denyAt);
+        assert.deepEqual((await host.read(member.lobbyId))!.snapshot, before);
+        assert.equal(
+          await host.observeHistory(
+            member.lobbyId,
+            request.gameId,
+            async (capture) => capture.closedRollback,
+          ),
+          false,
+        );
+        assert.equal(
+          await (await PostgresLobby.open(pool, member.lobbyId)).startReceipt(commandId),
+          null,
+        );
+        await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+          await runtime.checkpoint();
+        });
+      }
+    },
+  );
+
+  await t.test(
+    'canonical start retries authorize before lookup and never prepare a second configuration',
+    async (t) => {
+      const { host, member, request, owner, reporters } = await setup(t);
+      const input = { id: request.id, actorSessionId: member.sessionId, expectedHead: null };
+      const binding = () => access.requireOwner(owner.token, member.lobbyId, 1000);
+      const prepared = reporters.length;
+      await assert.rejects(host.startFromIntent(member.lobbyId, input, async () => null));
+      const duplicate = await host.startFromIntent(member.lobbyId, input, binding);
+      assert.deepEqual(duplicate, { type: 'duplicate', gameId: request.gameId });
+      assert.equal(reporters.length, prepared);
+      const changed = await host.startFromIntent(
+        member.lobbyId,
+        { ...input, expectedHead: (await host.read(member.lobbyId))!.snapshot.head },
+        binding,
+      );
+      assert.deepEqual(changed, { type: 'rejected', code: 'command-id-reused' });
+      await host.recover(member.lobbyId);
+      const restored = reporters.length;
+      assert.deepEqual(await host.startFromIntent(member.lobbyId, input, binding), duplicate);
+      assert.equal(reporters.length, restored);
+    },
+  );
 
   await t.test(
     'owner captures include committed same-head closure and dispatch still enforces it',

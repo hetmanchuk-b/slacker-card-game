@@ -7,7 +7,14 @@ import type { LiveMatch } from '../persistence/lobby.ts';
 import type { MatchStart } from '../persistence/lobby-contracts.ts';
 import { PostgresSession } from '../persistence/postgres.ts';
 import { GameRuntime } from '../runtime/runtime.ts';
-import type { RuntimeOptions, RuntimeSnapshot, RuntimePublication } from '../runtime/runtime.ts';
+import type {
+  ClaimRequest,
+  DispatchOptions,
+  RuntimeOptions,
+  RuntimeSnapshot,
+  RuntimePublication,
+} from '../runtime/runtime.ts';
+import { resolveClaimEvidence } from './claim-evidence.ts';
 import { systemInputs } from '../runtime/system.ts';
 import type { GuestMembership } from './guest-access.ts';
 
@@ -157,6 +164,33 @@ export class PostgresGameHost {
         throw error;
       }
     });
+  }
+
+  /** Trusted bound claim only; resolver SQL runs inside the runtime queue, not
+   * through a re-entrant host operation. No chat/history payload is returned.
+   */
+  submitClaim(
+    lobbyId: LobbyId,
+    gameId: GameId,
+    request: ClaimRequest,
+    options: DispatchOptions = {},
+  ) {
+    const input = structuredClone(request);
+    return this.withCurrent(lobbyId, gameId, (runtime) =>
+      runtime.dispatchClaim(
+        input,
+        async (capture) => {
+          const chat =
+            input.incident.type === 'chat'
+              ? await (
+                  await PostgresLobby.open(this.#pool, lobbyId)
+                ).message(id('message', input.incident.messageId))
+              : null;
+          return resolveClaimEvidence(input, capture, lobbyId, chat);
+        },
+        options,
+      ),
+    );
   }
 
   /** Binding must come from a fresh guest membership check, never a browser.

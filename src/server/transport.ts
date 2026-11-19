@@ -6,7 +6,12 @@ import { TLSSocket } from 'node:tls';
 import { Server } from 'socket.io';
 import type { Socket } from 'socket.io';
 import type { LobbyId, SeatId, BranchId } from '../game/ids.ts';
-import type { RuntimeCommand, RuntimePublication } from '../runtime/runtime.ts';
+import type {
+  ClaimRequest,
+  DispatchOptions,
+  RuntimeCommand,
+  RuntimePublication,
+} from '../runtime/runtime.ts';
 import type { HostPublication } from './game-host.ts';
 import { AcknowledgedOutbound } from './outbound.ts';
 import { RuntimeAdmissionError } from '../runtime/runtime.ts';
@@ -43,6 +48,7 @@ const GAMEPLAY_TYPES = new Set([
   'withdrawal-response',
   'propose-bot',
   'replacement-vote',
+  'submit-claim',
 ]);
 
 /** Explicit server-owned binding. Never spread a browser intent into a command. */
@@ -151,7 +157,7 @@ export type TransportOptions = Readonly<{
 }>;
 
 /** TLS guest lifecycle, seat-private resync and explicit guarded gameplay subset.
- * No claim/admin/chat/start/history handlers, lobby admission, live publisher,
+ * No admin/chat/start/history handlers or lobby admission,
  * proxy trust or insecure mode.
  * The caller owns migrations, host and pool; close transport before either.
  */
@@ -551,38 +557,57 @@ export class PenkyTransport {
         this.#error(peer, 'wrong-game');
         return;
       }
-      await this.#options.host.withCurrent(peer.lobbyId, intent.gameId, async (runtime) => {
+      const dispatchOptions: DispatchOptions = {
+        branchId: intent.branchId,
+        controller: 'human',
+        admit: async (snapshot) => {
+          const valid = await this.#options.access.inspect(peer.token, this.#now());
+          if (!valid || this.#now() >= valid.expiresAtMs) {
+            this.#stop(peer);
+            return false;
+          }
+          const seat = snapshot.connections.find((item) => item.seatId === binding.seatId);
+          const participant = snapshot.state
+            ? snapshot.state.players.some((item) => item.id === binding.seatId)
+            : seat !== undefined;
+          return (
+            this.#live(peer) &&
+            participant &&
+            seat?.connected === true &&
+            seat.controller === 'human'
+          );
+        },
+      };
+      let result;
+      if (intent.type === 'submit-claim') {
+        const request: ClaimRequest = {
+          type: 'submit-claim',
+          id: message.requestId,
+          actorId: binding.seatId,
+          accusedId: intent.accusedId,
+          reason: intent.reason,
+          incident: intent.evidence,
+        };
+        result = await this.#options.host.submitClaim(
+          peer.lobbyId,
+          intent.gameId,
+          request,
+          dispatchOptions,
+        );
+      } else {
         const command = gameplayCommand(message, binding.seatId)!;
-        const result = await runtime.dispatch(command, {
-          branchId: intent.branchId,
-          controller: 'human',
-          admit: async (snapshot) => {
-            const valid = await this.#options.access.inspect(peer.token, this.#now());
-            if (!valid || this.#now() >= valid.expiresAtMs) {
-              this.#stop(peer);
-              return false;
-            }
-            const seat = snapshot.connections.find((item) => item.seatId === binding.seatId);
-            const participant = snapshot.state
-              ? snapshot.state.players.some((item) => item.id === binding.seatId)
-              : seat !== undefined;
-            return (
-              this.#live(peer) &&
-              participant &&
-              seat?.connected === true &&
-              seat.controller === 'human'
-            );
-          },
-        });
-        // A durable action is not undone if the caller departs during commit.
-        // Suppress its acknowledgment instead; the original ID can settle retry.
-        const valid = await this.#options.access.inspect(peer.token, this.#now());
-        if (!valid || this.#now() >= valid.expiresAtMs) {
-          this.#stop(peer);
-          return;
-        }
-        if (this.#live(peer)) peer.outbound.enqueue(makeCommandAck(message.requestId, result));
-      });
+        result = await this.#options.host.withCurrent(peer.lobbyId, intent.gameId, (runtime) =>
+          runtime.dispatch(command, dispatchOptions),
+        );
+      }
+      // A durable action is not undone if the caller departs during commit.
+      // Suppress its acknowledgment instead; the original ID can settle retry.
+      const valid = await this.#options.access.inspect(peer.token, this.#now());
+      if (!valid || this.#now() >= valid.expiresAtMs) {
+        this.#stop(peer);
+        return;
+      }
+      if (this.#live(peer)) peer.outbound.enqueue(makeCommandAck(message.requestId, result));
     } catch (error) {
       const wrongGame = error instanceof GameHostError && error.message === 'wrong-game';
       const unauthorized =

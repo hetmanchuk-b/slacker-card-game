@@ -14,6 +14,10 @@ Rollback is a new administrative operation, not a replay of old randomness. It r
 
 New branch commands must carry the new branch ID. Old callbacks are invalidated by the runtime generation and head guards. Connection notifications are live facts, not old gameplay commands. The original game creation may also be a target (empty pre-game state), without losing the stored owner binding or releasing the administrative command ID. A rollback targeting an earlier synthetic clock rebase uses that event's captured time, avoiding consumption of the abandoned timeline twice.
 
+## Authoritative claim evidence — Stage 8.11
+
+The approved `runtime.dispatchClaim` resolver receives detached active history and branch ancestry at a serialized committed point, with resolution/execution in the same job. `PostgresGameHost.submitClaim` supplies immutable lobby-scoped chat evidence. Action references resolve only from the active inherited timeline, using initiating actors and original scope (successful lead starts its new round; final action retains its old round). Chat uses stored author/scope/game and validates its original head against every nested ancestry cutoff. Inherited-prefix chat survives rollback; retained abandoned futures are not claim evidence. No arbitrary staging reads, client scopes, archive disclosure or new history/persistence contract is introduced. Exact accepted retries settle before re-resolution. Owner-history selectors and rollback transport remain deferred; see `transport.md`.
+
 ## Owner-history projection — Stage 8.3
 
 `src/projections/history.ts` provides `projectOwnerHistory(capture, viewer)` under approved D003. It accepts a narrow trusted committed capture compatible with `MemoryHistory.snapshot().value`, retaining the original owner and irreversible closure independently of rollbackable state. A bound non-owner or public viewer is denied with a fixed error; an uncreated game with no original owner has no game-history authorization. The projector never reads snapshots/card catalogs or calls live/action observation APIs.

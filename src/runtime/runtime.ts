@@ -1,10 +1,22 @@
 import { decide } from '../game/engine.ts';
 import { isDeepStrictEqual } from 'node:util';
 import { id } from '../game/ids.ts';
-import type { ActionBatch, BranchHead, GameCommand, RejectionCode } from '../game/contracts.ts';
+import type {
+  ActionBatch,
+  BranchHead,
+  GameCommand,
+  RejectionCode,
+  SubmitClaim,
+} from '../game/contracts.ts';
 import type { BranchId, CommandId, ProcedureId, SeatId } from '../game/ids.ts';
 import type { GameState, Timer, Vote } from '../game/model.ts';
-import type { ForkResult, History, RollbackAudit } from '../persistence/history.ts';
+import type {
+  BranchInfo,
+  ForkResult,
+  History,
+  HistorySnapshot,
+  RollbackAudit,
+} from '../persistence/history.ts';
 import type { CancelTask, Clock } from './clock.ts';
 
 export type RuntimeOptions = Readonly<{
@@ -73,6 +85,31 @@ export type RuntimeResult =
         | 'not-absent';
       head: BranchHead;
     }>;
+
+/** Unresolved server-bound claim, never a browser identity or scope. */
+export type ClaimRequest = Omit<SubmitClaim, 'scope' | 'scopeNumber'>;
+export type ClaimCapture = Readonly<{
+  snapshot: RuntimeSnapshot;
+  history: HistorySnapshot;
+  branches: readonly BranchInfo[];
+}>;
+export type ClaimResolver = (
+  capture: ClaimCapture,
+) => Promise<
+  | Readonly<{ type: 'resolved'; scope: SubmitClaim['scope']; scopeNumber: number }>
+  | Readonly<{ type: 'rejected'; code: 'invalid-claim' | 'scope-closed' }>
+>;
+
+function claimIdentity(command: ClaimRequest): ClaimRequest {
+  return {
+    type: command.type,
+    id: command.id,
+    actorId: command.actorId,
+    accusedId: command.accusedId,
+    reason: command.reason,
+    incident: command.incident,
+  };
+}
 
 export type ConnectionCommand =
   | Readonly<{ type: 'disconnect'; id: CommandId; seatId: SeatId }>
@@ -407,10 +444,30 @@ export class GameRuntime {
   }
 
   dispatch(command: RuntimeCommand, options: DispatchOptions = {}): Promise<RuntimeResult> {
+    return this.#dispatch(command, options);
+  }
+
+  /** Resolve trusted evidence inside the action queue, after authorization and
+   * accepted-retry lookup. Resolver failures are technical, never runtime faults.
+   * Resolver must be bounded and must not re-enter runtime/host queues.
+   */
+  dispatchClaim(
+    request: ClaimRequest,
+    resolve: ClaimResolver,
+    options: DispatchOptions = {},
+  ): Promise<RuntimeResult> {
+    return this.#dispatch(claimIdentity(request), options, resolve);
+  }
+
+  #dispatch(
+    command: RuntimeCommand | ClaimRequest,
+    options: DispatchOptions,
+    resolve?: ClaimResolver,
+  ): Promise<RuntimeResult> {
     const input = structuredClone(command);
     const origin = { ...options };
     return this.#enqueue(
-      () => {
+      async () => {
         const snapshot = this.#view();
         const reject = (
           code: Extract<RuntimeResult, { type: 'rejected' }>['code'],
@@ -436,7 +493,12 @@ export class GameRuntime {
         )
           return reject('wrong-branch');
         if (cached)
-          return isDeepStrictEqual(cached.command, input) && cached.controller === controller
+          return isDeepStrictEqual(
+            resolve && cached.command.type === 'submit-claim'
+              ? claimIdentity(cached.command)
+              : cached.command,
+            input,
+          ) && cached.controller === controller
             ? { ...structuredClone(cached.result), duplicate: true }
             : reject('command-id-reused');
         if (
@@ -445,16 +507,20 @@ export class GameRuntime {
         )
           return reject('command-id-reused');
         let result: RuntimeResult;
+        let receiptCommand: RuntimeCommand;
         if (input.type === 'rollback') {
+          receiptCommand = input;
           if (controller !== 'human') return reject('wrong-controller');
           const presence = this.#connections.find((item) => item.seatId === input.actorId);
           if (!presence?.connected) return reject('not-connected');
           if (presence.controller !== 'human') return reject('wrong-controller');
           result = this.#rollback(input);
         } else if (input.type === 'propose-bot' || input.type === 'replacement-vote') {
+          receiptCommand = input;
           if (controller !== 'human') return reject('wrong-controller');
           result = this.#replacementCommand(input);
         } else if (input.type === 'disconnect' || input.type === 'reconnect') {
+          receiptCommand = input;
           result = this.#connection(input);
         } else {
           if (
@@ -470,14 +536,34 @@ export class GameRuntime {
             if (presence.controller !== controller) return reject('wrong-controller');
             if (controller === 'human' && !presence.connected) return reject('not-connected');
           }
-          result = this.#commit(input, this.#options.clock.now());
+          let canonical: GameCommand;
+          if (input.type === 'submit-claim' && !('scope' in input)) {
+            if (!resolve) throw new RuntimeAdmissionError('unavailable');
+            let resolution: Awaited<ReturnType<ClaimResolver>>;
+            try {
+              resolution = await resolve({
+                snapshot: this.read(),
+                history: this.#options.history.read(),
+                branches: this.#options.history.branches(),
+              });
+            } catch {
+              throw new RuntimeAdmissionError('unavailable');
+            }
+            if (resolution.type === 'rejected') return reject(resolution.code);
+            canonical = { ...input, scope: resolution.scope, scopeNumber: resolution.scopeNumber };
+          } else canonical = input;
+          receiptCommand = canonical;
+          result = this.#commit(canonical, this.#options.clock.now());
           this.#ensureRoster();
           this.#reconcile();
         }
         this.#reschedule();
         if (result.type === 'accepted') {
           result = { ...result, head: this.#view().head };
-          this.#receipts.set(input.id, structuredClone({ command: input, controller, result }));
+          this.#receipts.set(
+            input.id,
+            structuredClone({ command: receiptCommand, controller, result }),
+          );
         }
         return structuredClone(result);
       },
@@ -835,7 +921,7 @@ export class GameRuntime {
         }
         return value;
       } catch (error) {
-        if (faultOnFailure) {
+        if (faultOnFailure && !(error instanceof RuntimeAdmissionError)) {
           this.#fault = error;
           this.#cancelTasks();
         }

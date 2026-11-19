@@ -9,6 +9,7 @@ import { io } from 'socket.io-client';
 import type { Socket } from 'socket.io-client';
 import { id } from '../game/ids.ts';
 import { migrate, PostgresSession } from '../persistence/postgres.ts';
+import { PostgresLobby } from '../persistence/lobby.ts';
 import { PostgresGameHost } from './game-host.ts';
 import { GuestAccessError, PostgresGuestAccess } from './guest-access.ts';
 import { FakeClock } from '../runtime/testing/fake-clock.ts';
@@ -320,6 +321,213 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
         .every((socket) => (latestState.get(socket)?.view.head.version ?? -1) >= head.version),
     );
   }
+
+  await t.test(
+    'closed chat/action scopes cannot be relabeled; claim receipts survive scope advance and durable recovery',
+    async (t) => {
+      const context = await fixture(t);
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      const lobbyId = context.members[0]!.lobbyId;
+      for (const socket of sockets) await message(socket, resync(lobbyId));
+      await ready(context);
+      const read = async () => (await context.host.read(lobbyId))!.snapshot;
+      const requestId = randomUUID();
+      const intent = {
+        type: 'submit-claim',
+        accusedId: context.members[1]!.seatId,
+        reason: 'Exact claim',
+        evidence: { type: 'spoken', key: 'durable-episode' },
+      };
+      const first = accepted(await play(context, sockets[0]!, intent, requestId));
+      await context.clock.advanceBy(10000);
+      const state = (await read()).state!;
+      if (state.phase.type !== 'between-rounds') assert.fail();
+      const leader = context.members.findIndex(
+        (member) => state.phase.type === 'between-rounds' && member.seatId === state.phase.leaderId,
+      );
+      accepted(
+        await play(context, sockets[leader]!, {
+          type: 'play-card',
+          cardId: state.players[leader]!.hand[0]!,
+        }),
+      );
+      const lobby = await PostgresLobby.open(pool, lobbyId);
+      const chatId = id('message', randomUUID());
+      await context.host.withCurrent(lobbyId, context.start.gameId, (runtime) =>
+        lobby.postChat(
+          {
+            id: chatId,
+            authorSessionId: context.members[leader]!.sessionId,
+            authorSeatId: context.members[leader]!.seatId,
+            text: 'Round one evidence',
+          },
+          context.now(),
+          runtime,
+        ),
+      );
+      const round = (await read()).state!.phase;
+      if (round.type !== 'round') assert.fail();
+      const next = context.members.findIndex((member) => member.seatId === round.turnSeatId);
+      const takeId = randomUUID();
+      accepted(await play(context, sockets[next]!, { type: 'take-bottom' }, takeId));
+      for (const [evidence, accusedId] of [
+        [{ type: 'chat', messageId: chatId }, context.members[leader]!.seatId],
+        [{ type: 'action', commandId: takeId }, context.members[next]!.seatId],
+      ] as const) {
+        const denied = await play(context, sockets[0]!, { ...intent, evidence, accusedId });
+        if (denied.type !== 'command-ack' || denied.result.type !== 'rejected') assert.fail();
+        assert.equal(denied.result.code, 'scope-closed');
+      }
+      assert.ok(await context.host.recover(lobbyId));
+      await message(sockets[0]!, resync(lobbyId));
+      const retry = accepted(await play(context, sockets[0]!, intent, requestId));
+      assert.deepEqual(retry.result, { ...first.result, duplicate: true });
+      for (const [socket, changed] of [
+        [sockets[0]!, { ...intent, evidence: { type: 'spoken', key: 'changed' } }],
+        [sockets[1]!, intent],
+      ] as const) {
+        const denied = await play(context, socket, changed, requestId);
+        if (denied.type !== 'command-ack' || denied.result.type !== 'rejected') assert.fail();
+        assert.equal(denied.result.code, 'command-id-reused');
+      }
+      assert.equal((await read()).state!.claims.length, 1);
+    },
+  );
+
+  await t.test(
+    'chat/action evidence binds immutable authors and inherited prefixes, never abandoned futures',
+    async (t) => {
+      const context = await fixture(t, 4);
+      const sockets = await Promise.all(
+        context.grants.map((_grant, index) => context.connect(index)),
+      );
+      const lobbyId = context.members[0]!.lobbyId;
+      for (const socket of sockets) await message(socket, resync(lobbyId));
+      const lobby = await PostgresLobby.open(pool, lobbyId);
+      const chatId = id('message', randomUUID());
+      await context.host.withCurrent(lobbyId, context.start.gameId, (runtime) =>
+        lobby.postChat(
+          {
+            id: chatId,
+            authorSessionId: context.members[2]!.sessionId,
+            authorSeatId: context.members[2]!.seatId,
+            text: 'Original evidence',
+          },
+          context.now(),
+          runtime,
+        ),
+      );
+      const drawId = randomUUID();
+      accepted(await play(context, sockets[3]!, { type: 'draw-card' }, drawId));
+      const futureId = id('message', randomUUID());
+      await context.host.withCurrent(lobbyId, context.start.gameId, (runtime) =>
+        lobby.postChat(
+          {
+            id: futureId,
+            authorSessionId: context.members[2]!.sessionId,
+            authorSeatId: context.members[2]!.seatId,
+            text: 'Abandoned context',
+          },
+          context.now(),
+          runtime,
+        ),
+      );
+      const claim = (
+        evidence: object,
+        accusedId = context.members[2]!.seatId,
+        branchId = context.start.branchId,
+      ) =>
+        play(context, sockets[0]!, {
+          type: 'submit-claim',
+          branchId,
+          accusedId,
+          reason: 'Evidence',
+          evidence,
+        });
+      for (const evidence of [
+        { type: 'chat', messageId: 'missing' },
+        { type: 'action', commandId: context.start.id },
+      ]) {
+        const result = await claim(evidence);
+        if (result.type !== 'command-ack' || result.result.type !== 'rejected') assert.fail();
+        assert.equal(result.result.code, 'invalid-claim');
+      }
+      const mismatch = await claim({ type: 'action', commandId: drawId });
+      if (mismatch.type !== 'command-ack' || mismatch.result.type !== 'rejected') assert.fail();
+      assert.equal(mismatch.result.code, 'invalid-claim');
+      accepted(await claim({ type: 'action', commandId: drawId }, context.members[3]!.seatId));
+      await context.clock.advanceBy(10000);
+      await context.host.withCurrent(lobbyId, context.start.gameId, (runtime) =>
+        runtime.dispatch({
+          type: 'rollback',
+          id: id('command', randomUUID()),
+          actorId: context.members[0]!.seatId,
+          expected: runtime.read().head,
+          beforeCommandId: id('command', drawId),
+          knowledgeWarningAcknowledged: true,
+        }),
+      );
+      const branchId = (await context.host.read(lobbyId))!.snapshot.head.branchId;
+      for (const evidence of [
+        { type: 'chat', messageId: futureId },
+        { type: 'action', commandId: drawId },
+      ]) {
+        const denied = await claim(evidence, context.members[2]!.seatId, branchId);
+        if (denied.type !== 'command-ack' || denied.result.type !== 'rejected') assert.fail();
+        assert.equal(denied.result.code, 'invalid-claim');
+      }
+      accepted(
+        await claim({ type: 'chat', messageId: chatId }, context.members[2]!.seatId, branchId),
+      );
+      const state = (await context.host.read(lobbyId))!.snapshot.state!;
+      assert.equal(state.claims.length, 1);
+      assert.equal(state.claims[0]!.claim.accusedId, context.members[2]!.seatId);
+      assert.deepEqual(state.claims[0]!.claim.incident, { type: 'chat', messageId: chatId });
+    },
+  );
+
+  for (const count of [2, 4, 8])
+    await t.test(
+      `${count} authenticated seats submit claims, vote and retry without a second episode`,
+      async (t) => {
+        const context = await fixture(t, count);
+        const sockets = await Promise.all(
+          context.grants.map((_grant, index) => context.connect(index)),
+        );
+        for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
+        const requestId = randomUUID();
+        const intent = {
+          type: 'submit-claim',
+          accusedId: context.members[1]!.seatId,
+          reason: 'Spoken episode',
+          evidence: { type: 'spoken', key: 'episode' },
+        };
+        const first = accepted(await play(context, sockets[0]!, intent, requestId));
+        const read = async () => (await context.host.read(context.members[0]!.lobbyId))!.snapshot;
+        const procedure = (await read()).state!.procedure;
+        if (procedure?.type !== 'claim-vote') assert.fail();
+        assert.equal(procedure.claim.claimantId, context.members[0]!.seatId);
+        assert.equal(procedure.claim.scope, 'dealing');
+        for (const seatId of procedure.eligibleSeatIds) {
+          const index = context.members.findIndex((member) => member.seatId === seatId);
+          accepted(
+            await play(context, sockets[index]!, {
+              type: 'cast-vote',
+              procedureId: procedure.timer.id,
+              vote: 'abstain',
+            }),
+          );
+        }
+        assert.equal((await read()).state!.claims[0]!.resolution, 'tied');
+        const retry = accepted(await play(context, sockets[0]!, intent, requestId));
+        assert.equal(retry.result.duplicate, true);
+        assert.deepEqual(retry.result.head, first.result.head);
+        const handled = await play(context, sockets[0]!, intent);
+        if (handled.type !== 'command-ack' || handled.result.type !== 'rejected') assert.fail();
+        assert.equal(handled.result.code, 'incident-already-handled');
+        assert.equal((await read()).state!.claims.length, 1);
+      },
+    );
 
   await t.test(
     'one committed job emits its exact adjacent action pairs before final state without refreshing idle credentials',
@@ -1028,109 +1236,118 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
     },
   );
 
-  for (const mode of ['disconnect', 'revoke', 'expire'] as const)
-    await t.test(
-      `${mode} while a gameplay command waits in the runtime queue cannot execute through retained seat presence`,
-      async (t) => {
-        const context = await fixture(t, 2, 60000);
-        const sockets = await Promise.all([context.connect(), context.connect(1)]);
-        for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
-        const initial = (await context.host.read(context.members[0]!.lobbyId))!.snapshot;
-        if (initial.state!.phase.type !== 'dealing') assert.fail();
-        const actor = context.members.findIndex(
-          (member) =>
-            initial.state!.phase.type === 'dealing' &&
-            member.seatId === initial.state!.phase.nextSeatId,
-        );
-        const keeper = await context.connect(actor);
-        await message(keeper, resync(context.members[0]!.lobbyId));
-        let release!: () => void;
-        let entered!: () => void;
-        const gate = new Promise<void>((resolve) => {
-          release = resolve;
-        });
-        const waiting = new Promise<void>((resolve) => {
-          entered = resolve;
-        });
-        let blocked!: Promise<void>;
-        await context.host.withCurrent(
-          context.members[0]!.lobbyId,
-          context.start.gameId,
-          async (runtime) => {
-            blocked = runtime.observe(async () => {
-              entered();
-              await gate;
-            });
-            await waiting;
-          },
-        );
-        const requestId = randomUUID();
-        const received: ServerMessage[] = [];
-        sockets[actor]!.on('server-message', (value: ServerMessage) => received.push(value));
-        context.setNow(context.now() + 1001);
-        const sentAt = context.now();
-        sockets[actor]!.emit('client-message', {
-          protocolVersion: 1,
-          requestId,
-          intent: {
-            type: 'draw-card',
-            gameId: context.start.gameId,
-            branchId: context.start.branchId,
-          },
-        });
-        await until(
-          async () =>
-            (await context.access.inspect(context.grants[actor]!.token, context.now()))!
-              .expiresAtMs >=
-            sentAt + GUEST_TTL_MS,
-        );
-        let revoking: ReturnType<typeof http> | null = null;
-        if (mode === 'revoke') {
-          const closed = once(sockets[actor]!, 'disconnect');
-          revoking = http(
-            context.base,
-            '/api/guest/session',
-            'DELETE',
-            `${GUEST_COOKIE_NAME}=${context.grants[actor]!.token}`,
+  for (const kind of ['draw', 'claim'] as const)
+    for (const mode of ['disconnect', 'revoke', 'expire'] as const)
+      await t.test(
+        `${mode} while a ${kind} command waits in the runtime queue cannot execute through retained seat presence`,
+        async (t) => {
+          const context = await fixture(t, 2, 60000);
+          const sockets = await Promise.all([context.connect(), context.connect(1)]);
+          for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
+          const initial = (await context.host.read(context.members[0]!.lobbyId))!.snapshot;
+          if (initial.state!.phase.type !== 'dealing') assert.fail();
+          const actor = context.members.findIndex(
+            (member) =>
+              initial.state!.phase.type === 'dealing' &&
+              member.seatId === initial.state!.phase.nextSeatId,
           );
-          await closed;
-        } else if (mode === 'expire') {
-          context.setNow(
-            (await context.access.inspect(context.grants[actor]!.token, context.now()))!
-              .expiresAtMs,
+          const keeper = await context.connect(actor);
+          await message(keeper, resync(context.members[0]!.lobbyId));
+          let release!: () => void;
+          let entered!: () => void;
+          const gate = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          const waiting = new Promise<void>((resolve) => {
+            entered = resolve;
+          });
+          let blocked!: Promise<void>;
+          await context.host.withCurrent(
+            context.members[0]!.lobbyId,
+            context.start.gameId,
+            async (runtime) => {
+              blocked = runtime.observe(async () => {
+                entered();
+                await gate;
+              });
+              await waiting;
+            },
           );
-          await context.transport.checkCredentials();
-        } else {
-          sockets[actor]!.disconnect();
-          await http(
-            context.base,
-            '/api/guest/session/refresh',
-            'POST',
-            `${GUEST_COOKIE_NAME}=${context.grants[actor]!.token}`,
+          const requestId = randomUUID();
+          const received: ServerMessage[] = [];
+          sockets[actor]!.on('server-message', (value: ServerMessage) => received.push(value));
+          context.setNow(context.now() + 1001);
+          const sentAt = context.now();
+          sockets[actor]!.emit('client-message', {
+            protocolVersion: 1,
+            requestId,
+            intent: {
+              ...(kind === 'draw'
+                ? { type: 'draw-card' }
+                : {
+                    type: 'submit-claim',
+                    accusedId: context.members[(actor + 1) % 2]!.seatId,
+                    reason: 'Queued claim',
+                    evidence: { type: 'spoken', key: 'queued' },
+                  }),
+              gameId: context.start.gameId,
+              branchId: context.start.branchId,
+            },
+          });
+          await until(
+            async () =>
+              (await context.access.inspect(context.grants[actor]!.token, context.now()))!
+                .expiresAtMs >=
+              sentAt + GUEST_TTL_MS,
           );
-        }
-        release();
-        await blocked;
-        if (revoking) assert.equal((await revoking).status, 204);
-        await context.host.withCurrent(
-          context.members[0]!.lobbyId,
-          context.start.gameId,
-          async (runtime) => {
-            const checkpoint = await runtime.checkpoint();
-            assert.equal(
-              checkpoint.receipts.some((receipt) => receipt.command.id === requestId),
-              false,
+          let revoking: ReturnType<typeof http> | null = null;
+          if (mode === 'revoke') {
+            const closed = once(sockets[actor]!, 'disconnect');
+            revoking = http(
+              context.base,
+              '/api/guest/session',
+              'DELETE',
+              `${GUEST_COOKIE_NAME}=${context.grants[actor]!.token}`,
             );
-            assert.equal(runtime.read().state!.deck.length, 36);
-          },
-        );
-        assert.equal(
-          received.some((reply) => reply.type === 'command-ack'),
-          false,
-        );
-        if (mode === 'disconnect') accepted(await play(context, keeper, { type: 'draw-card' }));
-      },
-    );
+            await closed;
+          } else if (mode === 'expire') {
+            context.setNow(
+              (await context.access.inspect(context.grants[actor]!.token, context.now()))!
+                .expiresAtMs,
+            );
+            await context.transport.checkCredentials();
+          } else {
+            sockets[actor]!.disconnect();
+            await http(
+              context.base,
+              '/api/guest/session/refresh',
+              'POST',
+              `${GUEST_COOKIE_NAME}=${context.grants[actor]!.token}`,
+            );
+          }
+          release();
+          await blocked;
+          if (revoking) assert.equal((await revoking).status, 204);
+          await context.host.withCurrent(
+            context.members[0]!.lobbyId,
+            context.start.gameId,
+            async (runtime) => {
+              const checkpoint = await runtime.checkpoint();
+              assert.equal(
+                checkpoint.receipts.some((receipt) => receipt.command.id === requestId),
+                false,
+              );
+              assert.equal(runtime.read().state!.deck.length, 36);
+              assert.equal(runtime.read().state!.claims.length, 0);
+            },
+          );
+          assert.equal(
+            received.some((reply) => reply.type === 'command-ack'),
+            false,
+          );
+          if (mode === 'disconnect') accepted(await play(context, keeper, { type: 'draw-card' }));
+        },
+      );
 
   for (const controller of ['absent-human', 'bot'] as const)
     await t.test(
@@ -1319,75 +1536,56 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
     },
   );
 
-  await t.test(
-    'existing claim procedures accept exact vote/withdrawal replies without enabling claim submission',
-    async (t) => {
-      const context = await fixture(t);
-      const sockets = await Promise.all([context.connect(), context.connect(1)]);
-      for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
-      await context.host.withCurrent(context.members[0]!.lobbyId, context.start.gameId, (runtime) =>
-        runtime.dispatch({
-          type: 'submit-claim',
-          id: id('command', randomUUID()),
-          actorId: context.members[0]!.seatId,
-          accusedId: context.members[1]!.seatId,
-          reason: 'Trusted claim fixture',
-          incident: { type: 'spoken', key: 'trusted-episode' },
-          scope: 'dealing',
-          scopeNumber: 0,
-        }),
-      );
-      const claim = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!
-        .claims[0]!.claim;
-      accepted(await play(context, sockets[0]!, { type: 'request-withdrawal', claimId: claim.id }));
-      const withdrawal = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!
-        .procedure;
-      if (withdrawal?.type !== 'withdrawal') assert.fail();
-      accepted(
-        await play(context, sockets[1]!, {
-          type: 'withdrawal-response',
-          procedureId: withdrawal.timer.id,
-          approve: false,
-        }),
-      );
-      const vote = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!
-        .procedure;
-      if (vote?.type !== 'claim-vote') assert.fail();
-      const stale = await play(context, sockets[0]!, {
+  await t.test('externally submitted claims accept exact vote/withdrawal replies', async (t) => {
+    const context = await fixture(t);
+    const sockets = await Promise.all([context.connect(), context.connect(1)]);
+    for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
+    accepted(
+      await play(context, sockets[0]!, {
+        type: 'submit-claim',
+        accusedId: context.members[1]!.seatId,
+        reason: 'External claim',
+        evidence: { type: 'spoken', key: 'external-episode' },
+      }),
+    );
+    const claim = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!.claims[0]!
+      .claim;
+    accepted(await play(context, sockets[0]!, { type: 'request-withdrawal', claimId: claim.id }));
+    const withdrawal = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!
+      .procedure;
+    if (withdrawal?.type !== 'withdrawal') assert.fail();
+    accepted(
+      await play(context, sockets[1]!, {
+        type: 'withdrawal-response',
+        procedureId: withdrawal.timer.id,
+        approve: false,
+      }),
+    );
+    const vote = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!.procedure;
+    if (vote?.type !== 'claim-vote') assert.fail();
+    const stale = await play(context, sockets[0]!, {
+      type: 'cast-vote',
+      procedureId: 'old-ballot',
+      vote: 'yes',
+    });
+    if (stale.type !== 'command-ack' || stale.result.type !== 'rejected') assert.fail();
+    assert.equal(stale.result.code, 'stale-timer');
+    accepted(
+      await play(context, sockets[0]!, {
         type: 'cast-vote',
-        procedureId: 'old-ballot',
-        vote: 'yes',
-      });
-      if (stale.type !== 'command-ack' || stale.result.type !== 'rejected') assert.fail();
-      assert.equal(stale.result.code, 'stale-timer');
-      accepted(
-        await play(context, sockets[0]!, {
-          type: 'cast-vote',
-          procedureId: vote.timer.id,
-          vote: 'abstain',
-        }),
-      );
-      assert.equal(
-        (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!.claims[0]!
-          .resolution,
-        'tied',
-      );
-      const before = (await context.host.read(context.members[0]!.lobbyId))!.snapshot.head;
-      assert.deepEqual(
-        await play(context, sockets[0]!, {
-          type: 'submit-claim',
-          accusedId: context.members[1]!.seatId,
-          reason: 'Still deferred',
-          evidence: { type: 'spoken', key: 'new-episode' },
-        }),
-        { protocolVersion: 1, type: 'error', code: 'unavailable' },
-      );
-      assert.deepEqual(
-        (await context.host.read(context.members[0]!.lobbyId))!.snapshot.head,
-        before,
-      );
-    },
-  );
+        procedureId: vote.timer.id,
+        vote: 'abstain',
+      }),
+    );
+    assert.equal(
+      (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!.claims[0]!.resolution,
+      'tied',
+    );
+    assert.equal(
+      (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!.claims.length,
+      1,
+    );
+  });
 
   await t.test(
     'authenticated bot-replacement controls bind the proposer, preserve suspension and hand back on reconnect',
@@ -2236,7 +2434,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
   );
 
   await t.test(
-    'deferred claims, malformed and oversized payloads never dispatch game actions',
+    'deferred admin, malformed and oversized payloads never dispatch game actions',
     async (t) => {
       const context = await fixture(t);
       const socket = await context.connect();
@@ -2246,12 +2444,8 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 180000 }
         protocolVersion: 1,
         requestId: randomUUID(),
         intent: {
-          type: 'submit-claim',
+          type: 'owner-history',
           gameId: context.start.gameId,
-          branchId: context.start.branchId,
-          accusedId: context.members[1]!.seatId,
-          reason: 'Deferred spoken claim',
-          evidence: { type: 'spoken', key: 'episode' },
         },
       };
       assert.deepEqual(await message(socket, payload), {

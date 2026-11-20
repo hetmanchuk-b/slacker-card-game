@@ -144,6 +144,8 @@ type Props = Readonly<{
 export function ClaimsView(props: Props) {
   const { connection, client, seatId, busy } = props;
   const ballot = connection.view?.ballot;
+  const withdrawal = connection.view?.withdrawal;
+  const withdrawalRemaining = useRemainingTime(withdrawal?.timer ?? null);
   const remaining = useRemainingTime(ballot?.timer ?? null);
   const disabled =
     busy ||
@@ -171,6 +173,63 @@ export function ClaimsView(props: Props) {
       <p role="status" data-testid="vote-result">
         {feedback('Vote', connection.voteStatus)}
       </p>
+      <p role="status" data-testid="withdrawal-result">
+        {feedback('Withdrawal command', connection.withdrawalStatus)}
+      </p>
+      {withdrawal ? (
+        <div data-testid="withdrawal-procedure">
+          <h4>Withdrawal consent</h4>
+          <p>
+            Claim {withdrawal.claim.id}: {withdrawal.claim.claimantId} requests withdrawal.
+          </p>
+          <RemainingTime remainingMs={withdrawalRemaining} paused={withdrawal.timer.paused} />
+          <p role="status">
+            {withdrawal.ownApproval === null
+              ? 'No confirmed approval from you.'
+              : `Your confirmed approval: ${withdrawal.ownApproval ? 'yes' : 'no'}.`}
+          </p>
+          {withdrawal.eligibleSeatIds.includes(seatId) && withdrawal.ownApproval === null ? (
+            <fieldset
+              disabled={
+                busy ||
+                connection.status !== 'observing' ||
+                !!connection.view?.paused ||
+                withdrawal.timer.paused ||
+                withdrawalRemaining <= 0
+              }
+            >
+              <legend>Your withdrawal response</legend>
+              {([true, false] as const).map((approve) => (
+                <button
+                  type="button"
+                  key={String(approve)}
+                  onClick={() =>
+                    client.answerWithdrawal(
+                      withdrawal.timer.id,
+                      approve,
+                      connection.view!.head.gameId,
+                      connection.view!.head.branchId,
+                    )
+                  }
+                >
+                  {approve ? 'Approve withdrawal' : 'Refuse withdrawal'}
+                </button>
+              ))}
+            </fieldset>
+          ) : (
+            <p>
+              {withdrawal.ownApproval === null
+                ? 'The claimant does not answer their own request.'
+                : 'Your response is recorded.'}
+            </p>
+          )}
+          <p>
+            All other active seats, including the accused, must approve. Silence is not consent.
+            Denial or timeout restores the original ballot and its remaining time. Local zero does
+            not decide withdrawal.
+          </p>
+        </div>
+      ) : null}
       {ballot ? (
         <div data-testid="claim-ballot">
           <p>
@@ -180,6 +239,22 @@ export function ClaimsView(props: Props) {
           <p>
             Server scope: {ballot.claim.scope} {ballot.claim.scopeNumber}
           </p>
+          {withdrawal ? <p>Suspended original ballot (separate timer and answer).</p> : null}
+          {!withdrawal && ballot.claim.claimantId === seatId ? (
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() =>
+                client.requestWithdrawal(
+                  ballot.claim.id,
+                  connection.view!.head.gameId,
+                  connection.view!.head.branchId,
+                )
+              }
+            >
+              Request withdrawal
+            </button>
+          ) : null}
           <RemainingTime remainingMs={remaining} paused={ballot.timer.paused} />
           <p role="status">
             {ballot.ownVote

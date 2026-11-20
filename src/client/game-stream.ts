@@ -29,6 +29,12 @@ export type Ballot = Readonly<{
   ownVote: Vote | null;
   timer: DisplayTimer;
 }>;
+export type Withdrawal = Readonly<{
+  claim: Ballot['claim'];
+  eligibleSeatIds: readonly string[];
+  ownApproval: boolean | null;
+  timer: DisplayTimer;
+}>;
 export type Transfer = Readonly<{ fromSeatId: string; toSeatId: string; card: Card }>;
 export type PlayObservation =
   | Readonly<{ type: 'card-played'; seatId: string; card: Card }>
@@ -49,6 +55,7 @@ export const remainingTime = (timer: DisplayTimer, now: number): number =>
 export type GameSnapshot = Readonly<{
   penalty: Penalty | null;
   ballot: Ballot | null;
+  withdrawal: Withdrawal | null;
   hasProcedure: boolean;
   initialRecipientNotice: boolean;
   reveal: Reveal | null;
@@ -362,6 +369,7 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
   }
   let penalty: Penalty | null = null;
   let ballot: Ballot | null = null;
+  let withdrawal: Withdrawal | null = null;
   if (raw.procedure !== null) {
     const p = raw.procedure;
     if (
@@ -381,7 +389,8 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
         !exact(p.timer, ['id', 'remainingMs', 'paused']) ||
         !text(p.timer.id) ||
         !count(p.timer.remainingMs, 10000) ||
-        typeof p.timer.paused !== 'boolean'
+        typeof p.timer.paused !== 'boolean' ||
+        (raw.control.paused && !p.timer.paused)
       )
         return null;
       if (!object(p.claim)) return null;
@@ -416,6 +425,17 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
           (typeof p.ownApproval !== 'boolean' || !p.eligibleSeatIds.includes(seatId)))
       )
         return null;
+      withdrawal = {
+        claim: validatedClaim.claim,
+        eligibleSeatIds: p.eligibleSeatIds as string[],
+        ownApproval: p.ownApproval as boolean | null,
+        timer: {
+          id: p.timer.id,
+          remainingMs: p.timer.remainingMs,
+          paused: p.timer.paused,
+          expiresAt: null,
+        },
+      };
       if (p.suspendedVote !== null) {
         ballot = parseBallot(p.suspendedVote, state.players, seatId, true);
         if (!ballot || JSON.stringify(ballot.claim) !== JSON.stringify(validatedClaim.claim))
@@ -490,6 +510,7 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
   return {
     penalty,
     ballot,
+    withdrawal,
     hasProcedure: raw.procedure !== null,
     initialRecipientNotice,
     reveal,
@@ -516,6 +537,7 @@ export class GameStream {
   }
   reset = false;
   actionIds: readonly string[] = [];
+  #withdrawalTimer: { key: string; timer: DisplayTimer } | null = null;
   #ballotTimer: { key: string; timer: DisplayTimer } | null = null;
   #penaltyTimer: { key: string; timer: DisplayTimer } | null = null;
   #route: string | null = null;
@@ -536,6 +558,7 @@ export class GameStream {
       this.dismissPeek();
       this.#penaltyTimer = null;
       this.#ballotTimer = null;
+      this.#withdrawalTimer = null;
       this.actionIds = [];
       this.#revealKey = null;
       this.reset = true;
@@ -572,6 +595,7 @@ export class GameStream {
       this.transfers = [];
       this.#penaltyTimer = null;
       this.#ballotTimer = null;
+      this.#withdrawalTimer = null;
       this.actionIds = [];
       this.reset = true;
       this.#revealKey = null;
@@ -706,6 +730,7 @@ export class GameStream {
         this.transfers = [];
         this.#penaltyTimer = null;
         this.#ballotTimer = null;
+        this.#withdrawalTimer = null;
         this.actionIds = [];
         this.draw = null;
         this.reset = true;
@@ -745,6 +770,21 @@ export class GameStream {
       )
     )
       return 'invalid';
+    if (next.withdrawal) {
+      const b = next.withdrawal;
+      const key = JSON.stringify([next.head.gameId, next.head.branchId, b.timer.id]);
+      const prior = this.#withdrawalTimer;
+      const timer = {
+        ...b.timer,
+        expiresAt: b.timer.paused
+          ? null
+          : prior?.key === key && !prior.timer.paused
+            ? Math.min(prior.timer.expiresAt!, this.#now() + b.timer.remainingMs)
+            : this.#now() + b.timer.remainingMs,
+      };
+      this.#withdrawalTimer = { key, timer };
+      next = { ...next, withdrawal: { ...b, timer } };
+    } else this.#withdrawalTimer = null;
     if (next.ballot) {
       const b = next.ballot;
       const key = JSON.stringify([next.head.gameId, next.head.branchId, b.timer.id]);

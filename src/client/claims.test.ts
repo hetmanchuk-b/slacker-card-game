@@ -72,7 +72,7 @@ test('ballot timer freezes and resumes without extending; foreign ballots fail c
 });
 
 import { GameConnection } from './game-connection.ts';
-function connection() {
+export function connection() {
   const listeners = new Map<string, (...args: unknown[]) => void>();
   const sent: object[] = [];
   const socket = {

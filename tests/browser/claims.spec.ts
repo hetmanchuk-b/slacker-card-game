@@ -15,7 +15,38 @@ for (const count of [2, 4, 8])
     origin,
     wall,
   }) => {
-    const { pages, contexts } = await setup(browser, origin, wall, count);
+    let acceptedVersion = 0;
+    const voteRequests = new Set<string>();
+    const acceptedVotes = new Set<string>();
+    const { pages, contexts } = await setup(
+      browser,
+      origin,
+      wall,
+      count,
+      async (page) => {
+        page.on('websocket', (socket) => {
+          socket.on('framesent', ({ payload }) => {
+            if (typeof payload !== 'string' || !payload.startsWith('42')) return;
+            const [event, message] = JSON.parse(payload.slice(payload.indexOf('[')));
+            if (event === 'client-message' && message.intent.type === 'cast-vote')
+              voteRequests.add(message.requestId);
+          });
+          socket.on('framereceived', ({ payload }) => {
+            if (typeof payload !== 'string' || !payload.startsWith('42')) return;
+            const [event, message] = JSON.parse(payload.slice(payload.indexOf('[')));
+            if (
+              event === 'server-message' &&
+              message.type === 'command-ack' &&
+              message.result.type === 'accepted'
+            ) {
+              acceptedVersion = Math.max(acceptedVersion, message.result.head.version);
+              if (voteRequests.has(message.requestId)) acceptedVotes.add(message.requestId);
+            }
+          });
+        });
+      },
+      true,
+    );
     try {
       const accused = await pages[1]!.getByTestId('seat-id').innerText();
       await claim(pages[0]!, accused, '  Exact manually entered Episode  ');
@@ -54,6 +85,18 @@ for (const count of [2, 4, 8])
           .map((page) => page.getByRole('button', { name: 'Vote no', exact: true }).click()),
       );
       for (const page of pages) await expect(page.getByTestId('claim-ballot')).toHaveCount(0);
+      // UI feedback may correctly clear when the procedure changes before its
+      // final acknowledgment. Observe exact wire receipts instead of stale text.
+      await expect.poll(() => acceptedVotes.size).toBe(2 * (count - 1));
+      // A procedure disappears during the action/state gap. Wait for the final
+      // acknowledged head before editing the next version-keyed form.
+      await Promise.all(
+        pages.map((page) =>
+          expect
+            .poll(async () => Number(await page.getByTestId('game-version').innerText()))
+            .toBeGreaterThanOrEqual(acceptedVersion),
+        ),
+      );
       // Re-entering the same manual key is deliberate, but the server deduplicates it.
       await claim(pages[0]!, accused, 'Next manual episode');
       await expect(pages[0]!.getByTestId('claim-result')).toContainText('technically rejected');
@@ -89,6 +132,10 @@ test('real chat and fresh action evidence use visible exact IDs, not text or car
     const actor = await initialRecipient(pages);
     await pages[actor]!.getByRole('button', { name: 'Draw card', exact: true }).click();
     const claimant = pages[1 - actor]!;
+    // The fresh action may precede its state: wait before editing a form whose
+    // draft deliberately resets when the authoritative head changes.
+    await expect(pages[actor]!.getByTestId('draw-result')).toHaveText('Draw accepted.');
+    await expect(claimant.getByTestId('deck-count')).toHaveText('35');
     const actorId = await pages[actor]!.getByTestId('seat-id').innerText();
     await claimant.getByLabel('Accused seat (required)').selectOption(actorId);
     await claimant.getByLabel('Reason (required)').fill('Action allegation');

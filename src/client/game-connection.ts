@@ -38,6 +38,7 @@ export type ConnectionState = Readonly<{
     | 'failed';
   actionIds: readonly string[];
   claimStatus: 'none' | 'pending' | 'accepted' | 'rejected' | 'uncertain';
+  withdrawalStatus: 'none' | 'pending' | 'accepted' | 'rejected' | 'uncertain';
   voteStatus: 'none' | 'pending' | 'accepted' | 'rejected' | 'uncertain';
   chat: LobbyChat['current'];
   view: GameSnapshot | null;
@@ -86,9 +87,12 @@ export class GameConnection {
     | 'move'
     | 'chat'
     | 'claim'
+    | 'withdrawal'
     | 'vote'
     | null = null;
   readonly #chat: LobbyChat;
+  #pendingWithdrawalTarget: string | null = null;
+  #observedWithdrawalTarget: string | null = null;
   #pendingVoteId: string | null = null;
   #observedVoteId: string | null = null;
   #commandRequest: string | null = null;
@@ -104,6 +108,7 @@ export class GameConnection {
   current: ConnectionState = {
     actionIds: [],
     claimStatus: 'none',
+    withdrawalStatus: 'none',
     voteStatus: 'none',
     status: 'disconnected',
     chat: { page: [], lastPost: null, cursor: '0', empty: false, retry: false, status: 'idle' },
@@ -212,9 +217,15 @@ export class GameConnection {
     const penaltyUncertain = this.#pending === 'penalty';
     const moveUncertain = this.#pending === 'move';
     const claimUncertain = this.#pending === 'claim';
+    const withdrawalUncertain = this.#pending === 'withdrawal';
     const voteUncertain = this.#pending === 'vote';
     const uncertain =
-      drawUncertain || penaltyUncertain || moveUncertain || claimUncertain || voteUncertain;
+      drawUncertain ||
+      penaltyUncertain ||
+      moveUncertain ||
+      claimUncertain ||
+      withdrawalUncertain ||
+      voteUncertain;
     this.#finish();
     this.#drop();
     this.#publish({
@@ -225,6 +236,7 @@ export class GameConnection {
       transfers: [],
       selectedCardId: null,
       ...(claimUncertain ? { claimStatus: 'uncertain' } : {}),
+      ...(withdrawalUncertain ? { withdrawalStatus: 'uncertain' } : {}),
       ...(voteUncertain ? { voteStatus: 'uncertain' } : {}),
       ...(drawUncertain ? { drawStatus: 'uncertain' } : {}),
       ...(penaltyUncertain ? { penaltyStatus: 'uncertain' } : {}),
@@ -411,6 +423,61 @@ export class GameConnection {
         reason,
         evidence: safeEvidence,
       },
+    });
+  }
+  requestWithdrawal(claimId: string, gameId: string, branchId: string) {
+    const view = this.current.view;
+    if (
+      !view?.ballot ||
+      view.withdrawal ||
+      view.ballot.claim.id !== claimId ||
+      view.ballot.claim.claimantId !== this.#deps.seatId ||
+      view.ballot.timer.paused ||
+      remainingTime(view.ballot.timer, this.#deps.now?.() ?? performance.now()) <= 0
+    )
+      return;
+    this.#withdrawalCommand({ type: 'request-withdrawal', claimId }, claimId, gameId, branchId);
+  }
+  answerWithdrawal(procedureId: string, approve: boolean, gameId: string, branchId: string) {
+    const w = this.current.view?.withdrawal;
+    if (
+      !w ||
+      w.timer.id !== procedureId ||
+      w.timer.paused ||
+      typeof approve !== 'boolean' ||
+      remainingTime(w.timer, this.#deps.now?.() ?? performance.now()) <= 0 ||
+      w.ownApproval !== null ||
+      !w.eligibleSeatIds.includes(this.#deps.seatId)
+    )
+      return;
+    this.#withdrawalCommand(
+      { type: 'withdrawal-response', procedureId, approve },
+      procedureId,
+      gameId,
+      branchId,
+    );
+  }
+  #withdrawalCommand(intent: object, target: string, gameId: string, branchId: string) {
+    const view = this.current.view;
+    if (
+      this.#pending ||
+      !this.#socket?.connected ||
+      this.current.status !== 'observing' ||
+      !view ||
+      view.paused ||
+      view.head.gameId !== gameId ||
+      view.head.branchId !== branchId
+    )
+      return;
+    this.#commandRequest = this.#deps.requestId();
+    this.#pendingWithdrawalTarget = target;
+    this.#pending = 'withdrawal';
+    this.#deadline();
+    this.#publish({ withdrawalStatus: 'pending' });
+    this.#socket.send({
+      protocolVersion: 1,
+      requestId: this.#commandRequest,
+      intent: { ...intent, gameId, branchId },
     });
   }
   castVote(procedureId: string, vote: Vote, gameId: string, branchId: string) {
@@ -639,7 +706,8 @@ export class GameConnection {
           this.#pending !== 'penalty' &&
           this.#pending !== 'move' &&
           this.#pending !== 'claim' &&
-          this.#pending !== 'vote') ||
+          this.#pending !== 'vote' &&
+          this.#pending !== 'withdrawal') ||
         message.requestId !== this.#commandRequest
       )
         return;
@@ -657,15 +725,17 @@ export class GameConnection {
       ) {
         this.#finish();
         this.#publish(
-          kind === 'claim'
-            ? { claimStatus: 'accepted' }
-            : kind === 'vote'
-              ? { voteStatus: 'accepted' }
-              : kind === 'penalty'
-                ? { penaltyStatus: 'accepted' }
-                : kind === 'move'
-                  ? { moveStatus: r.outcome === 'violation' ? 'violation' : 'played' }
-                  : { drawStatus: r.outcome === 'violation' ? 'violation' : 'played' },
+          kind === 'withdrawal'
+            ? { withdrawalStatus: 'accepted' }
+            : kind === 'claim'
+              ? { claimStatus: 'accepted' }
+              : kind === 'vote'
+                ? { voteStatus: 'accepted' }
+                : kind === 'penalty'
+                  ? { penaltyStatus: 'accepted' }
+                  : kind === 'move'
+                    ? { moveStatus: r.outcome === 'violation' ? 'violation' : 'played' }
+                    : { drawStatus: r.outcome === 'violation' ? 'violation' : 'played' },
         );
       } else if (
         exact(r, ['type', 'code', 'head']) &&
@@ -675,15 +745,17 @@ export class GameConnection {
       ) {
         this.#finish();
         this.#publish(
-          kind === 'claim'
-            ? { claimStatus: 'rejected' }
-            : kind === 'vote'
-              ? { voteStatus: 'rejected' }
-              : kind === 'penalty'
-                ? { penaltyStatus: 'rejected', selectedCardId: null }
-                : kind === 'move'
-                  ? { moveStatus: 'rejected' }
-                  : { drawStatus: 'rejected' },
+          kind === 'withdrawal'
+            ? { withdrawalStatus: 'rejected' }
+            : kind === 'claim'
+              ? { claimStatus: 'rejected' }
+              : kind === 'vote'
+                ? { voteStatus: 'rejected' }
+                : kind === 'penalty'
+                  ? { penaltyStatus: 'rejected', selectedCardId: null }
+                  : kind === 'move'
+                    ? { moveStatus: 'rejected' }
+                    : { drawStatus: 'rejected' },
         );
       } else this.#fail('invalid-message');
       return;
@@ -723,11 +795,13 @@ export class GameConnection {
         this.#pending === 'penalty' ||
         this.#pending === 'move' ||
         this.#pending === 'claim' ||
-        this.#pending === 'vote'
+        this.#pending === 'vote' ||
+        this.#pending === 'withdrawal'
       )
         this.#finish();
       this.#publish({
         claimStatus: 'none',
+        withdrawalStatus: 'none',
         voteStatus: 'none',
         drawStatus: 'none',
         draw: null,
@@ -739,6 +813,16 @@ export class GameConnection {
     }
     this.#armReveal();
     if (result === 'state') {
+      const target =
+        this.#stream.snapshot?.withdrawal?.timer.id ??
+        this.#stream.snapshot?.ballot?.claim.id ??
+        null;
+      if (target !== this.#observedWithdrawalTarget) {
+        this.#observedWithdrawalTarget = target;
+        if (this.#pending === 'withdrawal' && this.#pendingWithdrawalTarget !== target)
+          this.#finish();
+        this.#publish({ withdrawalStatus: 'none' });
+      }
       const voteId = this.#stream.snapshot?.ballot?.timer.id ?? null;
       if (voteId !== this.#observedVoteId) {
         this.#observedVoteId = voteId;

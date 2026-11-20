@@ -5,6 +5,7 @@ import { GameConnection } from './game-connection.ts';
 import { DealingView } from './DealingView.tsx';
 import { PenaltyView } from './PenaltyView.tsx';
 import { PlayView } from './PlayView.tsx';
+import { LobbyChatView } from './LobbyChat.tsx';
 import { useCardDrag } from './use-card-drag.ts';
 
 const notes = {
@@ -221,6 +222,7 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
         onTake={() => client.takeBottom()}
         onDismissPeek={() => client.dismissPeek()}
       />
+      <LobbyChatView client={client} connection={connection} busy={busy} />
       <PenaltyView
         connection={connection}
         seatId={membership.seatId}
@@ -229,7 +231,7 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
         onRespond={(id) => client.respondToPenalty(id)}
       />
       <p className="quiet">
-        Chat/claim and owner-history controls arrive in later increments. No permanent trump or
+        Claim and owner-history controls arrive in later increments. No permanent trump or
         next-recipient indicator is shown.
       </p>
     </section>

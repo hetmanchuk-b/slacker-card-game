@@ -72,7 +72,9 @@ The eighth engine/runtime increment completes Stage 7 for the trusted server/sto
 
 **Stage 9.8 drag equivalence implemented:** deck→own-hand/seat and hand→table gestures invoke the same draw/play methods as native buttons. Cancelled/stale gestures send nothing, competing contacts stay blocked until they end, and post-drag clicks cannot duplicate commands. Source-only touch handling preserves scrolling elsewhere; a temporary drop strip supports long/narrow pages without moving or revealing cards. Five Node and six Chromium cases include real draw/play integration plus explicitly labeled fixture-based reset/touch checks.
 
-**Not a complete online game yet:** chat/claim/replacement/history/result workflows, bot decisions and Three.js are still planned. A source-only HTTPS development launcher exists, not a production game-server CLI. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
+**Stage 9.9 retained chat implemented:** the approved shared connection supports lobby posting/paging even when game visibility is denied. Exact text, immutable message-ID retries and original author/context remain separate from current game state. History follows last-returned sequence, including gaps and byte-bounded short pages; posts never advance its cursor. Five new Node tests and four browser cases cover validation/privacy, lost replies, rollback retention and paging. Retry references are mounted-memory only; no live push or extra production socket is added.
+
+**Not a complete online game yet:** claim/replacement/history/result workflows, bot decisions and Three.js are still planned. A source-only HTTPS development launcher exists, not a production game-server CLI. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
 
 **New rules, not implemented yet:** revision 1.4 adds a post-game deck-strike minigame and makes remaining participants losers when repetition ends a match. These approved changes are tracked in Stage 11a; current result contracts still follow revision 1.3.
 

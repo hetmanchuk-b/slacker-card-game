@@ -621,6 +621,62 @@ test('uncertain moves clear face feedback and are not replayed; reset invalidate
   assert.notEqual(client.current.moveStatus, 'played');
   client.close();
 });
+test('lobby chat survives denied game visibility on the same socket and never installs post context as game state', () => {
+  const { client, sockets } = fixture();
+  client.connect();
+  const socket = sockets[0]!;
+  socket.deliver({ protocolVersion: 1, type: 'error', code: 'unauthorized' });
+  assert.equal(client.current.status, 'attached');
+  client.postChat('hello');
+  const post = socket.sent.at(-1) as { requestId: string; intent: { messageId: string } };
+  socket.deliver({
+    protocolVersion: 1,
+    type: 'rollback-notice',
+    delivery: { epoch: 'rollback', sequence: 1 },
+    notice: {},
+  });
+  socket.deliver({
+    protocolVersion: 1,
+    type: 'chat-page',
+    requestId: post.requestId,
+    messages: [
+      {
+        id: post.intent.messageId,
+        lobbyId: 'lobby',
+        authorSeatId: 'own',
+        text: 'hello',
+        sequence: '9',
+        atMs: 1000,
+        context: {
+          head: { gameId: 'abandoned', branchId: 'old', version: 99 },
+          scope: 'round',
+          scopeNumber: 2,
+        },
+      },
+    ],
+  });
+  assert.equal(client.current.view, null);
+  assert.equal(client.current.chat.lastPost?.context.head?.gameId, 'abandoned');
+  assert.equal(client.current.chat.cursor, '0');
+  client.close();
+});
+test('lost chat reply retains exact durable message identity across fenced reconnect without automatic replay', () => {
+  const { client, sockets, timeout } = fixture();
+  client.connect();
+  sockets[0]!.deliver({ protocolVersion: 1, type: 'error', code: 'unavailable' });
+  client.postChat('verbatim\r\n');
+  const first = sockets[0]!.sent.at(-1) as { intent: object };
+  timeout();
+  assert.equal(client.current.chat.retry, true);
+  client.connect();
+  sockets[1]!.deliver({ protocolVersion: 1, type: 'error', code: 'unavailable' });
+  assert.equal(sockets[1]!.sent.length, 1);
+  client.postChat('changed');
+  assert.equal(sockets[1]!.sent.length, 1);
+  client.retryChat();
+  assert.deepEqual((sockets[1]!.sent.at(-1) as { intent: object }).intent, first.intent);
+  client.close();
+});
 test('idle stream updates cannot release another UI operation guard; malformed receipts fail closed', () => {
   const { client, sockets, busy } = fixture();
   client.connect();

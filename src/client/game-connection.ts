@@ -5,6 +5,7 @@ const penaltyScope = (view: GameSnapshot | null) =>
     ? JSON.stringify([view.head.gameId, view.head.branchId, view.penalty.timer.id])
     : null;
 import { PUBLIC_REJECTIONS } from '../protocol/contracts.ts';
+import { LobbyChat } from './lobby-chat.ts';
 import { validLobbyLocator as text } from './lobby-membership.ts';
 export type GameSocket = {
   readonly connected: boolean;
@@ -29,6 +30,7 @@ export type ConnectionState = Readonly<{
     | 'observing'
     | 'uncertain'
     | 'failed';
+  chat: LobbyChat['current'];
   view: GameSnapshot | null;
   draw: Draw | null;
   drawStatus: 'none' | 'pending' | 'played' | 'violation' | 'rejected' | 'uncertain';
@@ -66,7 +68,8 @@ export class GameConnection {
   #socket: GameSocket | null = null;
   #generation = 0;
   #stream: GameStream;
-  #pending: 'connect' | 'resync' | 'start' | 'draw' | 'penalty' | 'move' | null = null;
+  #pending: 'connect' | 'resync' | 'start' | 'draw' | 'penalty' | 'move' | 'chat' | null = null;
+  readonly #chat: LobbyChat;
   #commandRequest: string | null = null;
   #pendingPenaltyScope: string | null = null;
   #selectionScope: string | null = null;
@@ -79,6 +82,7 @@ export class GameConnection {
   #storageBlocked = false;
   current: ConnectionState = {
     status: 'disconnected',
+    chat: { page: [], lastPost: null, cursor: '0', empty: false, retry: false, status: 'idle' },
     view: null,
     draw: null,
     drawStatus: 'none',
@@ -94,6 +98,7 @@ export class GameConnection {
   };
   constructor(dependencies: Dependencies) {
     this.#deps = dependencies;
+    this.#chat = new LobbyChat(dependencies.lobbyId, dependencies.seatId, dependencies.requestId);
     this.#key = `penky.first-start.v1.${dependencies.lobbyId}`;
     this.#stream = new GameStream(dependencies.seatId, dependencies.now);
     try {
@@ -128,6 +133,7 @@ export class GameConnection {
     this.current = {
       ...this.current,
       ...next,
+      chat: this.#chat.current,
       playObservations: this.#stream.playObservations,
       peek: this.#stream.peek,
     };
@@ -167,6 +173,7 @@ export class GameConnection {
     this.#pendingPenaltyScope = null;
   }
   #drop() {
+    if (this.#chat.pending) this.#chat.interrupt();
     this.#generation++;
     const socket = this.#socket;
     this.#socket = null;
@@ -298,6 +305,29 @@ export class GameConnection {
     this.#deadline();
     this.#publish({ status: 'starting', retry: true, note: 'none' });
     this.#socket.send(this.#start);
+  }
+  #chatAvailable() {
+    return (
+      !this.#pending &&
+      !!this.#socket?.connected &&
+      ['attached', 'observing'].includes(this.current.status)
+    );
+  }
+  #sendChat(message: object | null) {
+    if (!message) return;
+    this.#pending = 'chat';
+    this.#deadline();
+    this.#publish();
+    this.#socket!.send(message);
+  }
+  postChat(text: string) {
+    if (this.#chatAvailable()) this.#sendChat(this.#chat.post(text));
+  }
+  retryChat() {
+    if (this.#chatAvailable()) this.#sendChat(this.#chat.retry());
+  }
+  readChat(first = false) {
+    if (this.#chatAvailable()) this.#sendChat(this.#chat.read(first));
   }
   drawCard() {
     const view = this.current.view;
@@ -448,11 +478,19 @@ export class GameConnection {
       return;
     }
     if (message.type === 'error') {
-      if (message.code === 'unavailable' && this.#pending === 'resync') {
+      if (
+        (message.code === 'unavailable' || message.code === 'unauthorized') &&
+        this.#pending === 'resync'
+      ) {
         this.#finish();
         this.#publish({
           status: 'attached',
-          note: this.#storageBlocked ? 'storage-unavailable' : 'unavailable',
+          note:
+            message.code === 'unauthorized'
+              ? 'unauthorized'
+              : this.#storageBlocked
+                ? 'storage-unavailable'
+                : 'unavailable',
           view: null,
         });
       } else
@@ -460,6 +498,18 @@ export class GameConnection {
           message.code === 'unauthorized' ? 'unauthorized' : 'unavailable',
           this.#pending === 'start' ? 'uncertain' : 'failed',
         );
+      return;
+    }
+    if (message.type === 'chat-page') {
+      if (this.#pending !== 'chat') return;
+      const result = this.#chat.receive(message);
+      if (result === 'ignored') return;
+      if (result === 'invalid') {
+        this.#fail('invalid-message');
+        return;
+      }
+      this.#finish();
+      this.#publish();
       return;
     }
     if (message.type === 'command-ack') {

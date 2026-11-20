@@ -290,7 +290,8 @@ export function App() {
         </section>
       </main>
       <footer>
-        Functional click/keyboard and drag play. Chat and later controls are still planned.
+        Functional click/keyboard, drag play and retained chat. Claims and later controls are still
+        planned.
       </footer>
     </>
   );

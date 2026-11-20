@@ -2,7 +2,25 @@ import { validLobbyLocator as text } from './lobby-membership.ts';
 export type Card = Readonly<{ id: string; face: Readonly<{ suit: string; rank: number }> }>;
 export type Draw = Readonly<{ seatId: string; rejected: boolean; destination?: 'hand' | 'stump' }>;
 export type Reveal = Readonly<{ card: Card; recipientId: string; expiresAt: number }>;
+export type DisplayTimer = Readonly<{
+  id: string;
+  remainingMs: number;
+  paused: boolean;
+  expiresAt: number | null;
+}>;
+export type Penalty = Readonly<{
+  recipientId: string;
+  reason: string;
+  eligibleSeatIds: readonly string[];
+  ownResponse: Readonly<{ type: 'refuse' }> | Readonly<{ type: 'card'; card: Card }> | null;
+  timer: DisplayTimer;
+}>;
+export type Transfer = Readonly<{ fromSeatId: string; toSeatId: string; card: Card }>;
+export const remainingTime = (timer: DisplayTimer, now: number): number =>
+  timer.paused ? timer.remainingMs : Math.max(0, (timer.expiresAt ?? now) - now);
 export type GameSnapshot = Readonly<{
+  penalty: Penalty | null;
+  hasProcedure: boolean;
   initialRecipientNotice: boolean;
   reveal: Reveal | null;
   head: Readonly<{ gameId: string; branchId: string; version: number }>;
@@ -42,7 +60,7 @@ function card(raw: unknown): Card | null {
     return null;
   return { id: raw.id, face: { suit: raw.face.suit, rank: Number(raw.face.rank) } };
 }
-export function head(raw: unknown): boolean {
+export function head(raw: unknown): raw is GameSnapshot['head'] {
   return (
     exact(raw, ['gameId', 'branchId', 'version']) &&
     text(raw.gameId) &&
@@ -184,7 +202,84 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
     // Duration is converted to a monotonic deadline by GameStream at receipt.
     reveal = { card: card(r.card)!, recipientId: r.recipientId, expiresAt: r.timer.remainingMs };
   }
+  let penalty: Penalty | null = null;
+  if (raw.procedure !== null) {
+    const p = raw.procedure;
+    if (
+      !state ||
+      !object(p) ||
+      typeof p.type !== 'string' ||
+      !['penalty', 'claim-vote', 'withdrawal'].includes(p.type)
+    )
+      return null;
+    if (p.type === 'penalty') {
+      if (
+        !exact(p, ['type', 'recipientId', 'reason', 'eligibleSeatIds', 'ownResponse', 'timer']) ||
+        !text(p.recipientId) ||
+        !state.players.some((s) => s.id === p.recipientId && s.status === 'active') ||
+        typeof p.reason !== 'string' ||
+        ![
+          'draw-out-of-turn',
+          'invalid-beat',
+          'play-out-of-turn',
+          'peek',
+          'must-open-stump',
+          'claim',
+        ].includes(p.reason) ||
+        !Array.isArray(p.eligibleSeatIds) ||
+        p.eligibleSeatIds.length > 7 ||
+        !p.eligibleSeatIds.every(text) ||
+        new Set(p.eligibleSeatIds).size !== p.eligibleSeatIds.length ||
+        p.eligibleSeatIds.some(
+          (id) =>
+            id === p.recipientId ||
+            !state!.players.some((s) => s.id === id && s.status === 'active'),
+        ) ||
+        !exact(p.timer, ['id', 'remainingMs', 'paused']) ||
+        !text(p.timer.id) ||
+        !count(p.timer.remainingMs, 10000) ||
+        typeof p.timer.paused !== 'boolean' ||
+        (raw.control.paused && !p.timer.paused)
+      )
+        return null;
+      let ownResponse: Penalty['ownResponse'] = null;
+      if (p.ownResponse !== null) {
+        const r = p.ownResponse;
+        if (!p.eligibleSeatIds.includes(seatId) || !object(r)) return null;
+        if (exact(r, ['type']) && r.type === 'refuse') ownResponse = { type: 'refuse' };
+        else if (exact(r, ['type', 'card']) && r.type === 'card') {
+          const selected = card(r.card);
+          if (
+            !selected ||
+            state.own.hand.length < 2 ||
+            !state.own.hand.some(
+              (c) =>
+                c.id === selected.id &&
+                c.face.suit === selected.face.suit &&
+                c.face.rank === selected.face.rank,
+            )
+          )
+            return null;
+          ownResponse = { type: 'card', card: selected };
+        } else return null;
+      }
+      penalty = {
+        recipientId: p.recipientId,
+        reason: p.reason,
+        eligibleSeatIds: [...p.eligibleSeatIds],
+        ownResponse,
+        timer: {
+          id: p.timer.id,
+          remainingMs: p.timer.remainingMs,
+          paused: p.timer.paused,
+          expiresAt: null,
+        },
+      };
+    }
+  }
   return {
+    penalty,
+    hasProcedure: raw.procedure !== null,
     initialRecipientNotice,
     reveal,
     head: { gameId: raw.head.gameId, branchId: raw.head.branchId, version: raw.head.version },
@@ -200,13 +295,28 @@ export class GameStream {
   #retired = new Set<string>();
   snapshot: GameSnapshot | null = null;
   draw: Draw | null = null;
+  transfers: readonly Transfer[] = [];
   reset = false;
+  #penaltyTimer: { key: string; timer: DisplayTimer } | null = null;
+  #route: string | null = null;
   readonly #now: () => number;
   #revealKey: string | null = null;
   #revealDeadline = 0;
   constructor(seatId: string, now: () => number = () => performance.now()) {
     this.#seatId = seatId;
     this.#now = now;
+  }
+  #routeTo(head: GameSnapshot['head']) {
+    const route = JSON.stringify([head.gameId, head.branchId]);
+    if (this.#route !== null && route !== this.#route) {
+      this.snapshot = null;
+      this.draw = null;
+      this.transfers = [];
+      this.#penaltyTimer = null;
+      this.#revealKey = null;
+      this.reset = true;
+    }
+    this.#route = route;
   }
   expireReveal() {
     if (this.snapshot?.reveal && this.#now() >= this.snapshot.reveal.expiresAt)
@@ -233,6 +343,8 @@ export class GameStream {
       this.#sequence = -1;
       this.snapshot = null;
       this.draw = null;
+      this.transfers = [];
+      this.#penaltyTimer = null;
       this.reset = true;
       this.#revealKey = null;
     }
@@ -250,8 +362,28 @@ export class GameStream {
           v.observations.length > 128
         )
           return 'invalid';
+        this.#routeTo(v.head);
+        const transfers: Transfer[] = [];
         for (const o of v.observations) {
           if (!object(o) || typeof o.type !== 'string') return 'invalid';
+          if (o.type === 'penalty-transfer') {
+            if (
+              !exact(o, ['type', 'fromSeatId', 'toSeatId', 'card']) ||
+              !text(o.fromSeatId) ||
+              !text(o.toSeatId) ||
+              o.fromSeatId === o.toSeatId ||
+              (o.fromSeatId !== this.#seatId && o.toSeatId !== this.#seatId) ||
+              !card(o.card) ||
+              (this.snapshot?.state &&
+                [o.fromSeatId, o.toSeatId].some(
+                  (id) => !this.snapshot!.state!.players.some((p) => p.id === id),
+                )) ||
+              transfers.length >= 7
+            )
+              return 'invalid';
+            transfers.push({ fromSeatId: o.fromSeatId, toSeatId: o.toSeatId, card: card(o.card)! });
+            continue;
+          }
           if (o.type !== 'card-drawn' && o.type !== 'draw-rejected') continue;
           if (
             !text(o.seatId) ||
@@ -272,9 +404,12 @@ export class GameStream {
             this.draw = { seatId: o.seatId, rejected: false, destination: o.destination };
           }
         }
+        this.transfers = transfers;
       }
       if (message.type !== 'owner-history') this.snapshot = null;
       if (message.type === 'rollback-notice') {
+        this.transfers = [];
+        this.#penaltyTimer = null;
         this.draw = null;
         this.reset = true;
         this.#revealKey = null;
@@ -283,8 +418,30 @@ export class GameStream {
     }
     let next = snapshot(message.view, this.#seatId);
     if (!next) return 'invalid';
+    this.#routeTo(next.head);
     if (this.draw && next.state && !next.state.players.some((p) => p.id === this.draw!.seatId))
       return 'invalid';
+    const players = next.state?.players;
+    if (!players) this.transfers = [];
+    else if (
+      this.transfers.some((t) =>
+        [t.fromSeatId, t.toSeatId].some((id) => !players.some((p) => p.id === id)),
+      )
+    )
+      return 'invalid';
+    if (next.penalty) {
+      const p = next.penalty;
+      const key = JSON.stringify([next.head.gameId, next.head.branchId, p.timer.id]);
+      const prior = this.#penaltyTimer;
+      const expiresAt = p.timer.paused
+        ? null
+        : prior?.key === key && !prior.timer.paused
+          ? Math.min(prior.timer.expiresAt!, this.#now() + p.timer.remainingMs)
+          : this.#now() + p.timer.remainingMs;
+      const timer = { ...p.timer, expiresAt };
+      this.#penaltyTimer = { key, timer };
+      next = { ...next, penalty: { ...p, timer } };
+    } else this.#penaltyTimer = null;
     if (next.reveal) {
       const raw = message.view as { transient: { reveal: { timer: { id: string } } } };
       const key = JSON.stringify([

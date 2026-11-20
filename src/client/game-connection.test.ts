@@ -33,7 +33,13 @@ class FakeSocket implements GameSocket {
 function currentView(client: GameConnection) {
   return client.current.view;
 }
-function fixture(saved?: string) {
+function fixture(
+  saved?: string,
+  timing: {
+    now?: () => number;
+    scheduleReveal?: (callback: () => void, delay: number) => () => void;
+  } = {},
+) {
   const sockets: FakeSocket[] = [];
   const storage = new Map<string, string>();
   if (saved !== undefined) storage.set('penky.first-start.v1.lobby', saved);
@@ -45,6 +51,7 @@ function fixture(saved?: string) {
       lobbyId: 'lobby',
       seatId: 'own',
       isOwner: true,
+      ...timing,
       onBusy: (value) => {
         busy.push(value);
       },
@@ -328,6 +335,196 @@ test('malformed matching draw acknowledgments fail closed without diagnostics', 
   assert.equal(client.current.status, 'uncertain');
   assert.equal(client.current.view, null);
   assert.equal(JSON.stringify(client.current).includes('PRIVATE'), false);
+  client.close();
+});
+const donationCard = { id: 'donation', face: { suit: 'hearts', rank: 9 } };
+function penaltyBaseline(sequence = 1, id = 'penalty', size = 2) {
+  return {
+    protocolVersion: 1,
+    type: 'state',
+    delivery: { epoch: 'opaque', sequence },
+    view: {
+      head: { gameId: 'assigned-game', branchId: 'branch', version: 1 },
+      state: {
+        viewer: { type: 'participant', seatId: 'own' },
+        players: [
+          { id: 'own', status: 'active', handCount: size, stumpCount: 1 },
+          { id: 'other', status: 'active', handCount: 3, stumpCount: 2 },
+          { id: 'third', status: 'active', handCount: 3, stumpCount: 2 },
+        ],
+        own: {
+          seatId: 'own',
+          hand:
+            size === 0
+              ? []
+              : size === 1
+                ? [donationCard]
+                : [donationCard, { id: 'second', face: { suit: 'clubs', rank: 6 } }],
+          stumps: ['stump'],
+        },
+        deckCount: 0,
+        table: [],
+        discardCount: 0,
+        phase: { type: 'pre-game-penalties' },
+      },
+      transient: { initialRecipientNotice: false, reveal: null },
+      procedure: {
+        type: 'penalty',
+        recipientId: 'other',
+        reason: 'draw-out-of-turn',
+        eligibleSeatIds: ['own', 'third'],
+        ownResponse: null as object | null,
+        timer: { id, remainingMs: 10000, paused: false },
+      },
+      control: { paused: false, connections: [], replacementVote: null },
+    },
+  };
+}
+test('penalty selection sends captured own reservation intent only once and ack never creates a reservation', () => {
+  const { client, sockets } = fixture();
+  client.connect();
+  const socket = sockets[0]!;
+  socket.deliver(penaltyBaseline());
+  client.selectPenaltyCard('stump');
+  assert.equal(client.current.selectedCardId, null);
+  client.selectPenaltyCard('foreign');
+  assert.equal(client.current.selectedCardId, null);
+  client.selectPenaltyCard('donation');
+  assert.equal(client.current.selectedCardId, 'donation');
+  client.respondToPenalty('donation');
+  const sent = socket.sent.at(-1) as { requestId: string };
+  assert.deepEqual(sent, {
+    protocolVersion: 1,
+    requestId: sent.requestId,
+    intent: {
+      type: 'penalty-response',
+      gameId: 'assigned-game',
+      branchId: 'branch',
+      procedureId: 'penalty',
+      cardId: 'donation',
+    },
+  });
+  client.respondToPenalty(null);
+  assert.equal(socket.sent.length, 2);
+  assert.equal(client.current.view?.state?.own.hand.length, 2);
+  socket.deliver({
+    protocolVersion: 1,
+    type: 'command-ack',
+    requestId: sent.requestId,
+    result: {
+      type: 'accepted',
+      outcome: 'played',
+      duplicate: false,
+      head: { gameId: 'old', branchId: 'old', version: 99 },
+    },
+  });
+  assert.equal(client.current.penaltyStatus, 'accepted');
+  assert.equal(client.current.view?.penalty?.ownResponse, null);
+  const reservation = penaltyBaseline(2);
+  reservation.view.procedure.ownResponse = { type: 'card', card: donationCard };
+  socket.deliver(reservation);
+  assert.equal(client.current.selectedCardId, null);
+  client.respondToPenalty(null);
+  assert.equal(socket.sent.length, 2, 'authoritative ownResponse disables a second answer');
+  socket.deliver(penaltyBaseline(3, 'next-penalty'));
+  assert.equal(
+    client.current.penaltyStatus,
+    'none',
+    'previous acceptance is not feedback for the next procedure',
+  );
+  client.close();
+});
+test('zero/one-card donors can refuse but cannot reserve a last card or a closed stump', () => {
+  for (const size of [0, 1]) {
+    const { client, sockets } = fixture();
+    client.connect();
+    const socket = sockets[0]!;
+    socket.deliver(penaltyBaseline(1, 'penalty', size));
+    client.selectPenaltyCard('donation');
+    client.respondToPenalty('donation');
+    client.respondToPenalty('stump');
+    assert.equal(socket.sent.length, 1);
+    assert.equal(client.current.selectedCardId, null);
+    client.respondToPenalty(null);
+    assert.equal((socket.sent.at(-1) as { intent: { cardId: unknown } }).intent.cardId, null);
+    client.close();
+  }
+});
+test('new procedure and rotated stream clear obsolete penalty drafts/pending commands and ignore late acks', () => {
+  const { client, sockets } = fixture();
+  client.connect();
+  const socket = sockets[0]!;
+  socket.deliver(penaltyBaseline());
+  client.selectPenaltyCard('donation');
+  socket.deliver(penaltyBaseline(2, 'next'));
+  assert.equal(client.current.selectedCardId, null);
+  client.respondToPenalty(null);
+  const old = socket.sent.at(-1) as { requestId: string };
+  socket.deliver(penaltyBaseline(3, 'third'));
+  assert.notEqual(client.current.penaltyStatus, 'pending');
+  client.respondToPenalty(null);
+  const newer = socket.sent.at(-1);
+  socket.deliver({
+    protocolVersion: 1,
+    type: 'command-ack',
+    requestId: old.requestId,
+    result: {
+      type: 'accepted',
+      outcome: 'played',
+      duplicate: false,
+      head: { gameId: 'old', branchId: 'old', version: 99 },
+    },
+  });
+  assert.equal(client.current.penaltyStatus, 'pending');
+  assert.notDeepEqual(newer, old);
+  socket.deliver({
+    protocolVersion: 1,
+    type: 'rollback-notice',
+    delivery: { epoch: 'rollback', sequence: 1 },
+    notice: {},
+  });
+  assert.notEqual(client.current.penaltyStatus, 'pending');
+  assert.equal(client.current.selectedCardId, null);
+  client.close();
+});
+test('local penalty expiry clears an unsent selection without manufacturing refusal, transfer or completion', () => {
+  let now = 0;
+  let expire = () => {};
+  const { client, sockets } = fixture(undefined, {
+    now: () => now,
+    scheduleReveal: (callback, delay) => {
+      assert.equal(delay, 10000);
+      expire = callback;
+      return () => {};
+    },
+  });
+  client.connect();
+  sockets[0]!.deliver(penaltyBaseline());
+  client.selectPenaltyCard('donation');
+  now = 10001;
+  expire();
+  assert.equal(client.current.selectedCardId, null);
+  assert.equal(client.current.view?.penalty?.ownResponse, null);
+  assert.deepEqual(client.current.transfers, []);
+  client.respondToPenalty(null);
+  assert.equal(sockets[0]!.sent.length, 1, 'no expiry command or late response');
+  client.close();
+});
+test('penalty uncertainty drops selection and observations; reconnect sends only resync', () => {
+  const { client, sockets, timeout } = fixture();
+  client.connect();
+  sockets[0]!.deliver(penaltyBaseline());
+  client.selectPenaltyCard('donation');
+  client.respondToPenalty('donation');
+  timeout();
+  assert.equal(client.current.penaltyStatus, 'uncertain');
+  assert.equal(client.current.selectedCardId, null);
+  assert.deepEqual(client.current.transfers, []);
+  assert.equal(client.current.view, null);
+  client.connect();
+  sockets[1]!.deliver(penaltyBaseline());
+  assert.equal(sockets[1]!.sent.length, 1);
+  assert.equal(client.current.selectedCardId, null);
   client.close();
 });
 test('idle stream updates cannot release another UI operation guard; malformed receipts fail closed', () => {

@@ -221,6 +221,29 @@ textarea:user-invalid {
   padding: 0.3rem;
   overflow-wrap: anywhere;
 }
+.penalty {
+  margin-block-start: 1.5rem;
+  border-block-start: 1px solid #c0cdd3;
+}
+.penalty fieldset {
+  min-inline-size: 0;
+  margin-block-end: 1rem;
+}
+.penalty label,
+.penalty select {
+  display: block;
+}
+.penalty select {
+  font: inherit;
+  font-size: max(1rem, 1em);
+  inline-size: 100%;
+  min-block-size: 3rem;
+  margin-block: 0.5rem 1rem;
+}
+.penalty select:focus-visible {
+  outline: 3px solid #20303a;
+  outline-offset: 4px;
+}
 @media (max-width: 44rem) {
   main {
     grid-template-columns: 1fr;

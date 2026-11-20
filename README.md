@@ -66,7 +66,9 @@ The eighth engine/runtime increment completes Stage 7 for the trusted server/sto
 
 **Stage 9.5 manual dealing implemented:** deck clicks permit deliberate out-of-turn attempts, actual draw actors remain observable, and own hand faces/closed stumps render privately. D002 initial notices and temporary final-card reveals obey receipt-anchored expiry, suspension and reset; no next-recipient hint, permanent trump or observation replay is added. Four additional real browser cases cover 2/4/8-seat dealing and lost draw acknowledgment; six net new Node tests cover the client boundaries.
 
-**Not a complete online game yet:** penalty and ordinary-play controls, later gameplay UI, bot decisions and Three.js are still planned. A source-only HTTPS development launcher exists, not a production game-server CLI. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
+**Stage 9.6 penalty contribution/refusal implemented:** eligible seats can reserve an own hand card or explicitly refuse, with last-card/stump protection. Reservations never move cards optimistically; completed transfer faces go only to donor/recipient. Paused countdowns resume their remainder, local zero never completes a procedure, and stale selections/uncertain responses are not replayed. Nine new Node tests and three real four-seat browser cases cover queued and later penalties, privacy, timeout, stale IDs, interrupted-round restoration and lost acknowledgments.
+
+**Not a complete online game yet:** ordinary-play controls, later gameplay UI, bot decisions and Three.js are still planned. A source-only HTTPS development launcher exists, not a production game-server CLI. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
 
 **New rules, not implemented yet:** revision 1.4 adds a post-game deck-strike minigame and makes remaining participants losers when repetition ends a match. These approved changes are tracked in Stage 11a; current result contracts still follow revision 1.3.
 

@@ -1,5 +1,9 @@
-import { GameStream, object, exact, head } from './game-stream.ts';
-import type { GameSnapshot, Draw } from './game-stream.ts';
+import { GameStream, object, exact, head, remainingTime } from './game-stream.ts';
+import type { GameSnapshot, Draw, Transfer } from './game-stream.ts';
+const penaltyScope = (view: GameSnapshot | null) =>
+  view?.penalty
+    ? JSON.stringify([view.head.gameId, view.head.branchId, view.penalty.timer.id])
+    : null;
 import { PUBLIC_REJECTIONS } from '../protocol/contracts.ts';
 import { validLobbyLocator as text } from './lobby-membership.ts';
 export type GameSocket = {
@@ -28,6 +32,9 @@ export type ConnectionState = Readonly<{
   view: GameSnapshot | null;
   draw: Draw | null;
   drawStatus: 'none' | 'pending' | 'played' | 'violation' | 'rejected' | 'uncertain';
+  penaltyStatus: 'none' | 'pending' | 'accepted' | 'rejected' | 'uncertain';
+  selectedCardId: string | null;
+  transfers: readonly Transfer[];
   assigned: boolean;
   retry: boolean;
   note:
@@ -56,8 +63,11 @@ export class GameConnection {
   #socket: GameSocket | null = null;
   #generation = 0;
   #stream: GameStream;
-  #pending: 'connect' | 'resync' | 'start' | 'draw' | null = null;
-  #drawRequest: string | null = null;
+  #pending: 'connect' | 'resync' | 'start' | 'draw' | 'penalty' | null = null;
+  #commandRequest: string | null = null;
+  #pendingPenaltyScope: string | null = null;
+  #selectionScope: string | null = null;
+  #observedPenaltyScope: string | null = null;
   #cancelReveal: (() => void) | null = null;
   #cancel: (() => void) | null = null;
   #listener: ((state: ConnectionState) => void) | null = null;
@@ -69,6 +79,9 @@ export class GameConnection {
     view: null,
     draw: null,
     drawStatus: 'none',
+    penaltyStatus: 'none',
+    selectedCardId: null,
+    transfers: [],
     assigned: false,
     retry: false,
     note: 'none',
@@ -107,6 +120,18 @@ export class GameConnection {
   }
   #publish(next: Partial<ConnectionState> = {}) {
     this.current = { ...this.current, ...next };
+    const view = this.current.view;
+    if (
+      this.current.selectedCardId !== null &&
+      (this.#selectionScope !== penaltyScope(view) ||
+        !this.#canRespond() ||
+        !view?.state ||
+        view.state.own.hand.length < 2 ||
+        !view.state.own.hand.some((c) => c.id === this.current.selectedCardId))
+    ) {
+      this.current = { ...this.current, selectedCardId: null };
+      this.#selectionScope = null;
+    }
     const busy = this.#pending !== null;
     if (busy !== this.#busy) {
       this.#busy = busy;
@@ -128,6 +153,7 @@ export class GameConnection {
     this.#cancel?.();
     this.#cancel = null;
     this.#pending = null;
+    this.#pendingPenaltyScope = null;
   }
   #drop() {
     this.#generation++;
@@ -139,7 +165,9 @@ export class GameConnection {
     this.#stream = new GameStream(this.#deps.seatId, this.#deps.now);
   }
   #fail(note: ConnectionState['note'], status: ConnectionState['status'] = 'failed') {
-    const uncertain = this.#pending === 'draw';
+    const drawUncertain = this.#pending === 'draw';
+    const penaltyUncertain = this.#pending === 'penalty';
+    const uncertain = drawUncertain || penaltyUncertain;
     this.#finish();
     this.#drop();
     this.#publish({
@@ -147,13 +175,23 @@ export class GameConnection {
       note,
       view: null,
       draw: null,
-      ...(uncertain ? { drawStatus: 'uncertain' } : {}),
+      transfers: [],
+      selectedCardId: null,
+      ...(drawUncertain ? { drawStatus: 'uncertain' } : {}),
+      ...(penaltyUncertain ? { penaltyStatus: 'uncertain' } : {}),
     });
   }
   close() {
     this.#finish();
     this.#drop();
-    this.#publish({ status: 'disconnected', view: null, draw: null });
+    this.#publish({
+      status: 'disconnected',
+      view: null,
+      draw: null,
+      transfers: [],
+      selectedCardId: null,
+      penaltyStatus: 'none',
+    });
   }
   connect() {
     if (this.#pending) return;
@@ -205,6 +243,8 @@ export class GameConnection {
       status: 'connecting',
       view: null,
       draw: null,
+      transfers: [],
+      selectedCardId: null,
       note: this.current.note === 'storage-unavailable' ? 'storage-unavailable' : 'none',
     });
     socket.connect();
@@ -254,17 +294,18 @@ export class GameConnection {
       this.current.status !== 'observing' ||
       !view?.state ||
       view.paused ||
-      view.state.phase !== 'dealing'
+      view.state.phase !== 'dealing' ||
+      view.hasProcedure
     )
       return;
     // No next-recipient/turn or local legality gate. Each click is a new intent.
-    this.#drawRequest = this.#deps.requestId();
+    this.#commandRequest = this.#deps.requestId();
     this.#pending = 'draw';
     this.#deadline();
     this.#publish({ drawStatus: 'pending' });
     this.#socket.send({
       protocolVersion: 1,
-      requestId: this.#drawRequest,
+      requestId: this.#commandRequest,
       intent: {
         type: 'draw-card',
         gameId: view.head.gameId,
@@ -272,11 +313,62 @@ export class GameConnection {
       },
     });
   }
+  #canRespond() {
+    const view = this.current.view;
+    const p = view?.penalty;
+    return !!(
+      this.#socket?.connected &&
+      this.current.status === 'observing' &&
+      view?.state &&
+      !view.paused &&
+      p &&
+      !p.timer.paused &&
+      remainingTime(p.timer, this.#deps.now?.() ?? performance.now()) > 0 &&
+      p.eligibleSeatIds.includes(this.#deps.seatId) &&
+      p.ownResponse === null
+    );
+  }
+  selectPenaltyCard(cardId: string | null) {
+    if (this.#pending || !this.#canRespond()) return;
+    const hand = this.current.view!.state!.own.hand;
+    if (cardId !== null && (hand.length < 2 || !hand.some((c) => c.id === cardId))) return;
+    this.#selectionScope = penaltyScope(this.current.view);
+    this.#publish({ selectedCardId: cardId });
+  }
+  respondToPenalty(cardId: string | null) {
+    if (this.#pending || !this.#canRespond()) return;
+    const view = this.current.view!;
+    if (
+      cardId !== null &&
+      (view.state!.own.hand.length < 2 || !view.state!.own.hand.some((c) => c.id === cardId))
+    )
+      return;
+    this.#commandRequest = this.#deps.requestId();
+    this.#pendingPenaltyScope = penaltyScope(view);
+    this.#pending = 'penalty';
+    this.#deadline();
+    this.#publish({ penaltyStatus: 'pending' });
+    this.#socket!.send({
+      protocolVersion: 1,
+      requestId: this.#commandRequest,
+      intent: {
+        type: 'penalty-response',
+        gameId: view.head.gameId,
+        branchId: view.head.branchId,
+        procedureId: view.penalty!.timer.id,
+        cardId,
+      },
+    });
+  }
   #armReveal() {
     this.#cancelReveal?.();
     this.#cancelReveal = null;
-    const reveal = this.#stream.snapshot?.reveal;
-    if (!reveal) return;
+    const view = this.#stream.snapshot;
+    const now = this.#deps.now?.() ?? performance.now();
+    const deadlines = [view?.reveal?.expiresAt, view?.penalty?.timer.expiresAt].filter(
+      (d): d is number => typeof d === 'number' && d > now,
+    );
+    if (!deadlines.length) return;
     const schedule =
       this.#deps.scheduleReveal ??
       ((callback: () => void, delay: number) => {
@@ -289,7 +381,7 @@ export class GameConnection {
         this.#publish({ view: this.#stream.snapshot });
         this.#armReveal();
       },
-      Math.max(0, reveal.expiresAt - (this.#deps.now?.() ?? performance.now())),
+      Math.max(0, Math.min(...deadlines) - now),
     );
   }
   #receive(message: unknown) {
@@ -313,7 +405,12 @@ export class GameConnection {
       return;
     }
     if (message.type === 'command-ack') {
-      if (this.#pending !== 'draw' || message.requestId !== this.#drawRequest) return;
+      if (
+        (this.#pending !== 'draw' && this.#pending !== 'penalty') ||
+        message.requestId !== this.#commandRequest
+      )
+        return;
+      const kind = this.#pending;
       const r = message.result;
       if (!object(r) || !head(r.head)) {
         this.#fail('invalid-message');
@@ -326,7 +423,11 @@ export class GameConnection {
         typeof r.duplicate === 'boolean'
       ) {
         this.#finish();
-        this.#publish({ drawStatus: r.outcome === 'violation' ? 'violation' : 'played' });
+        this.#publish(
+          kind === 'penalty'
+            ? { penaltyStatus: 'accepted' }
+            : { drawStatus: r.outcome === 'violation' ? 'violation' : 'played' },
+        );
       } else if (
         exact(r, ['type', 'code', 'head']) &&
         r.type === 'rejected' &&
@@ -334,7 +435,11 @@ export class GameConnection {
         PUBLIC_REJECTIONS.some((code) => code === r.code)
       ) {
         this.#finish();
-        this.#publish({ drawStatus: 'rejected' });
+        this.#publish(
+          kind === 'penalty'
+            ? { penaltyStatus: 'rejected', selectedCardId: null }
+            : { drawStatus: 'rejected' },
+        );
       } else this.#fail('invalid-message');
       return;
     }
@@ -368,19 +473,43 @@ export class GameConnection {
     }
     if (result === 'ignored') return;
     if (this.#stream.reset) {
-      if (this.#pending === 'draw') this.#finish();
-      this.#publish({ drawStatus: 'none', draw: null });
+      if (this.#pending === 'draw' || this.#pending === 'penalty') this.#finish();
+      this.#publish({
+        drawStatus: 'none',
+        draw: null,
+        penaltyStatus: 'none',
+        selectedCardId: null,
+        transfers: [],
+      });
     }
     this.#armReveal();
     if (result === 'state') {
+      const scope = penaltyScope(this.#stream.snapshot);
+      if (scope !== this.#observedPenaltyScope) {
+        this.#observedPenaltyScope = scope;
+        this.#publish({ penaltyStatus: 'none', selectedCardId: null });
+      }
+      if (
+        this.#pending === 'penalty' &&
+        this.#pendingPenaltyScope !== penaltyScope(this.#stream.snapshot)
+      ) {
+        this.#finish();
+        this.#publish({ penaltyStatus: 'none', selectedCardId: null });
+      }
       if (this.#pending === 'resync') this.#finish();
       this.#publish({
         status: this.#pending === 'start' ? 'starting' : 'observing',
         assigned: true,
         view: this.#stream.snapshot,
         draw: this.#stream.draw,
+        transfers: this.#stream.transfers,
         note: this.current.note === 'storage-unavailable' ? 'storage-unavailable' : 'none',
       });
-    } else this.#publish({ view: this.#stream.snapshot, draw: this.#stream.draw });
+    } else
+      this.#publish({
+        view: this.#stream.snapshot,
+        draw: this.#stream.draw,
+        transfers: this.#stream.transfers,
+      });
   }
 }

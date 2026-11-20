@@ -1,7 +1,7 @@
 import type { ConnectionState } from './game-connection.ts';
 import type { Card } from './game-stream.ts';
 
-function face(card: Card) {
+export function cardLabel(card: Card) {
   const rank = card.face.rank;
   return `${rank === 11 ? 'Jack' : rank === 12 ? 'Queen' : rank === 13 ? 'King' : rank === 14 ? 'Ace' : rank} of ${card.face.suit}`;
 }
@@ -52,7 +52,9 @@ export function DealingView({
             <>
               <button
                 type="button"
-                disabled={busy || connection.status !== 'observing' || view.paused}
+                disabled={
+                  busy || connection.status !== 'observing' || view.paused || view.hasProcedure
+                }
                 onClick={onDraw}
               >
                 Draw card
@@ -65,13 +67,14 @@ export function DealingView({
           ) : null}
           {view.reveal ? (
             <p className="notice" data-testid="final-reveal">
-              Final card: {face(view.reveal.card)}. Remember it; this public display is temporary.
+              Final card: {cardLabel(view.reveal.card)}. Remember it; this public display is
+              temporary.
             </p>
           ) : null}
           <h5>Your hand</h5>
           <ul className="cards" data-testid="own-hand">
             {state.own.hand.map((card) => (
-              <li key={card.id}>{face(card)}</li>
+              <li key={card.id}>{cardLabel(card)}</li>
             ))}
           </ul>
           <h5>Your closed stumps</h5>

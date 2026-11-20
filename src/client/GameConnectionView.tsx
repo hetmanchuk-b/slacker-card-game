@@ -3,6 +3,7 @@ import { io } from 'socket.io-client';
 import type { LobbyMembership } from '../protocol/lobby.ts';
 import { GameConnection } from './game-connection.ts';
 import { DealingView } from './DealingView.tsx';
+import { PenaltyView } from './PenaltyView.tsx';
 
 const notes = {
   none: '',
@@ -172,9 +173,16 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
         <p>No current game baseline is displayed. Reconnect/resync to confirm it.</p>
       )}
       <DealingView connection={connection} busy={busy} onDraw={() => client.drawCard()} />
+      <PenaltyView
+        connection={connection}
+        seatId={membership.seatId}
+        busy={busy}
+        onSelect={(id) => client.selectPenaltyCard(id)}
+        onRespond={(id) => client.respondToPenalty(id)}
+      />
       <p className="quiet">
-        Penalty and ordinary-play controls arrive in later increments. No permanent trump or
-        next-recipient indicator is shown.
+        Ordinary-play controls arrive in later increments. No permanent trump or next-recipient
+        indicator is shown.
       </p>
     </section>
   );

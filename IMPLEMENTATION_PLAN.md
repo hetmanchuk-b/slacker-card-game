@@ -20,6 +20,8 @@ This plan describes implementation, not changes to agreed rules. If implementati
 
 ### Progress — increment 35
 
+**Documentation audit:** current implementation baseline is `866661d` (9.9). The consolidated 9.5–9.9 handoff, file inventory, outstanding decisions and freshly executed versus recorded checks are under **Current handoff audit — after 9.9** below. This documentation-only audit starts no new increment.
+
 **New approved direction, documentation only:** rules revision 1.4 adds a post-game little-finger/deck minigame and treats all participants remaining at a repetition draw as losers, preserving earlier winners. The current implementation still follows revision 1.3 for this outcome. No minigame or result changes have been implemented. Resolve §16.5 before implementing the affected behavior; planned work is tracked in Stage 11a below.
 
 - **Stage 1: complete.** Tooling/CI, domain contracts, rule-to-test matrix, and architecture decisions are in place. `.gitattributes` enforces LF on Windows/Linux checkouts.
@@ -731,7 +733,9 @@ The latest 508 Node checks are **326 non-database + 182 PostgreSQL**, not additi
 
 **Review findings and resolutions:** 9.3 malformed replies hiding a recoverable draft and 9.4 coercive enum validation were reproduced with failing regressions and fixed; final suites pass. The screenshot-discovered stale agreements snapshot after first start was also reproduced and fixed by validated game/branch-driven widget invalidation, without changing server consent. Independent read-only follow-up approved the 9.4 enum and route/key fixes. Reviewers did not execute checks themselves. No confirmed review finding remains open; this is not a claim of exhaustive defect/security absence.
 
-#### Unresolved decisions, limitations and deferred acceptance
+#### Unresolved decisions, limitations and deferred acceptance — historical 9.3–9.4 handoff
+
+This table preserves the earlier handoff, not the current next increment. Increments 9.5–9.9 and the peek presentation decision have since been completed/resolved. See **Current handoff audit — after 9.9** for current blockers and verification boundaries.
 
 | Item | Current safe boundary / required follow-up |
 | --- | --- |
@@ -746,7 +750,7 @@ The latest 508 Node checks are **326 non-database + 182 PostgreSQL**, not additi
 | Deferred revision 1.4 / Stage 11a | Current executable results still follow revision 1.3. Repetition-result/minigame implementation and unresolved rules §16.5 decisions remain outside Stage 9. No decision is silently filled in by UI work. |
 | Production and later features | No production hosting/security/load certification, polished Three.js, bot decisions, chat/procedure/history/rollback UI, successor-start UI or complete browser gameplay is claimed by 9.4. |
 
-Existing decisions D001–D005 remain resolved as recorded in `docs/open-decisions.md`; the scoped pending presentation choices above must follow that decision workflow when reached. **Stage 9 remains incomplete. Next dependency-ready work is 9.5 only**, subject to its existing acceptance criteria. The documentation-only audit reran no implementation suites and began no new increment. The subsequent operator request authorizes committing/pushing the verified combined changes, not beginning 9.5.
+Existing decisions D001–D005 remain resolved as recorded in `docs/open-decisions.md`; the scoped pending presentation choices above must follow that decision workflow when reached. **At that historical handoff, Stage 9 remained incomplete and next dependency-ready work was 9.5 only**, subject to its existing acceptance criteria. The documentation-only audit reran no implementation suites and began no new increment. The subsequent operator request authorizes committing/pushing the verified combined changes, not beginning 9.5.
 
 ### Increment 9.5 — Manual dealing and transient disclosures (complete)
 
@@ -797,6 +801,56 @@ Existing decisions D001–D005 remain resolved as recorded in `docs/open-decisio
 - **Boundaries:** no live push, automatic retry/outbox, extra production socket, claim UI, local-storage format or server/API/schema change. Draft and uncertain original ID/text live only in the mounted lobby; reload/unmount loses the retry reference, as explicitly warned. Empty/short pages are read results, not permanent completion. Old retained messages are not relabeled valid current evidence.
 
 **Verification/handoff:** test-first red reproduced the missing chat module. Normal `npm run check`: **357 pass/seven explicit PG skips**; database-enabled gate: **539 pass/no skips**, including all 182 existing PG cases; separate Chromium suite: **59 pass**. Format/lint/types/server+browser builds and `git diff --check` pass. Gates ran serially against a new disposable tmpfs PostgreSQL 18 container; dedicated `test:postgres` was not separately rerun because its cases ran in the database-enabled gate. Scout identified the attachment/visibility seam; operator explicitly approved the shared-controller approach before edits. Independent read-only Reviewer found no issues and ran no checks. No authoritative engine/runtime/transport/projector/persistence implementation, protocol/schema, dependency or game-rule change. Full browser match/native-mobile/manual assistive-technology/production certification remains deferred. **Next: 9.10 only after agreeing spoken-episode naming/reuse UX; stop here.**
+
+### Current handoff audit — after 9.9 (documentation only)
+
+**Scope:** reconcile the verified implementation through `866661d`, not add gameplay or authorize another increment. Stage 9 is incomplete overall; increments 9.1–9.9 are complete within their documented boundaries. Stage 9.10 is next, but its spoken-episode naming/reuse UX must be agreed before implementation. No confirmed independent-review finding remains open; this is not exhaustive defect/security certification.
+
+#### Committed increments and recorded verification
+
+| Increment | Commit | Implemented slice | Normal check: pass / PG skips | Database-enabled check: pass / skips | Separate Chromium gate |
+| --- | --- | --- | --- | --- | --- |
+| 9.5 | `4d46ddb` | Manual dealing, own cards/stumps, draw actors, D002 notices/reveal removal | 332 / 7 | 514 / 0 | 39 pass |
+| 9.6 | `97b1282` | Penalty reservation/refusal, private completion, remaining-time display/reset | 341 / 7 | 523 / 0 | 42 pass |
+| 9.7 | `571d185` | Click play/bottom pickup/stump interaction and approved fresh-peek notice | 347 / 7 | 529 / 0 | 49 pass |
+| 9.8 | `44a051c` | Equivalent deck/hand drag, cancellation and click suppression | 352 / 7 | 534 / 0 | 55 pass |
+| 9.9 | `866661d` | Retained chat on approved shared connection, exact retries and independent paging | 357 / 7 | 539 / 0 | 59 pass |
+
+These are successive whole-repository totals, **not additive runs or independent coverage counts**. Each database-enabled total contains the same 182 existing PG cases plus that increment's non-database tests. Across 9.5–9.9 there are **31 net new Node tests and 24 new browser cases** relative to 9.4's 326/35 baseline. The latest browser total includes explicitly synthetic wire fixtures; it is not 59 full real multiplayer matches.
+
+**Executed for this documentation audit:** `npm run check` freshly passes **357 tests/seven explicit database skips**, including formatting, lint, server/client types and both builds. `git diff --check` passes for the documentation edit. **Not rerun here:** database-enabled check, dedicated `test:postgres`, Chromium, production dependency audit, remote CI, other browser engines, native devices and manual assistive-technology/usability checks. Their historical results above remain recorded implementation evidence, not fresh audit execution. Implementation database gates used disposable tmpfs PostgreSQL 18 containers, removed after those runs; no database command is required by this audit. Dedicated `test:postgres` was not separately rerun in these increments because its cases ran inside the database-enabled gates.
+
+#### Changed-file inventory and review/fix accounting
+
+`git diff --name-only 38dd814..866661d` confirms **33 changed/new paths** across these five increments:
+
+- Client composition/presentation: `src/client/App.tsx`, `DealingView.tsx`, `GameConnectionView.tsx`, `LobbyChat.tsx`, `PenaltyView.tsx`, `PlayView.tsx`, `RemainingTime.tsx`, `style.css`.
+- Client interfaces/interaction logic: `src/client/card-drag.ts`, `game-connection.ts`, `game-stream.ts`, `lobby-chat.ts`, `use-card-drag.ts`.
+- Node client tests: `src/client/card-drag.test.ts`, `game-connection.test.ts`, `game-stream.test.ts`, `lobby-chat.test.ts`, `penalty.test.ts`, `play.test.ts`.
+- Browser cases/helpers: `tests/browser/chat.spec.ts`, `dealing-helpers.ts`, `dealing.spec.ts`, `drag.spec.ts`, `game-connection.spec.ts`, `penalty.spec.ts`, `play-fixture.ts`, `play.spec.ts`.
+- Documentation: `IMPLEMENTATION_PLAN.md`, `README.md`, `docs/architecture.md`, `docs/browser-client.md`, `docs/open-decisions.md`, `docs/rule-test-matrix.md`.
+
+All listed commits were pushed to `origin/main`. The 9.9 commit alone changed 13 paths; its precise file list and semantics are reflected by the chat/connection modules, tests and docs above. No authoritative engine/runtime/server/projection/persistence implementation, protocol/schema, dependency or game-rule change is included. The current audit changes **only `IMPLEMENTATION_PLAN.md`**.
+
+Independent read-only reviews ran for each implementation; reviewers did not independently execute checks. **Confirmed review fix:** 9.8 P1 competing-primary cancellation could erase the original click-suppression token and cause an unintended play. A failing browser regression reproduced it; blocked contact cohorts/per-pointer tokens fixed it, and a bounded follow-up approved the fix. 9.5–9.7 and 9.9 reviewers reported no issues. Additional test-first/self-check fixes cover obsolete pending draws after rollback, stale penalty acceptance/branch transfer feedback and capture-change event ordering. Earlier gates were not all clean: 9.6 recorded concurrent-load cleanup/timing failures, and 9.8 recorded queued-penalty response synchronization failures. The refusal helper now waits for committed progress, with three focused repetitions passing; final serial complete gates passed. These failures are preserved in the increment handoffs, not hidden by final totals.
+
+#### Current unresolved issues and acceptance limits
+
+| Item | Verified boundary / required next action |
+| --- | --- |
+| **9.10 spoken-episode naming/reuse** | Obtain explicit UX agreement for naming/reusing an episode key. Scope/author remain server-derived; do not infer textual equivalence, fabricate episode identities or reopen closed evidence. No claims UI was started in this audit. |
+| Chat retry lifetime and paging | An uncertain message ID/exact text survives reconnect only while its lobby widget remains mounted; reload/unmount loses the locator. No automatic retry, storage format, reliable outbox or live push is promised. One bounded page replaces the prior page; post replies do not advance its cursor, short pages are not completion and retained old context is not current evidence. |
+| Browser evidence boundaries | Late scenarios 2–10 include five synthetic engine/projector game-message cases. Drag includes four fixture-based cases, with Chromium CDP touch rather than native-device verification. Chat has one injected game-denial reply case with real chat authorization, not a new real nonparticipant lifecycle. Real backend coverage remains separately identified in each handoff. |
+| Full Stage 9 acceptance | Complete UI-driven 2/4/8-seat match matrix, claim/vote/withdrawal/replacement/history/rollback/successor controls, broader browser matrix and manual accessibility/usability remain pending. A successful build or fixture scenario does not satisfy these exit criteria. |
+| Replacement countdown (9.12) | No authoritative absence timestamp is projected. Use existing proposal feedback or seek approval for a contract change; do not invent a synchronized countdown. |
+| Owner-history size (9.13) | Measure existing bounded unpaginated history. Seek explicit contract approval before adding pagination or silently truncating history. |
+| Managed protocol/identity limits | Errors/state lack request correlation; maintain singleflight/fenced resync and fresh authorization. Unavailable/denied game projection does not prove unassignment. Lost/expired original guest credentials remain unrecoverable under D004. |
+| Resolved decisions | D001–D005 remain resolved. The 9.7 peek lifetime/dismissal policy and 9.9 shared-connection attachment approach were explicitly approved; neither is an outstanding blocker. |
+| Later rules/production | Revision-1.4 repetition-result/minigame work remains Stage 11a with §16.5 decisions pending. Bots, polished Three.js, production deployment/security/load certification and release operations remain deferred. |
+
+**Audit review:** an independent read-only Reviewer checked the consolidated report against the supplied actual commit-range/file-inventory output, fresh normal-check log and existing handoffs. No factual inconsistencies were found; the reviewer made no edits and executed no tests. No earlier implementation check was silently reclassified as freshly run.
+
+**Stop boundary:** no new implementation increment, architectural contract, game rule or test suite is introduced by this audit. Next is a scoped decision on 9.10's spoken-episode UX, then 9.10 implementation only when approved.
 
 ### Increment 9.10 — Claims and voting
 
@@ -858,15 +912,15 @@ Existing decisions D001–D005 remain resolved as recorded in `docs/open-decisio
 
 ### Overall Stage 9 checklist
 
-- [ ] Build lobby creation/joining, seat identity, owner controls, editable house-rule text, and readiness reset.
-- [ ] Build a simple functional table before polished 3D rendering.
+- [x] Build lobby creation/joining, seat identity, owner controls, editable house-rule text, and readiness reset. Verified lobby/start/agreements scope in 9.1–9.4; owner history/rollback remains the separate item below.
+- [x] Build a simple functional table before polished 3D rendering. Ordered public table and click/drag interactions verified in 9.7–9.8; full UI-match acceptance remains 9.16.
 - [x] Implement draw click/drag, hand play, take-bottom, and own-stump click. Click controls verified in 9.7; deck/hand drag equivalence in 9.8.
 - [ ] Permit specified rule-breaking attempts; do not add legality hints that remove the game's observation/memory challenge.
 - [x] Show the private initial-recipient notice and one-time 10-second final-card reveal; omit permanent trump and dealing-turn indicators.
-- [ ] Add chat, read-only in-match house rules, accusations, votes, withdrawal, and penalty-card selection/refusal.
-- [ ] Add suspension/reconnect and bot-replacement controls.
+- [ ] Add chat, read-only in-match house rules, accusations, votes, withdrawal, and penalty-card selection/refusal. Chat (9.9), original match terms (9.3) and penalties (9.6) are verified; accusations/votes/withdrawal remain 9.10–9.11.
+- [ ] Add suspension/reconnect and bot-replacement controls. Explicit connection/resync and pause presentation are verified; bot replacement UI remains 9.12.
 - [ ] Add a redacted owner timeline, branch labels, rollback target selection, warning, and confirmation.
-- [ ] Clear pending local gestures/animations on authoritative rollback or resync.
+- [x] Clear pending local gestures/animations on authoritative rollback or resync. Current gestures verified in 9.8; future animation work must preserve this invariant.
 - [ ] Keep transient visual interaction state separate from server state; do not optimistically expose secrets.
 
 **Exit criteria:** humans can complete full matches, punish violations, replace a disconnected player, and roll back without developer-only tools.

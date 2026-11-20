@@ -289,7 +289,7 @@ export function App() {
           )}
         </section>
       </main>
-      <footer>Interactive dealing and play arrive in later increments.</footer>
+      <footer>Functional click-based play. Drag, chat and later controls are still planned.</footer>
     </>
   );
 }

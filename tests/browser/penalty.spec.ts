@@ -203,8 +203,8 @@ test('browser reservations remain private until completion; queued and later pen
     if (after.type !== 'state') throw Error('Missing resumed fixture view');
     expect(after.view.state?.phase).toEqual(interrupted.view.state.phase);
     await expect(
-      donor.getByRole('button', { name: /play card|open stump|take bottom/i }),
-    ).toHaveCount(0);
+      donor.getByRole('button', { name: 'Take bottom card', exact: true }),
+    ).toBeVisible();
     expect(await donor.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );

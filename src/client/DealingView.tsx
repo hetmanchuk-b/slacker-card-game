@@ -18,15 +18,29 @@ export function DealingView({
   connection,
   busy,
   onDraw,
+  onPlay,
+  onStump,
+  seatId,
 }: Readonly<{
   connection: ConnectionState;
   busy: boolean;
   onDraw: () => void;
+  onPlay: (cardId: string) => void;
+  onStump: (cardId: string) => void;
+  seatId: string;
 }>) {
   const view = connection.view;
   const state = view?.state;
   const draw = connection.draw;
   const actor = state?.players.findIndex((player) => player.id === draw?.seatId) ?? -1;
+  const blocked =
+    busy ||
+    connection.status !== 'observing' ||
+    !!view?.paused ||
+    !!view?.hasProcedure ||
+    !state?.players.some((p) => p.id === seatId && p.status === 'active') ||
+    state.phase === 'finished';
+  const ordinary = state?.phase === 'round' || state?.phase === 'between-rounds';
   return (
     <section className="dealing">
       <h4>Cards and dealing</h4>
@@ -74,13 +88,26 @@ export function DealingView({
           <h5>Your hand</h5>
           <ul className="cards" data-testid="own-hand">
             {state.own.hand.map((card) => (
-              <li key={card.id}>{cardLabel(card)}</li>
+              <li key={card.id}>
+                {ordinary ? (
+                  <button type="button" disabled={blocked} onClick={() => onPlay(card.id)}>
+                    Play {cardLabel(card)}
+                  </button>
+                ) : (
+                  cardLabel(card)
+                )}
+              </li>
             ))}
           </ul>
           <h5>Your closed stumps</h5>
           <ul data-testid="own-stumps">
             {state.own.stumps.map((id, index) => (
-              <li key={id}>Closed stump {index + 1} — face down</li>
+              <li key={id}>
+                <button type="button" disabled={blocked || !ordinary} onClick={() => onStump(id)}>
+                  Use closed stump {index + 1}
+                </button>{' '}
+                — face down
+              </li>
             ))}
           </ul>
         </>

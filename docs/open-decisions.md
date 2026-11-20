@@ -46,6 +46,8 @@ Implementation uses branch/action ordinals rather than raw branch/command/event/
 - Hide the final-card reveal while its timer is suspended (including claims and disconnection). Resume only its remaining time; expiry never grants a new display window.
 - An illegal own-stump peek is a one-time fresh-action response to that seat. Do not replay it from snapshots, the private knowledge ledger, reconnect, history or duplicate receipts. A separate new illegal click is still a separate punishable action.
 
+**Stage 9.7 presentation approval:** the operator approved an actor-only, dismissible fresh-peek notice, ending on dismissal or when its associated penalty ends/changes, whichever comes first. Also clear it on pause, disconnect, resync, rollback or game change. There is no new timer, reopening, persistence or replay. This resolves the browser lifetime/dismissal choice without changing the underlying peek rule.
+
 These presentation decisions are reflected in rules §§3.2, 3.3 and 6.4. They do not change engine timers, physical card locations, rollback knowledge limits or bot-memory policy. Pure projectors cannot prove delivery freshness: the future authenticated publisher must supply committed action pairs and classify duplicate deliveries.
 
 ## D001 — Repetition entirely inside one round

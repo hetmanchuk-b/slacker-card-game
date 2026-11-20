@@ -1,5 +1,5 @@
 import { GameStream, object, exact, head, remainingTime } from './game-stream.ts';
-import type { GameSnapshot, Draw, Transfer } from './game-stream.ts';
+import type { GameSnapshot, Draw, Transfer, PlayObservation, Peek } from './game-stream.ts';
 const penaltyScope = (view: GameSnapshot | null) =>
   view?.penalty
     ? JSON.stringify([view.head.gameId, view.head.branchId, view.penalty.timer.id])
@@ -33,6 +33,9 @@ export type ConnectionState = Readonly<{
   draw: Draw | null;
   drawStatus: 'none' | 'pending' | 'played' | 'violation' | 'rejected' | 'uncertain';
   penaltyStatus: 'none' | 'pending' | 'accepted' | 'rejected' | 'uncertain';
+  moveStatus: 'none' | 'pending' | 'played' | 'violation' | 'rejected' | 'uncertain';
+  playObservations: readonly PlayObservation[];
+  peek: Peek | null;
   selectedCardId: string | null;
   transfers: readonly Transfer[];
   assigned: boolean;
@@ -63,7 +66,7 @@ export class GameConnection {
   #socket: GameSocket | null = null;
   #generation = 0;
   #stream: GameStream;
-  #pending: 'connect' | 'resync' | 'start' | 'draw' | 'penalty' | null = null;
+  #pending: 'connect' | 'resync' | 'start' | 'draw' | 'penalty' | 'move' | null = null;
   #commandRequest: string | null = null;
   #pendingPenaltyScope: string | null = null;
   #selectionScope: string | null = null;
@@ -80,6 +83,9 @@ export class GameConnection {
     draw: null,
     drawStatus: 'none',
     penaltyStatus: 'none',
+    moveStatus: 'none',
+    playObservations: [],
+    peek: null,
     selectedCardId: null,
     transfers: [],
     assigned: false,
@@ -119,7 +125,12 @@ export class GameConnection {
     };
   }
   #publish(next: Partial<ConnectionState> = {}) {
-    this.current = { ...this.current, ...next };
+    this.current = {
+      ...this.current,
+      ...next,
+      playObservations: this.#stream.playObservations,
+      peek: this.#stream.peek,
+    };
     const view = this.current.view;
     if (
       this.current.selectedCardId !== null &&
@@ -167,7 +178,8 @@ export class GameConnection {
   #fail(note: ConnectionState['note'], status: ConnectionState['status'] = 'failed') {
     const drawUncertain = this.#pending === 'draw';
     const penaltyUncertain = this.#pending === 'penalty';
-    const uncertain = drawUncertain || penaltyUncertain;
+    const moveUncertain = this.#pending === 'move';
+    const uncertain = drawUncertain || penaltyUncertain || moveUncertain;
     this.#finish();
     this.#drop();
     this.#publish({
@@ -179,6 +191,7 @@ export class GameConnection {
       selectedCardId: null,
       ...(drawUncertain ? { drawStatus: 'uncertain' } : {}),
       ...(penaltyUncertain ? { penaltyStatus: 'uncertain' } : {}),
+      ...(moveUncertain ? { moveStatus: 'uncertain' } : {}),
     });
   }
   close() {
@@ -313,6 +326,51 @@ export class GameConnection {
       },
     });
   }
+  playCard(cardId: string) {
+    this.#move('play-card', cardId);
+  }
+  takeBottom() {
+    this.#move('take-bottom');
+  }
+  openStump(cardId: string) {
+    this.#move('open-stump', cardId);
+  }
+  dismissPeek() {
+    this.#stream.dismissPeek();
+    this.#publish();
+  }
+  #move(type: 'play-card' | 'take-bottom' | 'open-stump', cardId?: string) {
+    const view = this.current.view;
+    if (
+      this.#pending ||
+      !this.#socket?.connected ||
+      this.current.status !== 'observing' ||
+      !view?.state ||
+      view.paused ||
+      view.hasProcedure ||
+      !view.state.players.some((p) => p.id === this.#deps.seatId && p.status === 'active') ||
+      view.state.phase === 'finished'
+    )
+      return;
+    if (view.state.phase !== 'round' && view.state.phase !== 'between-rounds') return;
+    if (type === 'play-card' && !view.state.own.hand.some((c) => c.id === cardId)) return;
+    if (type === 'open-stump' && !view.state.own.stumps.includes(cardId!)) return;
+    // No turn, beat, opening-right or table-count inference. The server decides.
+    this.#commandRequest = this.#deps.requestId();
+    this.#pending = 'move';
+    this.#deadline();
+    this.#publish({ moveStatus: 'pending' });
+    this.#socket.send({
+      protocolVersion: 1,
+      requestId: this.#commandRequest,
+      intent: {
+        type,
+        gameId: view.head.gameId,
+        branchId: view.head.branchId,
+        ...(type === 'take-bottom' ? {} : { cardId }),
+      },
+    });
+  }
   #canRespond() {
     const view = this.current.view;
     const p = view?.penalty;
@@ -406,7 +464,7 @@ export class GameConnection {
     }
     if (message.type === 'command-ack') {
       if (
-        (this.#pending !== 'draw' && this.#pending !== 'penalty') ||
+        (this.#pending !== 'draw' && this.#pending !== 'penalty' && this.#pending !== 'move') ||
         message.requestId !== this.#commandRequest
       )
         return;
@@ -426,7 +484,9 @@ export class GameConnection {
         this.#publish(
           kind === 'penalty'
             ? { penaltyStatus: 'accepted' }
-            : { drawStatus: r.outcome === 'violation' ? 'violation' : 'played' },
+            : kind === 'move'
+              ? { moveStatus: r.outcome === 'violation' ? 'violation' : 'played' }
+              : { drawStatus: r.outcome === 'violation' ? 'violation' : 'played' },
         );
       } else if (
         exact(r, ['type', 'code', 'head']) &&
@@ -438,7 +498,9 @@ export class GameConnection {
         this.#publish(
           kind === 'penalty'
             ? { penaltyStatus: 'rejected', selectedCardId: null }
-            : { drawStatus: 'rejected' },
+            : kind === 'move'
+              ? { moveStatus: 'rejected' }
+              : { drawStatus: 'rejected' },
         );
       } else this.#fail('invalid-message');
       return;
@@ -473,10 +535,12 @@ export class GameConnection {
     }
     if (result === 'ignored') return;
     if (this.#stream.reset) {
-      if (this.#pending === 'draw' || this.#pending === 'penalty') this.#finish();
+      if (this.#pending === 'draw' || this.#pending === 'penalty' || this.#pending === 'move')
+        this.#finish();
       this.#publish({
         drawStatus: 'none',
         draw: null,
+        moveStatus: 'none',
         penaltyStatus: 'none',
         selectedCardId: null,
         transfers: [],

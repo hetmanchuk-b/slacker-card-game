@@ -527,6 +527,100 @@ test('penalty uncertainty drops selection and observations; reconnect sends only
   assert.equal(client.current.selectedCardId, null);
   client.close();
 });
+function playing(sequence = 1) {
+  const value = penaltyBaseline(sequence);
+  Object.assign(value.view, { procedure: null });
+  Object.assign(value.view.state, {
+    phase: { type: 'round', number: 1, targetSize: 3, turnSeatId: 'other' },
+    table: [{ id: 'bottom', face: { suit: 'spades', rank: 14 } }],
+  });
+  return value;
+}
+test('play/take/stump clicks capture exact routes without turn, beat or opening-right solvers', () => {
+  const { client, sockets } = fixture();
+  client.connect();
+  const socket = sockets[0]!;
+  socket.deliver(playing());
+  for (const [type, cardId] of [
+    ['play-card', 'donation'],
+    ['take-bottom', undefined],
+    ['open-stump', 'stump'],
+  ] as const) {
+    if (type === 'play-card') client.playCard(cardId!);
+    else if (type === 'take-bottom') client.takeBottom();
+    else client.openStump(cardId!);
+    const command = socket.sent.at(-1) as { requestId: string };
+    assert.deepEqual(command, {
+      protocolVersion: 1,
+      requestId: command.requestId,
+      intent: { type, gameId: 'assigned-game', branchId: 'branch', ...(cardId ? { cardId } : {}) },
+    });
+    const count = socket.sent.length;
+    client.takeBottom();
+    assert.equal(socket.sent.length, count, 'single flight');
+    assert.equal(client.current.view?.state?.own.hand.length, 2, 'no optimistic movement');
+    socket.deliver({
+      protocolVersion: 1,
+      type: 'command-ack',
+      requestId: command.requestId,
+      result: {
+        type: 'accepted',
+        outcome: 'violation',
+        duplicate: false,
+        head: { gameId: 'historical', branchId: 'old', version: 99 },
+      },
+    });
+    assert.equal(client.current.moveStatus, 'violation');
+    assert.equal(client.current.view?.head.version, 1);
+  }
+  const count = socket.sent.length;
+  client.playCard('stump');
+  client.openStump('foreign');
+  assert.equal(socket.sent.length, count, 'only own command handles');
+  const blocked = playing(2);
+  Object.assign(blocked.view, { procedure: penaltyBaseline().view.procedure });
+  socket.deliver(blocked);
+  client.playCard('donation');
+  client.takeBottom();
+  client.openStump('stump');
+  assert.equal(socket.sent.length, count, 'procedures block gameplay');
+  client.close();
+});
+test('uncertain moves clear face feedback and are not replayed; reset invalidates late acknowledgments', () => {
+  const { client, sockets, timeout } = fixture();
+  client.connect();
+  sockets[0]!.deliver(playing());
+  client.playCard('donation');
+  const original = sockets[0]!.sent.at(-1) as { requestId: string };
+  timeout();
+  assert.equal(client.current.status, 'uncertain');
+  assert.equal(client.current.moveStatus, 'uncertain');
+  assert.equal(client.current.peek, null);
+  client.connect();
+  sockets[1]!.deliver(playing());
+  assert.equal(sockets[1]!.sent.length, 1);
+  client.takeBottom();
+  sockets[1]!.deliver({
+    protocolVersion: 1,
+    type: 'rollback-notice',
+    delivery: { epoch: 'rollback', sequence: 1 },
+    notice: {},
+  });
+  assert.notEqual(client.current.moveStatus, 'pending');
+  sockets[1]!.deliver({
+    protocolVersion: 1,
+    type: 'command-ack',
+    requestId: original.requestId,
+    result: {
+      type: 'accepted',
+      outcome: 'played',
+      duplicate: true,
+      head: { gameId: 'old', branchId: 'old', version: 99 },
+    },
+  });
+  assert.notEqual(client.current.moveStatus, 'played');
+  client.close();
+});
 test('idle stream updates cannot release another UI operation guard; malformed receipts fail closed', () => {
   const { client, sockets, busy } = fixture();
   client.connect();

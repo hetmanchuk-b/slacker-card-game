@@ -4,6 +4,7 @@ import type { LobbyMembership } from '../protocol/lobby.ts';
 import { GameConnection } from './game-connection.ts';
 import { DealingView } from './DealingView.tsx';
 import { PenaltyView } from './PenaltyView.tsx';
+import { PlayView } from './PlayView.tsx';
 
 const notes = {
   none: '',
@@ -172,7 +173,21 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
       ) : (
         <p>No current game baseline is displayed. Reconnect/resync to confirm it.</p>
       )}
-      <DealingView connection={connection} busy={busy} onDraw={() => client.drawCard()} />
+      <DealingView
+        connection={connection}
+        busy={busy}
+        seatId={membership.seatId}
+        onDraw={() => client.drawCard()}
+        onPlay={(id) => client.playCard(id)}
+        onStump={(id) => client.openStump(id)}
+      />
+      <PlayView
+        connection={connection}
+        busy={busy}
+        seatId={membership.seatId}
+        onTake={() => client.takeBottom()}
+        onDismissPeek={() => client.dismissPeek()}
+      />
       <PenaltyView
         connection={connection}
         seatId={membership.seatId}
@@ -181,8 +196,8 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
         onRespond={(id) => client.respondToPenalty(id)}
       />
       <p className="quiet">
-        Ordinary-play controls arrive in later increments. No permanent trump or next-recipient
-        indicator is shown.
+        Drag, chat/claim and owner-history controls arrive in later increments. No permanent trump
+        or next-recipient indicator is shown.
       </p>
     </section>
   );

@@ -16,6 +16,20 @@ export type Penalty = Readonly<{
   timer: DisplayTimer;
 }>;
 export type Transfer = Readonly<{ fromSeatId: string; toSeatId: string; card: Card }>;
+export type PlayObservation =
+  | Readonly<{ type: 'card-played'; seatId: string; card: Card }>
+  | Readonly<{ type: 'bottom-taken'; seatId: string; card: Card; automatic: boolean }>
+  | Readonly<{ type: 'stump-opened'; seatId: string; card: Card | null }>
+  | Readonly<{ type: 'violation'; seatId: string; reason: string }>;
+export type Peek = Readonly<{ card: Card; penaltyId: string }>;
+const violationReasons = [
+  'draw-out-of-turn',
+  'invalid-beat',
+  'play-out-of-turn',
+  'peek',
+  'must-open-stump',
+  'claim',
+];
 export const remainingTime = (timer: DisplayTimer, now: number): number =>
   timer.paused ? timer.remainingMs : Math.max(0, (timer.expiresAt ?? now) - now);
 export type GameSnapshot = Readonly<{
@@ -28,6 +42,9 @@ export type GameSnapshot = Readonly<{
   state: Readonly<{
     own: Readonly<{ hand: readonly Card[]; stumps: readonly string[] }>;
     phase: string;
+    table: readonly Card[];
+    leaderId: string | null;
+    round: Readonly<{ number: number; targetSize: number; turnSeatId: string }> | null;
     deckCount: number;
     tableCount: number;
     discardCount: number;
@@ -146,7 +163,68 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
       new Set([...hand.map((c) => c!.id), ...stumps]).size !== hand.length + stumps.length
     )
       return null;
+    const table = s.table.map(card);
+    if (
+      table.some((c) => c === null) ||
+      new Set([...hand.map((c) => c!.id), ...stumps, ...table.map((c) => c!.id)]).size !==
+        hand.length + stumps.length + table.length
+    )
+      return null;
+    const active = (id: unknown): id is string =>
+      text(id) && players.some((p) => p.id === id && p.status === 'active');
+    const positive = (n: unknown): n is number => count(n, Number.MAX_SAFE_INTEGER) && n > 0;
+    let leaderId: string | null = null;
+    let round: NonNullable<GameSnapshot['state']>['round'] = null;
+    switch (s.phase.type) {
+      case 'between-rounds':
+        if (
+          !exact(s.phase, ['type', 'leaderId', 'nextRoundNumber']) ||
+          !active(s.phase.leaderId) ||
+          !positive(s.phase.nextRoundNumber)
+        )
+          return null;
+        leaderId = s.phase.leaderId;
+        break;
+      case 'round':
+        if (
+          !exact(s.phase, ['type', 'number', 'targetSize', 'turnSeatId']) ||
+          !positive(s.phase.number) ||
+          !count(s.phase.targetSize, 8) ||
+          s.phase.targetSize < 2 ||
+          !active(s.phase.turnSeatId)
+        )
+          return null;
+        round = {
+          number: s.phase.number,
+          targetSize: s.phase.targetSize,
+          turnSeatId: s.phase.turnSeatId,
+        };
+        break;
+      case 'finished': {
+        if (!exact(s.phase, ['type', 'result']) || !object(s.phase.result)) return null;
+        const r = s.phase.result;
+        if (
+          !(exact(r, ['type']) && r.type === 'all-won') &&
+          !(exact(r, ['type', 'loserId']) && r.type === 'last-player' && active(r.loserId)) &&
+          !(
+            exact(r, ['type', 'remainingSeatIds']) &&
+            r.type === 'draw' &&
+            Array.isArray(r.remainingSeatIds) &&
+            r.remainingSeatIds.length <= 8 &&
+            r.remainingSeatIds.every(active) &&
+            new Set(r.remainingSeatIds).size === r.remainingSeatIds.length
+          )
+        )
+          return null;
+        break;
+      }
+      default:
+        if (!exact(s.phase, ['type'])) return null;
+    }
     state = {
+      table: table as Card[],
+      leaderId,
+      round,
       own: { hand: hand as Card[], stumps: [...stumps] },
       players,
       phase: s.phase.type,
@@ -296,6 +374,13 @@ export class GameStream {
   snapshot: GameSnapshot | null = null;
   draw: Draw | null = null;
   transfers: readonly Transfer[] = [];
+  playObservations: readonly PlayObservation[] = [];
+  peek: Peek | null = null;
+  #pendingPeek: Card | null = null;
+  dismissPeek() {
+    this.peek = null;
+    this.#pendingPeek = null;
+  }
   reset = false;
   #penaltyTimer: { key: string; timer: DisplayTimer } | null = null;
   #route: string | null = null;
@@ -312,6 +397,8 @@ export class GameStream {
       this.snapshot = null;
       this.draw = null;
       this.transfers = [];
+      this.playObservations = [];
+      this.dismissPeek();
       this.#penaltyTimer = null;
       this.#revealKey = null;
       this.reset = true;
@@ -343,6 +430,8 @@ export class GameStream {
       this.#sequence = -1;
       this.snapshot = null;
       this.draw = null;
+      this.playObservations = [];
+      this.dismissPeek();
       this.transfers = [];
       this.#penaltyTimer = null;
       this.reset = true;
@@ -364,8 +453,65 @@ export class GameStream {
           return 'invalid';
         this.#routeTo(v.head);
         const transfers: Transfer[] = [];
+        const plays: PlayObservation[] = [];
+        let peek: Card | null = null;
         for (const o of v.observations) {
           if (!object(o) || typeof o.type !== 'string') return 'invalid';
+          if (o.type === 'stump-peeked') {
+            if (
+              !exact(o, ['type', 'card']) ||
+              !card(o.card) ||
+              peek !== null ||
+              (this.snapshot?.state && !this.snapshot.state.own.stumps.includes(card(o.card)!.id))
+            )
+              return 'invalid';
+            peek = card(o.card)!;
+            continue;
+          }
+          if (['card-played', 'bottom-taken', 'stump-opened', 'violation'].includes(o.type)) {
+            if (
+              !text(o.seatId) ||
+              (this.snapshot?.state && !this.snapshot.state.players.some((p) => p.id === o.seatId))
+            )
+              return 'invalid';
+            if (o.type === 'violation') {
+              if (
+                !exact(o, ['type', 'seatId', 'reason']) ||
+                typeof o.reason !== 'string' ||
+                !violationReasons.includes(o.reason)
+              )
+                return 'invalid';
+              plays.push({ type: 'violation', seatId: o.seatId, reason: o.reason });
+            } else if (o.type === 'bottom-taken') {
+              if (
+                !exact(o, ['type', 'seatId', 'card', 'automatic']) ||
+                !card(o.card) ||
+                typeof o.automatic !== 'boolean'
+              )
+                return 'invalid';
+              plays.push({
+                type: 'bottom-taken',
+                seatId: o.seatId,
+                card: card(o.card)!,
+                automatic: o.automatic,
+              });
+            } else if (o.type === 'stump-opened') {
+              if (
+                !exact(o, ['type', 'seatId', 'card']) ||
+                (o.card !== null && (o.seatId !== this.#seatId || !card(o.card)))
+              )
+                return 'invalid';
+              plays.push({
+                type: 'stump-opened',
+                seatId: o.seatId,
+                card: o.card === null ? null : card(o.card)!,
+              });
+            } else {
+              if (!exact(o, ['type', 'seatId', 'card']) || !card(o.card)) return 'invalid';
+              plays.push({ type: 'card-played', seatId: o.seatId, card: card(o.card)! });
+            }
+            continue;
+          }
           if (o.type === 'penalty-transfer') {
             if (
               !exact(o, ['type', 'fromSeatId', 'toSeatId', 'card']) ||
@@ -405,9 +551,16 @@ export class GameStream {
           }
         }
         this.transfers = transfers;
+        this.playObservations = plays;
+        if (peek) {
+          this.dismissPeek();
+          this.#pendingPeek = peek;
+        }
       }
       if (message.type !== 'owner-history') this.snapshot = null;
       if (message.type === 'rollback-notice') {
+        this.dismissPeek();
+        this.playObservations = [];
         this.transfers = [];
         this.#penaltyTimer = null;
         this.draw = null;
@@ -422,6 +575,25 @@ export class GameStream {
     if (this.draw && next.state && !next.state.players.some((p) => p.id === this.draw!.seatId))
       return 'invalid';
     const players = next.state?.players;
+    if (!players) {
+      this.transfers = [];
+      this.playObservations = [];
+      this.dismissPeek();
+    } else if (this.playObservations.some((o) => !players.some((p) => p.id === o.seatId)))
+      return 'invalid';
+    if (
+      !next.penalty ||
+      next.penalty.recipientId !== this.#seatId ||
+      next.penalty.reason !== 'peek' ||
+      next.paused ||
+      next.penalty.timer.paused
+    )
+      this.dismissPeek();
+    else if (this.#pendingPeek) {
+      if (!next.state!.own.stumps.includes(this.#pendingPeek.id)) return 'invalid';
+      this.peek = { card: this.#pendingPeek, penaltyId: next.penalty.timer.id };
+      this.#pendingPeek = null;
+    } else if (this.peek && this.peek.penaltyId !== next.penalty.timer.id) this.dismissPeek();
     if (!players) this.transfers = [];
     else if (
       this.transfers.some((t) =>

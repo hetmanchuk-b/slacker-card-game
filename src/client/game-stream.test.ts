@@ -21,7 +21,7 @@ const state = (epoch: string, sequence: number, version = 0, paused = false, emp
           discardCount: 0,
           phase: { type: 'dealing' },
         },
-    transient: { initialRecipientNotice: true, reveal: null },
+    transient: { initialRecipientNotice: !empty, reveal: null },
     procedure: null,
     control: {
       paused,
@@ -64,24 +64,106 @@ test('duplicates cannot regress state and missing delivery positions fail closed
   assert.equal(stream.snapshot?.head.version, 2);
   assert.equal(stream.receive(state('epoch', 3, 3)), 'invalid');
 });
-test('action observations and legitimate private faces are discarded, not replayed as memory', () => {
+const card = { id: 'opaque-card', face: { suit: 'hearts', rank: 9 } };
+const revealDeadline = (stream: GameStream) => stream.snapshot?.reveal?.expiresAt;
+const action = (sequence: number, observations: object[]) => ({
+  protocolVersion: 1,
+  type: 'action',
+  delivery: { epoch: 'epoch', sequence },
+  view: {
+    head: { gameId: 'game', branchId: 'branch', version: 1 },
+    commandId: 'command',
+    observations,
+  },
+});
+test('own faces and closed handles are validated; fresh draw actors survive the following state but never resync', () => {
   const stream = new GameStream('own');
   const wire = state('epoch', 1);
-  wire.view.state!.own.hand = [{ id: 'PRIVATE_FACE' }] as never[];
+  wire.view.state!.own.hand = [card] as never[];
+  wire.view.state!.players[0]!.handCount = 1;
+  wire.view.state!.own.stumps = ['opaque-stump'] as never[];
+  wire.view.state!.players[0]!.stumpCount = 1;
   assert.equal(stream.receive(wire), 'state');
-  assert.equal(JSON.stringify(stream.snapshot).includes('PRIVATE_FACE'), false);
+  assert.deepEqual(stream.snapshot?.state?.own, { hand: [card], stumps: ['opaque-stump'] });
   assert.equal(
-    stream.receive({
-      protocolVersion: 1,
-      type: 'action',
-      delivery: { epoch: 'epoch', sequence: 2 },
-      view: { privateObservation: 'PRIVATE_FACE' },
-    }),
+    stream.receive(
+      action(2, [{ type: 'card-drawn', seatId: 'other', destination: 'stump', card: null }]),
+    ),
     'meta',
   );
-  assert.equal(stream.snapshot, null);
+  assert.deepEqual(stream.draw, { seatId: 'other', destination: 'stump', rejected: false });
   assert.equal(stream.receive(state('epoch', 3)), 'state');
-  assert.equal(JSON.stringify(stream.snapshot).includes('PRIVATE_FACE'), false);
+  assert.equal(stream.draw?.seatId, 'other');
+  assert.equal(stream.receive(action(2, [{ type: 'draw-rejected', seatId: 'own' }])), 'ignored');
+  assert.equal(stream.draw?.seatId, 'other');
+  assert.equal(stream.receive(state('new', 1)), 'state');
+  assert.equal(stream.draw, null);
+});
+test('D002 notices and relative reveal deadlines cannot restart on duplicates or same-timer updates', () => {
+  let now = 100;
+  const stream = new GameStream('own', () => now);
+  const reveal = (sequence: number, remainingMs: number, paused = false) => {
+    const wire = state('epoch', sequence, 1, paused);
+    wire.view.state!.phase.type = 'trump-reveal';
+    Object.assign(wire.view.transient, {
+      initialRecipientNotice: false,
+      reveal: paused
+        ? null
+        : {
+            card,
+            recipientId: 'other',
+            timer: { id: 'timer', remainingMs, paused: false },
+          },
+    });
+    return wire;
+  };
+  assert.equal(stream.receive(state('epoch', 1)), 'state');
+  assert.equal(stream.snapshot?.initialRecipientNotice, true);
+  assert.equal(stream.receive(action(2, [{ type: 'draw-rejected', seatId: 'other' }])), 'meta');
+  assert.equal(stream.receive(state('epoch', 3)), 'state');
+  assert.equal(stream.snapshot?.initialRecipientNotice, true);
+  stream.receive(reveal(4, 10000));
+  assert.equal(stream.snapshot?.reveal?.expiresAt, 10100);
+  now = 5000;
+  stream.receive(reveal(4, 10000));
+  stream.receive(reveal(5, 10000));
+  assert.equal(stream.snapshot?.reveal?.expiresAt, 10100);
+  stream.receive(reveal(6, 7000, true));
+  assert.equal(stream.snapshot?.reveal, null);
+  now = 20000;
+  stream.receive(reveal(7, 7000));
+  assert.equal(revealDeadline(stream), 27000);
+  now = 27001;
+  stream.expireReveal();
+  assert.equal(stream.snapshot?.reveal, null);
+  stream.receive(reveal(8, 7000));
+  assert.equal(stream.snapshot?.reveal, null, 'expired running timer cannot resurrect');
+});
+test('malformed cards, hidden observations and invalid transient references fail closed', () => {
+  for (const bad of [
+    { ...card, face: { suit: ['hearts'], rank: 9 } },
+    { ...card, face: { suit: 'hearts', rank: 15 } },
+    { ...card, secret: 'PRIVATE' },
+  ]) {
+    const wire = state('epoch', 1);
+    wire.view.state!.own.hand = [bad] as never[];
+    assert.equal(new GameStream('own').receive(wire), 'invalid');
+  }
+  assert.equal(
+    new GameStream('own').receive(
+      action(1, [{ type: 'card-drawn', seatId: 'other', destination: 'hand', card }]),
+    ),
+    'invalid',
+  );
+  const wire = state('epoch', 1);
+  Object.assign(wire.view.transient, {
+    reveal: {
+      card,
+      recipientId: 'missing',
+      timer: { id: 'timer', remainingMs: 10000, paused: false },
+    },
+  });
+  assert.equal(new GameStream('own').receive(wire), 'invalid');
 });
 test('viewer substitution, raw private player fields and malformed bounds are rejected', () => {
   for (const mutate of [

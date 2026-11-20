@@ -1,8 +1,14 @@
 import { validLobbyLocator as text } from './lobby-membership.ts';
+export type Card = Readonly<{ id: string; face: Readonly<{ suit: string; rank: number }> }>;
+export type Draw = Readonly<{ seatId: string; rejected: boolean; destination?: 'hand' | 'stump' }>;
+export type Reveal = Readonly<{ card: Card; recipientId: string; expiresAt: number }>;
 export type GameSnapshot = Readonly<{
+  initialRecipientNotice: boolean;
+  reveal: Reveal | null;
   head: Readonly<{ gameId: string; branchId: string; version: number }>;
   paused: boolean;
   state: Readonly<{
+    own: Readonly<{ hand: readonly Card[]; stumps: readonly string[] }>;
     phase: string;
     deckCount: number;
     tableCount: number;
@@ -18,10 +24,32 @@ export type GameSnapshot = Readonly<{
 }>;
 export const object = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === 'object' && !Array.isArray(v);
-const exact = (v: unknown, keys: string[]): v is Record<string, unknown> =>
+export const exact = (v: unknown, keys: string[]): v is Record<string, unknown> =>
   object(v) && Object.keys(v).length === keys.length && keys.every((key) => Object.hasOwn(v, key));
 const count = (v: unknown, max = 36): v is number =>
   Number.isSafeInteger(v) && Number(v) >= 0 && Number(v) <= max;
+function card(raw: unknown): Card | null {
+  if (
+    !exact(raw, ['id', 'face']) ||
+    !text(raw.id) ||
+    !exact(raw.face, ['suit', 'rank']) ||
+    typeof raw.face.suit !== 'string' ||
+    !['clubs', 'diamonds', 'hearts', 'spades'].includes(raw.face.suit) ||
+    !Number.isInteger(raw.face.rank) ||
+    Number(raw.face.rank) < 6 ||
+    Number(raw.face.rank) > 14
+  )
+    return null;
+  return { id: raw.id, face: { suit: raw.face.suit, rank: Number(raw.face.rank) } };
+}
+export function head(raw: unknown): boolean {
+  return (
+    exact(raw, ['gameId', 'branchId', 'version']) &&
+    text(raw.gameId) &&
+    text(raw.branchId) &&
+    count(raw.version, Number.MAX_SAFE_INTEGER)
+  );
+}
 function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
   if (
     !exact(raw, ['head', 'state', 'transient', 'procedure', 'control']) ||
@@ -44,7 +72,7 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
       typeof s.viewer.type !== 'string' ||
       !['participant', 'finished-player'].includes(s.viewer.type) ||
       s.viewer.seatId !== seatId ||
-      !object(s.own) ||
+      !exact(s.own, ['seatId', 'hand', 'stumps']) ||
       s.own.seatId !== seatId ||
       !Array.isArray(s.own.hand) ||
       s.own.hand.length > 36 ||
@@ -88,8 +116,20 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
         stumpCount: p.stumpCount,
       });
     }
-    if (!players.some((p) => p.id === seatId)) return null;
+    const ownPlayer = players.find((p) => p.id === seatId);
+    const hand = s.own.hand.map(card);
+    const stumps = s.own.stumps;
+    if (
+      !ownPlayer ||
+      hand.some((c) => c === null) ||
+      !stumps.every(text) ||
+      ownPlayer.handCount !== hand.length ||
+      ownPlayer.stumpCount !== stumps.length ||
+      new Set([...hand.map((c) => c!.id), ...stumps]).size !== hand.length + stumps.length
+    )
+      return null;
     state = {
+      own: { hand: hand as Card[], stumps: [...stumps] },
       players,
       phase: s.phase.type,
       deckCount: s.deckCount,
@@ -115,9 +155,38 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
       controller: c.controller,
     });
   }
-  // Faces, handles, procedures and transient/action observations are deliberately
-  // not retained by this 9.4 read-only summary. They belong to later increments.
+  if (
+    !exact(raw.transient, ['initialRecipientNotice', 'reveal']) ||
+    typeof raw.transient.initialRecipientNotice !== 'boolean'
+  )
+    return null;
+  const initialRecipientNotice = raw.transient.initialRecipientNotice;
+  if (initialRecipientNotice && state?.phase !== 'dealing') return null;
+  let reveal: Reveal | null = null;
+  if (raw.transient.reveal !== null) {
+    const r = raw.transient.reveal;
+    if (
+      !exact(r, ['card', 'recipientId', 'timer']) ||
+      !card(r.card) ||
+      !text(r.recipientId) ||
+      !state?.players.some((p) => p.id === r.recipientId) ||
+      state.phase !== 'trump-reveal' ||
+      raw.control.paused ||
+      !exact(r.timer, ['id', 'remainingMs', 'paused']) ||
+      !text(r.timer.id) ||
+      typeof r.timer.remainingMs !== 'number' ||
+      !Number.isFinite(r.timer.remainingMs) ||
+      r.timer.remainingMs <= 0 ||
+      r.timer.remainingMs > 10000 ||
+      r.timer.paused !== false
+    )
+      return null;
+    // Duration is converted to a monotonic deadline by GameStream at receipt.
+    reveal = { card: card(r.card)!, recipientId: r.recipientId, expiresAt: r.timer.remainingMs };
+  }
   return {
+    initialRecipientNotice,
+    reveal,
     head: { gameId: raw.head.gameId, branchId: raw.head.branchId, version: raw.head.version },
     state,
     paused: raw.control.paused,
@@ -130,10 +199,21 @@ export class GameStream {
   #sequence = -1;
   #retired = new Set<string>();
   snapshot: GameSnapshot | null = null;
-  constructor(seatId: string) {
+  draw: Draw | null = null;
+  reset = false;
+  readonly #now: () => number;
+  #revealKey: string | null = null;
+  #revealDeadline = 0;
+  constructor(seatId: string, now: () => number = () => performance.now()) {
     this.#seatId = seatId;
+    this.#now = now;
+  }
+  expireReveal() {
+    if (this.snapshot?.reveal && this.#now() >= this.snapshot.reveal.expiresAt)
+      this.snapshot = { ...this.snapshot, reveal: null };
   }
   receive(message: unknown): 'state' | 'meta' | 'ignored' | 'invalid' {
+    this.reset = false;
     if (!object(message) || message.protocolVersion !== 1 || typeof message.type !== 'string')
       return 'invalid';
     if (['command-ack', 'match-start-ack', 'chat-page'].includes(message.type)) return 'ignored';
@@ -152,16 +232,84 @@ export class GameStream {
       this.#epoch = epoch;
       this.#sequence = -1;
       this.snapshot = null;
+      this.draw = null;
+      this.reset = true;
+      this.#revealKey = null;
     }
     if (sequence <= this.#sequence) return 'ignored';
     if (this.#sequence !== -1 && sequence !== this.#sequence + 1) return 'invalid';
     this.#sequence = sequence;
     if (message.type !== 'state') {
+      if (message.type === 'action') {
+        const v = message.view;
+        if (
+          !exact(v, ['head', 'commandId', 'observations']) ||
+          !head(v.head) ||
+          !text(v.commandId) ||
+          !Array.isArray(v.observations) ||
+          v.observations.length > 128
+        )
+          return 'invalid';
+        for (const o of v.observations) {
+          if (!object(o) || typeof o.type !== 'string') return 'invalid';
+          if (o.type !== 'card-drawn' && o.type !== 'draw-rejected') continue;
+          if (
+            !text(o.seatId) ||
+            (this.snapshot?.state && !this.snapshot.state.players.some((p) => p.id === o.seatId))
+          )
+            return 'invalid';
+          if (o.type === 'draw-rejected') {
+            if (!exact(o, ['type', 'seatId'])) return 'invalid';
+            this.draw = { seatId: o.seatId, rejected: true };
+          } else {
+            if (
+              !exact(o, ['type', 'seatId', 'destination', 'card']) ||
+              (o.destination !== 'hand' && o.destination !== 'stump') ||
+              (o.card !== null &&
+                (o.seatId !== this.#seatId || o.destination !== 'hand' || !card(o.card)))
+            )
+              return 'invalid';
+            this.draw = { seatId: o.seatId, rejected: false, destination: o.destination };
+          }
+        }
+      }
       if (message.type !== 'owner-history') this.snapshot = null;
+      if (message.type === 'rollback-notice') {
+        this.draw = null;
+        this.reset = true;
+        this.#revealKey = null;
+      }
       return 'meta';
     }
-    const next = snapshot(message.view, this.#seatId);
+    let next = snapshot(message.view, this.#seatId);
     if (!next) return 'invalid';
+    if (this.draw && next.state && !next.state.players.some((p) => p.id === this.draw!.seatId))
+      return 'invalid';
+    if (next.reveal) {
+      const raw = message.view as { transient: { reveal: { timer: { id: string } } } };
+      const key = JSON.stringify([
+        next.head.gameId,
+        next.head.branchId,
+        raw.transient.reveal.timer.id,
+      ]);
+      const deadline = this.#now() + next.reveal.expiresAt;
+      this.#revealDeadline =
+        key === this.#revealKey ? Math.min(this.#revealDeadline, deadline) : deadline;
+      this.#revealKey = key;
+      next = {
+        ...next,
+        reveal:
+          this.#revealDeadline > this.#now()
+            ? { ...next.reveal, expiresAt: this.#revealDeadline }
+            : null,
+      };
+    } else if (
+      next.paused ||
+      (object(message.view) && message.view.procedure !== null) ||
+      next.state?.phase !== 'trump-reveal'
+    ) {
+      this.#revealKey = null;
+    }
     this.snapshot = next;
     return 'state';
   }

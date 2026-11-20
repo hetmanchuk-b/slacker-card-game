@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import type { LobbyMembership } from '../protocol/lobby.ts';
 import { GameConnection } from './game-connection.ts';
+import { DealingView } from './DealingView.tsx';
 
 const notes = {
   none: '',
@@ -88,9 +89,10 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
     <section className="game-connection" aria-labelledby="game-connection-title">
       <h3 id="game-connection-title">Game connection</h3>
       <p className="quiet">
-        Read-only observation. Refresh agreements and obtain every durable member's acceptance
-        before attempting a first start. Only the server decides admission. A confirmed game or
-        branch change clears the old agreement snapshot and unsaved draft; refresh agreements again.
+        Manual dealing and current observations. Refresh agreements and obtain every durable
+        member's acceptance before attempting a first start. Only the server decides admission. A
+        confirmed game or branch change clears the old agreement snapshot and unsaved draft; refresh
+        agreements again.
       </p>
       <p role="status">
         Connection: <span data-testid="connection-status">{connection.status}</span>
@@ -169,9 +171,10 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
       ) : (
         <p>No current game baseline is displayed. Reconnect/resync to confirm it.</p>
       )}
+      <DealingView connection={connection} busy={busy} onDraw={() => client.drawCard()} />
       <p className="quiet">
-        Card interaction, dealing notices, transient reveals and card faces arrive in later
-        increments. No permanent trump or dealing-turn indicator is shown.
+        Penalty and ordinary-play controls arrive in later increments. No permanent trump or
+        next-recipient indicator is shown.
       </p>
     </section>
   );

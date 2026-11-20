@@ -1,5 +1,6 @@
-import { GameStream, object } from './game-stream.ts';
-import type { GameSnapshot } from './game-stream.ts';
+import { GameStream, object, exact, head } from './game-stream.ts';
+import type { GameSnapshot, Draw } from './game-stream.ts';
+import { PUBLIC_REJECTIONS } from '../protocol/contracts.ts';
 import { validLobbyLocator as text } from './lobby-membership.ts';
 export type GameSocket = {
   readonly connected: boolean;
@@ -25,6 +26,8 @@ export type ConnectionState = Readonly<{
     | 'uncertain'
     | 'failed';
   view: GameSnapshot | null;
+  draw: Draw | null;
+  drawStatus: 'none' | 'pending' | 'played' | 'violation' | 'rejected' | 'uncertain';
   assigned: boolean;
   retry: boolean;
   note:
@@ -44,6 +47,8 @@ type Dependencies = Readonly<{
   storage: Pick<Storage, 'getItem' | 'setItem'>;
   schedule?: (timeout: () => void) => () => void;
   onBusy?: (busy: boolean) => void;
+  now?: () => number;
+  scheduleReveal?: (callback: () => void, delay: number) => () => void;
 }>;
 export class GameConnection {
   readonly #deps: Dependencies;
@@ -51,7 +56,9 @@ export class GameConnection {
   #socket: GameSocket | null = null;
   #generation = 0;
   #stream: GameStream;
-  #pending: 'connect' | 'resync' | 'start' | null = null;
+  #pending: 'connect' | 'resync' | 'start' | 'draw' | null = null;
+  #drawRequest: string | null = null;
+  #cancelReveal: (() => void) | null = null;
   #cancel: (() => void) | null = null;
   #listener: ((state: ConnectionState) => void) | null = null;
   #start: Start | null = null;
@@ -60,6 +67,8 @@ export class GameConnection {
   current: ConnectionState = {
     status: 'disconnected',
     view: null,
+    draw: null,
+    drawStatus: 'none',
     assigned: false,
     retry: false,
     note: 'none',
@@ -67,7 +76,7 @@ export class GameConnection {
   constructor(dependencies: Dependencies) {
     this.#deps = dependencies;
     this.#key = `penky.first-start.v1.${dependencies.lobbyId}`;
-    this.#stream = new GameStream(dependencies.seatId);
+    this.#stream = new GameStream(dependencies.seatId, dependencies.now);
     try {
       const saved = dependencies.storage.getItem(this.#key);
       if (saved !== null) {
@@ -125,17 +134,26 @@ export class GameConnection {
     const socket = this.#socket;
     this.#socket = null;
     socket?.disconnect();
-    this.#stream = new GameStream(this.#deps.seatId);
+    this.#cancelReveal?.();
+    this.#cancelReveal = null;
+    this.#stream = new GameStream(this.#deps.seatId, this.#deps.now);
   }
   #fail(note: ConnectionState['note'], status: ConnectionState['status'] = 'failed') {
+    const uncertain = this.#pending === 'draw';
     this.#finish();
     this.#drop();
-    this.#publish({ status, note, view: null });
+    this.#publish({
+      status: uncertain ? 'uncertain' : status,
+      note,
+      view: null,
+      draw: null,
+      ...(uncertain ? { drawStatus: 'uncertain' } : {}),
+    });
   }
   close() {
     this.#finish();
     this.#drop();
-    this.#publish({ status: 'disconnected', view: null });
+    this.#publish({ status: 'disconnected', view: null, draw: null });
   }
   connect() {
     if (this.#pending) return;
@@ -186,6 +204,7 @@ export class GameConnection {
     this.#publish({
       status: 'connecting',
       view: null,
+      draw: null,
       note: this.current.note === 'storage-unavailable' ? 'storage-unavailable' : 'none',
     });
     socket.connect();
@@ -227,6 +246,52 @@ export class GameConnection {
     this.#publish({ status: 'starting', retry: true, note: 'none' });
     this.#socket.send(this.#start);
   }
+  drawCard() {
+    const view = this.current.view;
+    if (
+      this.#pending ||
+      !this.#socket?.connected ||
+      this.current.status !== 'observing' ||
+      !view?.state ||
+      view.paused ||
+      view.state.phase !== 'dealing'
+    )
+      return;
+    // No next-recipient/turn or local legality gate. Each click is a new intent.
+    this.#drawRequest = this.#deps.requestId();
+    this.#pending = 'draw';
+    this.#deadline();
+    this.#publish({ drawStatus: 'pending' });
+    this.#socket.send({
+      protocolVersion: 1,
+      requestId: this.#drawRequest,
+      intent: {
+        type: 'draw-card',
+        gameId: view.head.gameId,
+        branchId: view.head.branchId,
+      },
+    });
+  }
+  #armReveal() {
+    this.#cancelReveal?.();
+    this.#cancelReveal = null;
+    const reveal = this.#stream.snapshot?.reveal;
+    if (!reveal) return;
+    const schedule =
+      this.#deps.scheduleReveal ??
+      ((callback: () => void, delay: number) => {
+        const timer = setTimeout(callback, delay);
+        return () => clearTimeout(timer);
+      });
+    this.#cancelReveal = schedule(
+      () => {
+        this.#stream.expireReveal();
+        this.#publish({ view: this.#stream.snapshot });
+        this.#armReveal();
+      },
+      Math.max(0, reveal.expiresAt - (this.#deps.now?.() ?? performance.now())),
+    );
+  }
   #receive(message: unknown) {
     if (!object(message) || message.protocolVersion !== 1) {
       this.#fail('invalid-message');
@@ -245,6 +310,32 @@ export class GameConnection {
           message.code === 'unauthorized' ? 'unauthorized' : 'unavailable',
           this.#pending === 'start' ? 'uncertain' : 'failed',
         );
+      return;
+    }
+    if (message.type === 'command-ack') {
+      if (this.#pending !== 'draw' || message.requestId !== this.#drawRequest) return;
+      const r = message.result;
+      if (!object(r) || !head(r.head)) {
+        this.#fail('invalid-message');
+        return;
+      }
+      if (
+        exact(r, ['type', 'outcome', 'head', 'duplicate']) &&
+        r.type === 'accepted' &&
+        (r.outcome === 'played' || r.outcome === 'violation' || r.outcome === 'control') &&
+        typeof r.duplicate === 'boolean'
+      ) {
+        this.#finish();
+        this.#publish({ drawStatus: r.outcome === 'violation' ? 'violation' : 'played' });
+      } else if (
+        exact(r, ['type', 'code', 'head']) &&
+        r.type === 'rejected' &&
+        typeof r.code === 'string' &&
+        PUBLIC_REJECTIONS.some((code) => code === r.code)
+      ) {
+        this.#finish();
+        this.#publish({ drawStatus: 'rejected' });
+      } else this.#fail('invalid-message');
       return;
     }
     if (message.type === 'match-start-ack') {
@@ -276,14 +367,20 @@ export class GameConnection {
       return;
     }
     if (result === 'ignored') return;
+    if (this.#stream.reset) {
+      if (this.#pending === 'draw') this.#finish();
+      this.#publish({ drawStatus: 'none', draw: null });
+    }
+    this.#armReveal();
     if (result === 'state') {
       if (this.#pending === 'resync') this.#finish();
       this.#publish({
         status: this.#pending === 'start' ? 'starting' : 'observing',
         assigned: true,
         view: this.#stream.snapshot,
+        draw: this.#stream.draw,
         note: this.current.note === 'storage-unavailable' ? 'storage-unavailable' : 'none',
       });
-    } else this.#publish({ view: this.#stream.snapshot });
+    } else this.#publish({ view: this.#stream.snapshot, draw: this.#stream.draw });
   }
 }

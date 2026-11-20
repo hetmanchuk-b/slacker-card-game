@@ -210,6 +210,17 @@ textarea {
 textarea:user-invalid {
   border-color: #9f3134;
 }
+.dealing {
+  margin-block-start: 1.5rem;
+  border-block-start: 1px solid #c0cdd3;
+}
+.cards {
+  padding-inline-start: 1.5rem;
+}
+.cards li {
+  padding: 0.3rem;
+  overflow-wrap: anywhere;
+}
 @media (max-width: 44rem) {
   main {
     grid-template-columns: 1fr;

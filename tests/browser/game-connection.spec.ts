@@ -76,7 +76,7 @@ function starts(page: Page) {
   });
   return messages;
 }
-test('real browser sockets attach, start, resync and show live suspension controls without gameplay UI', async ({
+test('real browser sockets attach, start, resync and show live suspension controls', async ({
   page,
   browser,
   origin,
@@ -145,9 +145,8 @@ test('real browser sockets attach, start, resync and show live suspension contro
     await expect(page.getByTestId('game-id')).toHaveText(gameId);
     expect(messages).toHaveLength(2);
     expect(messages[1]).toEqual(messages[0]);
-    await expect(page.getByRole('button', { name: /draw card|play card|open stump/i })).toHaveCount(
-      0,
-    );
+    await expect(page.getByRole('button', { name: 'Draw card', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: /play card|open stump/i })).toHaveCount(0);
     // Existing authenticated Node fixture exercises rollback, not a browser
     // rollback/history control (9.13/9.14). No trusted state reads choose actions.
     const cookie = (await page.context().cookies(origin)).find(

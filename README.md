@@ -64,7 +64,9 @@ The eighth engine/runtime increment completes Stage 7 for the trusted server/sto
 
 **Stage 9.4 connection/first start implemented:** same-origin receipt-aware WSS supports explicit attach, owner first start, immutable retries after uncertainty/reload, state-only resync and a read-only projected count/phase/control summary. Historical acknowledgments never become current state; assigned null state is not an empty lobby. Eleven additional Node tests and six browser cases cover ordering, nonce loss, retries, suspension, rollback-to-null and preserved proxy authorization.
 
-**Not a complete online game yet:** interactive dealing/card presentation/gameplay UI, bot decisions and Three.js are still planned. A source-only HTTPS development launcher exists, not a production game-server CLI. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
+**Stage 9.5 manual dealing implemented:** deck clicks permit deliberate out-of-turn attempts, actual draw actors remain observable, and own hand faces/closed stumps render privately. D002 initial notices and temporary final-card reveals obey receipt-anchored expiry, suspension and reset; no next-recipient hint, permanent trump or observation replay is added. Four additional real browser cases cover 2/4/8-seat dealing and lost draw acknowledgment; six net new Node tests cover the client boundaries.
+
+**Not a complete online game yet:** penalty and ordinary-play controls, later gameplay UI, bot decisions and Three.js are still planned. A source-only HTTPS development launcher exists, not a production game-server CLI. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
 
 **New rules, not implemented yet:** revision 1.4 adds a post-game deck-strike minigame and makes remaining participants losers when repetition ends a match. These approved changes are tracked in Stage 11a; current result contracts still follow revision 1.3.
 

@@ -1,3 +1,4 @@
+import { ClaimsView } from './ClaimsView.tsx';
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import type { LobbyMembership } from '../protocol/lobby.ts';
@@ -223,6 +224,7 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
         onDismissPeek={() => client.dismissPeek()}
       />
       <LobbyChatView client={client} connection={connection} busy={busy} />
+      <ClaimsView client={client} connection={connection} busy={busy} seatId={membership.seatId} />
       <PenaltyView
         connection={connection}
         seatId={membership.seatId}
@@ -231,7 +233,7 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
         onRespond={(id) => client.respondToPenalty(id)}
       />
       <p className="quiet">
-        Claim and owner-history controls arrive in later increments. No permanent trump or
+        Withdrawal and owner-history controls arrive in later increments. No permanent trump or
         next-recipient indicator is shown.
       </p>
     </section>

@@ -1,3 +1,9 @@
+export type ClaimEvidence =
+  | Readonly<{ type: 'spoken'; key: string }>
+  | Readonly<{ type: 'chat'; messageId: string }>
+  | Readonly<{ type: 'action'; commandId: string }>;
+import type { Vote } from './game-stream.ts';
+import { chatText } from './lobby-chat.ts';
 import { GameStream, object, exact, head, remainingTime } from './game-stream.ts';
 import type { GameSnapshot, Draw, Transfer, PlayObservation, Peek } from './game-stream.ts';
 const penaltyScope = (view: GameSnapshot | null) =>
@@ -30,6 +36,9 @@ export type ConnectionState = Readonly<{
     | 'observing'
     | 'uncertain'
     | 'failed';
+  actionIds: readonly string[];
+  claimStatus: 'none' | 'pending' | 'accepted' | 'rejected' | 'uncertain';
+  voteStatus: 'none' | 'pending' | 'accepted' | 'rejected' | 'uncertain';
   chat: LobbyChat['current'];
   view: GameSnapshot | null;
   draw: Draw | null;
@@ -68,8 +77,20 @@ export class GameConnection {
   #socket: GameSocket | null = null;
   #generation = 0;
   #stream: GameStream;
-  #pending: 'connect' | 'resync' | 'start' | 'draw' | 'penalty' | 'move' | 'chat' | null = null;
+  #pending:
+    | 'connect'
+    | 'resync'
+    | 'start'
+    | 'draw'
+    | 'penalty'
+    | 'move'
+    | 'chat'
+    | 'claim'
+    | 'vote'
+    | null = null;
   readonly #chat: LobbyChat;
+  #pendingVoteId: string | null = null;
+  #observedVoteId: string | null = null;
   #commandRequest: string | null = null;
   #pendingPenaltyScope: string | null = null;
   #selectionScope: string | null = null;
@@ -81,6 +102,9 @@ export class GameConnection {
   #busy = false;
   #storageBlocked = false;
   current: ConnectionState = {
+    actionIds: [],
+    claimStatus: 'none',
+    voteStatus: 'none',
     status: 'disconnected',
     chat: { page: [], lastPost: null, cursor: '0', empty: false, retry: false, status: 'idle' },
     view: null,
@@ -134,6 +158,7 @@ export class GameConnection {
       ...this.current,
       ...next,
       chat: this.#chat.current,
+      actionIds: this.#stream.actionIds,
       playObservations: this.#stream.playObservations,
       peek: this.#stream.peek,
     };
@@ -186,7 +211,10 @@ export class GameConnection {
     const drawUncertain = this.#pending === 'draw';
     const penaltyUncertain = this.#pending === 'penalty';
     const moveUncertain = this.#pending === 'move';
-    const uncertain = drawUncertain || penaltyUncertain || moveUncertain;
+    const claimUncertain = this.#pending === 'claim';
+    const voteUncertain = this.#pending === 'vote';
+    const uncertain =
+      drawUncertain || penaltyUncertain || moveUncertain || claimUncertain || voteUncertain;
     this.#finish();
     this.#drop();
     this.#publish({
@@ -196,6 +224,8 @@ export class GameConnection {
       draw: null,
       transfers: [],
       selectedCardId: null,
+      ...(claimUncertain ? { claimStatus: 'uncertain' } : {}),
+      ...(voteUncertain ? { voteStatus: 'uncertain' } : {}),
       ...(drawUncertain ? { drawStatus: 'uncertain' } : {}),
       ...(penaltyUncertain ? { penaltyStatus: 'uncertain' } : {}),
       ...(moveUncertain ? { moveStatus: 'uncertain' } : {}),
@@ -328,6 +358,97 @@ export class GameConnection {
   }
   readChat(first = false) {
     if (this.#chatAvailable()) this.#sendChat(this.#chat.read(first));
+  }
+  submitClaim(accusedId: string, reason: string, evidence: ClaimEvidence) {
+    const view = this.current.view;
+    if (
+      this.#pending ||
+      !this.#socket?.connected ||
+      this.current.status !== 'observing' ||
+      !view?.state ||
+      view.paused ||
+      view.state.phase === 'finished' ||
+      !view.state.players.some((p) => p.id === this.#deps.seatId && p.status === 'active') ||
+      accusedId === this.#deps.seatId ||
+      !view.state.players.some((p) => p.id === accusedId && p.status === 'active') ||
+      !chatText(reason)
+    )
+      return;
+    const ref =
+      evidence.type === 'spoken'
+        ? evidence.key
+        : evidence.type === 'chat'
+          ? evidence.messageId
+          : evidence.commandId;
+    if (!text(ref) || ref.length > 256 || !ref.trim()) return;
+    if (
+      evidence.type === 'chat' &&
+      ![
+        ...this.current.chat.page,
+        ...(this.current.chat.lastPost ? [this.current.chat.lastPost] : []),
+      ].some((row) => row.id === ref)
+    )
+      return;
+    if (evidence.type === 'action' && !this.current.actionIds.includes(ref)) return;
+    const safeEvidence =
+      evidence.type === 'spoken'
+        ? { type: 'spoken', key: ref }
+        : evidence.type === 'chat'
+          ? { type: 'chat', messageId: ref }
+          : { type: 'action', commandId: ref };
+    this.#commandRequest = this.#deps.requestId();
+    this.#pending = 'claim';
+    this.#deadline();
+    this.#publish({ claimStatus: 'pending' });
+    this.#socket.send({
+      protocolVersion: 1,
+      requestId: this.#commandRequest,
+      intent: {
+        type: 'submit-claim',
+        gameId: view.head.gameId,
+        branchId: view.head.branchId,
+        accusedId,
+        reason,
+        evidence: safeEvidence,
+      },
+    });
+  }
+  castVote(procedureId: string, vote: Vote, gameId: string, branchId: string) {
+    const view = this.current.view;
+    const b = view?.ballot;
+    if (
+      this.#pending ||
+      !this.#socket?.connected ||
+      this.current.status !== 'observing' ||
+      !view ||
+      view.paused ||
+      view.head.gameId !== gameId ||
+      view.head.branchId !== branchId ||
+      !b ||
+      b.timer.id !== procedureId ||
+      b.timer.paused ||
+      remainingTime(b.timer, this.#deps.now?.() ?? performance.now()) <= 0 ||
+      b.ownVote !== null ||
+      !b.eligibleSeatIds.includes(this.#deps.seatId) ||
+      !['yes', 'no', 'abstain'].includes(vote)
+    )
+      return;
+    this.#commandRequest = this.#deps.requestId();
+    this.#pendingVoteId = procedureId;
+    this.#pending = 'vote';
+    this.#deadline();
+    this.#publish({ voteStatus: 'pending' });
+    this.#socket.send({
+      protocolVersion: 1,
+      requestId: this.#commandRequest,
+      intent: {
+        type: 'cast-vote',
+        gameId: view.head.gameId,
+        branchId: view.head.branchId,
+        procedureId,
+        vote,
+      },
+    });
   }
   drawCard() {
     const view = this.current.view;
@@ -514,7 +635,11 @@ export class GameConnection {
     }
     if (message.type === 'command-ack') {
       if (
-        (this.#pending !== 'draw' && this.#pending !== 'penalty' && this.#pending !== 'move') ||
+        (this.#pending !== 'draw' &&
+          this.#pending !== 'penalty' &&
+          this.#pending !== 'move' &&
+          this.#pending !== 'claim' &&
+          this.#pending !== 'vote') ||
         message.requestId !== this.#commandRequest
       )
         return;
@@ -532,11 +657,15 @@ export class GameConnection {
       ) {
         this.#finish();
         this.#publish(
-          kind === 'penalty'
-            ? { penaltyStatus: 'accepted' }
-            : kind === 'move'
-              ? { moveStatus: r.outcome === 'violation' ? 'violation' : 'played' }
-              : { drawStatus: r.outcome === 'violation' ? 'violation' : 'played' },
+          kind === 'claim'
+            ? { claimStatus: 'accepted' }
+            : kind === 'vote'
+              ? { voteStatus: 'accepted' }
+              : kind === 'penalty'
+                ? { penaltyStatus: 'accepted' }
+                : kind === 'move'
+                  ? { moveStatus: r.outcome === 'violation' ? 'violation' : 'played' }
+                  : { drawStatus: r.outcome === 'violation' ? 'violation' : 'played' },
         );
       } else if (
         exact(r, ['type', 'code', 'head']) &&
@@ -546,11 +675,15 @@ export class GameConnection {
       ) {
         this.#finish();
         this.#publish(
-          kind === 'penalty'
-            ? { penaltyStatus: 'rejected', selectedCardId: null }
-            : kind === 'move'
-              ? { moveStatus: 'rejected' }
-              : { drawStatus: 'rejected' },
+          kind === 'claim'
+            ? { claimStatus: 'rejected' }
+            : kind === 'vote'
+              ? { voteStatus: 'rejected' }
+              : kind === 'penalty'
+                ? { penaltyStatus: 'rejected', selectedCardId: null }
+                : kind === 'move'
+                  ? { moveStatus: 'rejected' }
+                  : { drawStatus: 'rejected' },
         );
       } else this.#fail('invalid-message');
       return;
@@ -585,9 +718,17 @@ export class GameConnection {
     }
     if (result === 'ignored') return;
     if (this.#stream.reset) {
-      if (this.#pending === 'draw' || this.#pending === 'penalty' || this.#pending === 'move')
+      if (
+        this.#pending === 'draw' ||
+        this.#pending === 'penalty' ||
+        this.#pending === 'move' ||
+        this.#pending === 'claim' ||
+        this.#pending === 'vote'
+      )
         this.#finish();
       this.#publish({
+        claimStatus: 'none',
+        voteStatus: 'none',
         drawStatus: 'none',
         draw: null,
         moveStatus: 'none',
@@ -598,6 +739,12 @@ export class GameConnection {
     }
     this.#armReveal();
     if (result === 'state') {
+      const voteId = this.#stream.snapshot?.ballot?.timer.id ?? null;
+      if (voteId !== this.#observedVoteId) {
+        this.#observedVoteId = voteId;
+        if (this.#pending === 'vote' && this.#pendingVoteId !== voteId) this.#finish();
+        this.#publish({ voteStatus: 'none' });
+      }
       const scope = penaltyScope(this.#stream.snapshot);
       if (scope !== this.#observedPenaltyScope) {
         this.#observedPenaltyScope = scope;

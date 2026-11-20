@@ -278,3 +278,25 @@ textarea:user-invalid {
     grid-template-columns: 1fr;
   }
 }
+.claims fieldset {
+  min-inline-size: 0;
+}
+.claims label,
+.claims select {
+  display: block;
+}
+.claims select {
+  inline-size: 100%;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  min-block-size: 3rem;
+  font: inherit;
+  margin-block: 0.5rem 1rem;
+}
+.claims p {
+  overflow-wrap: anywhere;
+}
+.claims select:focus-visible {
+  outline: 3px solid #20303a;
+  outline-offset: 4px;
+}

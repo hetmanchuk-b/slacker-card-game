@@ -15,6 +15,20 @@ export type Penalty = Readonly<{
   ownResponse: Readonly<{ type: 'refuse' }> | Readonly<{ type: 'card'; card: Card }> | null;
   timer: DisplayTimer;
 }>;
+export type Vote = 'yes' | 'no' | 'abstain';
+export type Ballot = Readonly<{
+  claim: Readonly<{
+    id: string;
+    claimantId: string;
+    accusedId: string;
+    reason: string;
+    scope: string;
+    scopeNumber: number;
+  }>;
+  eligibleSeatIds: readonly string[];
+  ownVote: Vote | null;
+  timer: DisplayTimer;
+}>;
 export type Transfer = Readonly<{ fromSeatId: string; toSeatId: string; card: Card }>;
 export type PlayObservation =
   | Readonly<{ type: 'card-played'; seatId: string; card: Card }>
@@ -34,6 +48,7 @@ export const remainingTime = (timer: DisplayTimer, now: number): number =>
   timer.paused ? timer.remainingMs : Math.max(0, (timer.expiresAt ?? now) - now);
 export type GameSnapshot = Readonly<{
   penalty: Penalty | null;
+  ballot: Ballot | null;
   hasProcedure: boolean;
   initialRecipientNotice: boolean;
   reveal: Reveal | null;
@@ -84,6 +99,71 @@ export function head(raw: unknown): raw is GameSnapshot['head'] {
     text(raw.branchId) &&
     count(raw.version, Number.MAX_SAFE_INTEGER)
   );
+}
+function parseBallot(
+  p: unknown,
+  players: NonNullable<GameSnapshot['state']>['players'],
+  seatId: string,
+  paused: boolean,
+): Ballot | null {
+  if (
+    !exact(p, ['type', 'claim', 'eligibleSeatIds', 'ownVote', 'timer']) ||
+    p.type !== 'claim-vote' ||
+    !exact(p.claim, ['id', 'claimantId', 'accusedId', 'reason', 'scope', 'scopeNumber']) ||
+    !text(p.claim.id) ||
+    !text(p.claim.claimantId) ||
+    !text(p.claim.accusedId) ||
+    p.claim.claimantId === p.claim.accusedId ||
+    ![p.claim.claimantId, p.claim.accusedId].every((id) =>
+      players.some((s) => s.id === id && s.status === 'active'),
+    ) ||
+    typeof p.claim.reason !== 'string' ||
+    !p.claim.reason.length ||
+    p.claim.reason.length > 4096 ||
+    !['dealing', 'between-rounds', 'round'].includes(String(p.claim.scope)) ||
+    typeof p.claim.scope !== 'string' ||
+    !count(p.claim.scopeNumber, Number.MAX_SAFE_INTEGER) ||
+    !Array.isArray(p.eligibleSeatIds) ||
+    !p.eligibleSeatIds.every(text) ||
+    new Set(p.eligibleSeatIds).size !== p.eligibleSeatIds.length ||
+    p.eligibleSeatIds.length !==
+      players.filter(
+        (s) => s.status === 'active' && s.id !== (p.claim as Record<string, unknown>).accusedId,
+      ).length ||
+    p.eligibleSeatIds.some(
+      (id) =>
+        id === (p.claim as Record<string, unknown>).accusedId ||
+        !players.some((s) => s.id === id && s.status === 'active'),
+    ) ||
+    (p.ownVote !== null &&
+      (!p.eligibleSeatIds.includes(seatId) ||
+        !['yes', 'no', 'abstain'].includes(String(p.ownVote)) ||
+        typeof p.ownVote !== 'string')) ||
+    !exact(p.timer, ['id', 'remainingMs', 'paused']) ||
+    !text(p.timer.id) ||
+    !count(p.timer.remainingMs, 10000) ||
+    typeof p.timer.paused !== 'boolean' ||
+    (paused && !p.timer.paused)
+  )
+    return null;
+  return {
+    claim: {
+      id: p.claim.id,
+      claimantId: p.claim.claimantId,
+      accusedId: p.claim.accusedId,
+      reason: p.claim.reason,
+      scope: p.claim.scope,
+      scopeNumber: p.claim.scopeNumber,
+    },
+    eligibleSeatIds: [...p.eligibleSeatIds],
+    ownVote: p.ownVote as Vote | null,
+    timer: {
+      id: p.timer.id,
+      remainingMs: p.timer.remainingMs,
+      paused: p.timer.paused,
+      expiresAt: null,
+    },
+  };
 }
 function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
   if (
@@ -281,6 +361,7 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
     reveal = { card: card(r.card)!, recipientId: r.recipientId, expiresAt: r.timer.remainingMs };
   }
   let penalty: Penalty | null = null;
+  let ballot: Ballot | null = null;
   if (raw.procedure !== null) {
     const p = raw.procedure;
     if (
@@ -290,6 +371,57 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
       !['penalty', 'claim-vote', 'withdrawal'].includes(p.type)
     )
       return null;
+    if (p.type === 'claim-vote') {
+      ballot = parseBallot(p, state.players, seatId, raw.control.paused);
+      if (!ballot) return null;
+    }
+    if (p.type === 'withdrawal') {
+      if (
+        !exact(p, ['type', 'claim', 'eligibleSeatIds', 'ownApproval', 'suspendedVote', 'timer']) ||
+        !exact(p.timer, ['id', 'remainingMs', 'paused']) ||
+        !text(p.timer.id) ||
+        !count(p.timer.remainingMs, 10000) ||
+        typeof p.timer.paused !== 'boolean'
+      )
+        return null;
+      if (!object(p.claim)) return null;
+      const claim = p.claim;
+      const validatedClaim = parseBallot(
+        {
+          type: 'claim-vote',
+          claim,
+          eligibleSeatIds: state.players
+            .filter((s) => s.status === 'active' && s.id !== claim.accusedId)
+            .map((s) => s.id),
+          ownVote: null,
+          timer: p.timer,
+        },
+        state.players,
+        seatId,
+        raw.control.paused,
+      );
+      if (
+        !validatedClaim ||
+        !Array.isArray(p.eligibleSeatIds) ||
+        !p.eligibleSeatIds.every(text) ||
+        new Set(p.eligibleSeatIds).size !== p.eligibleSeatIds.length ||
+        p.eligibleSeatIds.length !==
+          state.players.filter((s) => s.status === 'active' && s.id !== claim.claimantId).length ||
+        p.eligibleSeatIds.some(
+          (id) =>
+            id === claim.claimantId ||
+            !state!.players.some((s) => s.id === id && s.status === 'active'),
+        ) ||
+        (p.ownApproval !== null &&
+          (typeof p.ownApproval !== 'boolean' || !p.eligibleSeatIds.includes(seatId)))
+      )
+        return null;
+      if (p.suspendedVote !== null) {
+        ballot = parseBallot(p.suspendedVote, state.players, seatId, true);
+        if (!ballot || JSON.stringify(ballot.claim) !== JSON.stringify(validatedClaim.claim))
+          return null;
+      }
+    }
     if (p.type === 'penalty') {
       if (
         !exact(p, ['type', 'recipientId', 'reason', 'eligibleSeatIds', 'ownResponse', 'timer']) ||
@@ -357,6 +489,7 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
   }
   return {
     penalty,
+    ballot,
     hasProcedure: raw.procedure !== null,
     initialRecipientNotice,
     reveal,
@@ -382,6 +515,8 @@ export class GameStream {
     this.#pendingPeek = null;
   }
   reset = false;
+  actionIds: readonly string[] = [];
+  #ballotTimer: { key: string; timer: DisplayTimer } | null = null;
   #penaltyTimer: { key: string; timer: DisplayTimer } | null = null;
   #route: string | null = null;
   readonly #now: () => number;
@@ -400,6 +535,8 @@ export class GameStream {
       this.playObservations = [];
       this.dismissPeek();
       this.#penaltyTimer = null;
+      this.#ballotTimer = null;
+      this.actionIds = [];
       this.#revealKey = null;
       this.reset = true;
     }
@@ -434,6 +571,8 @@ export class GameStream {
       this.dismissPeek();
       this.transfers = [];
       this.#penaltyTimer = null;
+      this.#ballotTimer = null;
+      this.actionIds = [];
       this.reset = true;
       this.#revealKey = null;
     }
@@ -550,6 +689,9 @@ export class GameStream {
             this.draw = { seatId: o.seatId, rejected: false, destination: o.destination };
           }
         }
+        this.actionIds = [...this.actionIds.filter((id) => id !== v.commandId), v.commandId].slice(
+          -50,
+        );
         this.transfers = transfers;
         this.playObservations = plays;
         if (peek) {
@@ -563,6 +705,8 @@ export class GameStream {
         this.playObservations = [];
         this.transfers = [];
         this.#penaltyTimer = null;
+        this.#ballotTimer = null;
+        this.actionIds = [];
         this.draw = null;
         this.reset = true;
         this.#revealKey = null;
@@ -601,6 +745,21 @@ export class GameStream {
       )
     )
       return 'invalid';
+    if (next.ballot) {
+      const b = next.ballot;
+      const key = JSON.stringify([next.head.gameId, next.head.branchId, b.timer.id]);
+      const prior = this.#ballotTimer;
+      const timer = {
+        ...b.timer,
+        expiresAt: b.timer.paused
+          ? null
+          : prior?.key === key && !prior.timer.paused
+            ? Math.min(prior.timer.expiresAt!, this.#now() + b.timer.remainingMs)
+            : this.#now() + b.timer.remainingMs,
+      };
+      this.#ballotTimer = { key, timer };
+      next = { ...next, ballot: { ...b, timer } };
+    } else this.#ballotTimer = null;
     if (next.penalty) {
       const p = next.penalty;
       const key = JSON.stringify([next.head.gameId, next.head.branchId, p.timer.id]);

@@ -244,6 +244,35 @@ textarea:user-invalid {
   outline: 3px solid #20303a;
   outline-offset: 4px;
 }
+.card-drag-source {
+  cursor: grab;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.card-drag-source:active {
+  cursor: grabbing;
+}
+.drag-area {
+  min-block-size: 3rem;
+}
+.drag-area[data-drop-active='true'] {
+  outline: 2px dashed #126b54;
+  outline-offset: 4px;
+}
+.gesture-drop-target {
+  position: fixed;
+  inset-block-end: 1rem;
+  inset-inline: 1rem;
+  z-index: 5;
+  margin-inline: auto;
+  max-inline-size: 28rem;
+  min-block-size: 4rem;
+  padding: 1rem;
+  border: 2px dashed #126b54;
+  background: #fff;
+  color: #20303a;
+}
 @media (max-width: 44rem) {
   main {
     grid-template-columns: 1fr;

@@ -26,7 +26,7 @@ export async function installScenario(pages: Page[], initial: GameState) {
   ) as GameState;
   expect(validateState(state)).toEqual([]);
   let head: BranchHead = { gameId: state.gameId, branchId: id('branch', randomUUID()), version: 1 };
-  const epoch = randomUUID();
+  let epoch = randomUUID();
   let nonce = 1000000;
   const channels = new Map<number, { route: WebSocketRoute; sequence: number }>();
   const packets = pages.map(() => [] as object[]);
@@ -156,5 +156,15 @@ export async function installScenario(pages: Page[], initial: GameState) {
     await page.getByRole('button', { name: 'Connect game', exact: true }).click();
     await expect(page.getByTestId('game-phase')).toHaveText(initial.phase.type);
   }
-  return { packets, commands };
+  return {
+    packets,
+    commands,
+    refresh: (rotateEpoch = false) => {
+      if (rotateEpoch) {
+        epoch = randomUUID();
+        for (const channel of channels.values()) channel.sequence = 0;
+      }
+      for (const index of channels.keys()) baseline(index);
+    },
+  };
 }

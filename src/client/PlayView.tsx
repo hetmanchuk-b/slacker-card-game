@@ -1,12 +1,15 @@
 import type { ConnectionState } from './game-connection.ts';
 import { cardLabel } from './DealingView.tsx';
+import type { CardDragUI } from './use-card-drag.ts';
 export function PlayView({
+  drag,
   connection,
   busy,
   seatId,
   onTake,
   onDismissPeek,
 }: Readonly<{
+  drag: CardDragUI;
   connection: ConnectionState;
   busy: boolean;
   seatId: string;
@@ -45,7 +48,12 @@ export function PlayView({
             <p data-testid="round-leader">Next lead: {seat(state.leaderId)}.</p>
           ) : null}
           <p>Public table, bottom to top:</p>
-          <ol data-testid="public-table">
+          <ol
+            ref={drag.tableTarget}
+            className="drag-area"
+            data-drop-active={drag.dragging?.type === 'play-card'}
+            data-testid="public-table"
+          >
             {state.table.map((card, index) => (
               <li key={card.id}>
                 {cardLabel(card)}

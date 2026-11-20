@@ -69,7 +69,13 @@ async function reserve(page: Page) {
   return choice;
 }
 async function refuse(page: Page) {
+  const version = Number(await page.getByTestId('game-version').innerText());
   await page.getByRole('button', { name: 'Refuse contribution', exact: true }).click();
+  await expect
+    .poll(async () => Number(await page.getByTestId('game-version').innerText()), {
+      message: 'A deliberate refusal must produce a committed action before the next response',
+    })
+    .toBeGreaterThan(version);
 }
 async function beginPenalty(pages: Page[], repeats = 1) {
   const first = await initialRecipient(pages);

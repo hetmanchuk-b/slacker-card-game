@@ -289,7 +289,9 @@ export function App() {
           )}
         </section>
       </main>
-      <footer>Functional click-based play. Drag, chat and later controls are still planned.</footer>
+      <footer>
+        Functional click/keyboard and drag play. Chat and later controls are still planned.
+      </footer>
     </>
   );
 }

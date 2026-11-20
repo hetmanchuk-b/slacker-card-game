@@ -1,5 +1,6 @@
 import type { ConnectionState } from './game-connection.ts';
 import type { Card } from './game-stream.ts';
+import type { CardDragUI } from './use-card-drag.ts';
 
 export function cardLabel(card: Card) {
   const rank = card.face.rank;
@@ -15,6 +16,7 @@ const results = {
     'Draw outcome uncertain. Reconnect to inspect current state before a deliberate new attempt. No draw is automatically retried.',
 } as const;
 export function DealingView({
+  drag,
   connection,
   busy,
   onDraw,
@@ -22,6 +24,7 @@ export function DealingView({
   onStump,
   seatId,
 }: Readonly<{
+  drag: CardDragUI;
   connection: ConnectionState;
   busy: boolean;
   onDraw: () => void;
@@ -69,7 +72,11 @@ export function DealingView({
                 disabled={
                   busy || connection.status !== 'observing' || view.paused || view.hasProcedure
                 }
-                onClick={onDraw}
+                {...drag.source(
+                  { type: 'draw-card' },
+                  busy || connection.status !== 'observing' || view.paused || view.hasProcedure,
+                  onDraw,
+                )}
               >
                 Draw card
               </button>
@@ -86,11 +93,22 @@ export function DealingView({
             </p>
           ) : null}
           <h5>Your hand</h5>
-          <ul className="cards" data-testid="own-hand">
+          <ul
+            ref={drag.handTarget}
+            className="cards drag-area"
+            data-drop-active={drag.dragging?.type === 'draw-card'}
+            data-testid="own-hand"
+          >
             {state.own.hand.map((card) => (
               <li key={card.id}>
                 {ordinary ? (
-                  <button type="button" disabled={blocked} onClick={() => onPlay(card.id)}>
+                  <button
+                    type="button"
+                    disabled={blocked}
+                    {...drag.source({ type: 'play-card', cardId: card.id }, blocked, () =>
+                      onPlay(card.id),
+                    )}
+                  >
                     Play {cardLabel(card)}
                   </button>
                 ) : (

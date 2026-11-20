@@ -70,7 +70,9 @@ The eighth engine/runtime increment completes Stage 7 for the trusted server/sto
 
 **Stage 9.7 click-based play implemented:** own hand clicks attempt play, pickup targets exactly the public table bottom, and one own-stump control lets the server decide legal opening versus punishable peek. Wrong-turn/beat attempts stay available. Ordered table/round feedback preserves automatic consequences; the approved actor-only peek notice is dismissible and penalty-bound, with no timer or replay. Six new Node tests and seven browser cases include two real gameplay integrations and five explicitly labeled engine/projector wire-fixture cases for late scenarios 2–10.
 
-**Not a complete online game yet:** drag input, chat/claim/replacement/history/result workflows, bot decisions and Three.js are still planned. A source-only HTTPS development launcher exists, not a production game-server CLI. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
+**Stage 9.8 drag equivalence implemented:** deck→own-hand/seat and hand→table gestures invoke the same draw/play methods as native buttons. Cancelled/stale gestures send nothing, competing contacts stay blocked until they end, and post-drag clicks cannot duplicate commands. Source-only touch handling preserves scrolling elsewhere; a temporary drop strip supports long/narrow pages without moving or revealing cards. Five Node and six Chromium cases include real draw/play integration plus explicitly labeled fixture-based reset/touch checks.
+
+**Not a complete online game yet:** chat/claim/replacement/history/result workflows, bot decisions and Three.js are still planned. A source-only HTTPS development launcher exists, not a production game-server CLI. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
 
 **New rules, not implemented yet:** revision 1.4 adds a post-game deck-strike minigame and makes remaining participants losers when repetition ends a match. These approved changes are tracked in Stage 11a; current result contracts still follow revision 1.3.
 

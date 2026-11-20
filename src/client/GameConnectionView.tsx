@@ -5,6 +5,7 @@ import { GameConnection } from './game-connection.ts';
 import { DealingView } from './DealingView.tsx';
 import { PenaltyView } from './PenaltyView.tsx';
 import { PlayView } from './PlayView.tsx';
+import { useCardDrag } from './use-card-drag.ts';
 
 const notes = {
   none: '',
@@ -68,9 +69,16 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
       }),
   );
   const [connection, setConnection] = useState(client.current);
+  const drag = useCardDrag((intent) => {
+    if (intent.type === 'draw-card') client.drawCard();
+    else client.playCard(intent.cardId);
+  }, busy);
   useEffect(() => {
     let route: string | null = null;
     const unsubscribe = client.subscribe((next) => {
+      // Conservative fence: every publication, including same-head control/epoch updates,
+      // cancels an in-flight local gesture before React can display replacement state.
+      drag.cancel();
       setConnection(next);
       if (next.view) {
         const current = JSON.stringify([next.view.head.gameId, next.view.head.branchId]);
@@ -84,7 +92,7 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
       unsubscribe();
       client.close();
     };
-  }, [client]);
+  }, [client, drag.cancel]);
   const attached = connection.status === 'attached' || connection.status === 'observing';
   const view = connection.view;
   return (
@@ -173,7 +181,31 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
       ) : (
         <p>No current game baseline is displayed. Reconnect/resync to confirm it.</p>
       )}
+      <p className="quiet">
+        Drag the deck to your hand area to draw, or a hand card to the public table to attempt play.
+        Click/keyboard controls remain available. A temporary seat/table drop strip also appears
+        during a drag; scroll outside the source buttons.
+      </p>
+      <p role="status" data-testid="drag-status">
+        {drag.dragging
+          ? drag.dragging.type === 'draw-card'
+            ? 'Drawing gesture: release in your hand area or seat drop strip. Escape cancels.'
+            : 'Playing gesture: release on the public table or table drop strip. Escape cancels.'
+          : ''}
+      </p>
+      {drag.dragging ? (
+        <div
+          ref={drag.shortcutTarget}
+          className="gesture-drop-target"
+          data-testid="gesture-drop-target"
+        >
+          {drag.dragging.type === 'draw-card'
+            ? 'Your seat — release to draw (server decides stump or hand).'
+            : 'Public table — release to attempt play.'}
+        </div>
+      ) : null}
       <DealingView
+        drag={drag}
         connection={connection}
         busy={busy}
         seatId={membership.seatId}
@@ -182,6 +214,7 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
         onStump={(id) => client.openStump(id)}
       />
       <PlayView
+        drag={drag}
         connection={connection}
         busy={busy}
         seatId={membership.seatId}
@@ -196,8 +229,8 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
         onRespond={(id) => client.respondToPenalty(id)}
       />
       <p className="quiet">
-        Drag, chat/claim and owner-history controls arrive in later increments. No permanent trump
-        or next-recipient indicator is shown.
+        Chat/claim and owner-history controls arrive in later increments. No permanent trump or
+        next-recipient indicator is shown.
       </p>
     </section>
   );

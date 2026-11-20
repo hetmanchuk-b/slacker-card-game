@@ -22,18 +22,37 @@ for (const count of [2, 4, 8])
       for (const page of pages) await expect(page.getByTestId('claim-ballot')).toBeVisible();
       await expect(pages[1]!.getByRole('button', { name: 'Vote yes', exact: true })).toHaveCount(0);
       await expect(pages[0]!.getByLabel('Exact spoken episode key (required)')).toHaveValue('');
+      const firstClaim = await pages[0]!
+        .getByTestId('claim-ballot')
+        .locator('p')
+        .first()
+        .innerText();
       // Queue a second explicit episode while the first procedure is still active.
       await claim(pages[0]!, accused, 'Next manual episode');
-      for (const [index, page] of pages.filter((_, i) => i !== 1).entries()) {
-        const name = count === 4 && index < 2 ? (index === 0 ? 'Vote yes' : 'Vote no') : 'Abstain';
-        await page.getByRole('button', { name, exact: true }).click();
-      }
+      await Promise.all(
+        pages
+          .filter((_, i) => i !== 1)
+          .map(async (page, index) => {
+            const name =
+              count === 4 && index < 2 ? (index === 0 ? 'Vote yes' : 'Vote no') : 'Abstain';
+            await page.getByRole('button', { name, exact: true }).click();
+          }),
+      );
       // All abstentions produce 0:0, no punishment; FIFO exposes the next claim.
-      for (const page of pages)
-        await expect(page.getByTestId('claim-ballot')).toContainText('spoken social allegation');
+      await Promise.all(
+        pages.map(async (page) => {
+          await expect(page.getByTestId('claim-ballot')).toContainText('spoken social allegation');
+          await expect(page.getByTestId('claim-ballot').locator('p').first()).not.toHaveText(
+            firstClaim,
+          );
+        }),
+      );
       await expect(pages[0]!.getByRole('button', { name: 'Abstain', exact: true })).toBeEnabled();
-      for (const page of pages.filter((_, i) => i !== 1))
-        await page.getByRole('button', { name: 'Vote no', exact: true }).click();
+      await Promise.all(
+        pages
+          .filter((_, i) => i !== 1)
+          .map((page) => page.getByRole('button', { name: 'Vote no', exact: true }).click()),
+      );
       for (const page of pages) await expect(page.getByTestId('claim-ballot')).toHaveCount(0);
       // Re-entering the same manual key is deliberate, but the server deduplicates it.
       await claim(pages[0]!, accused, 'Next manual episode');
@@ -194,3 +213,133 @@ test('real social verdicts identify accused/claimant punishment, ties punish nob
     await Promise.all(contexts.map((c) => c.close()));
   }
 });
+
+for (const claimFirst of [true, false])
+  test(`real controlled boundary scheduling: ${claimFirst ? 'claim-first' : 'play-first'} and stale ballot isolation`, async ({
+    browser,
+    origin,
+    wall,
+  }) => {
+    test.setTimeout(90000);
+    // These are controlled arrival orders, not an uncontrolled timing race. Only
+    // original browser frames are delayed; all replies/state come from HTTPS/PG.
+    const held = new Map<string, { requestId: string; release: () => void }>();
+    const hold = new Set<string>();
+    const acks = new Map<string, { type: string; code?: string }>();
+    const draws = new Map<string, string>();
+    const ballots = new Map<
+      Page,
+      { claim: { reason: string }; ownVote: string | null; timer: { id: string } } | null
+    >();
+    const votes: { requestId: string; procedureId: string }[] = [];
+    async function intercept(page: Page) {
+      await page.routeWebSocket('**/socket.io/**', (route) => {
+        const server = route.connectToServer();
+        route.onMessage((frame) => {
+          if (typeof frame === 'string' && frame.startsWith('42')) {
+            const [event, message] = JSON.parse(frame.slice(frame.indexOf('[')));
+            if (event === 'client-message') {
+              const type = message.intent?.type;
+              if (type === 'cast-vote')
+                votes.push({
+                  requestId: message.requestId,
+                  procedureId: message.intent.procedureId,
+                });
+              if (hold.delete(type)) {
+                held.set(type, { requestId: message.requestId, release: () => server.send(frame) });
+                return;
+              }
+            }
+          }
+          server.send(frame);
+        });
+        server.onMessage((frame) => {
+          if (typeof frame === 'string' && frame.startsWith('42')) {
+            const [event, message] = JSON.parse(frame.slice(frame.indexOf('[')));
+            if (event === 'server-message') {
+              if (message.type === 'command-ack') acks.set(message.requestId, message.result);
+              if (message.type === 'state')
+                ballots.set(
+                  page,
+                  message.view.procedure?.type === 'claim-vote' ? message.view.procedure : null,
+                );
+              if (message.type === 'action')
+                for (const observation of message.view.observations)
+                  if (observation.type === 'card-drawn')
+                    draws.set(observation.seatId, message.view.commandId);
+            }
+          }
+          route.send(frame);
+        });
+      });
+    }
+    const { pages, contexts } = await setup(browser, origin, wall, 4, intercept, true);
+    try {
+      for (const page of pages) await expect(page.getByTestId('game-paused')).toHaveText('Running');
+      const { leader } = await deal(pages);
+      wall.now += 1001;
+      for (const page of pages)
+        await expect(page.getByTestId('game-phase')).toHaveText('between-rounds', {
+          timeout: 15000,
+        });
+      const claimantIndex = (leader + 1) % 4;
+      const accusedIndex = (claimantIndex + 1) % 4;
+      const claimant = pages[claimantIndex]!;
+      const ids = await Promise.all(pages.map((page) => page.getByTestId('seat-id').innerText()));
+      const drawId = draws.get(ids[accusedIndex]!);
+      expect(drawId).toBeTruthy();
+      hold.add('submit-claim');
+      hold.add('play-card');
+      await claimant.getByLabel('Accused seat (required)').selectOption(ids[accusedIndex]!);
+      await claimant.getByLabel('Reason (required)').fill('Boundary draw evidence');
+      await claimant.getByLabel('Evidence type').selectOption('action');
+      await claimant.getByLabel('Exact action command ID (required)').selectOption(drawId!);
+      await claimant.getByRole('button', { name: 'Submit claim', exact: true }).click();
+      await pages[leader]!.getByTestId('own-hand').getByRole('button').first().click();
+      await expect.poll(() => held.size).toBe(2);
+      const first = held.get(claimFirst ? 'submit-claim' : 'play-card')!;
+      const second = held.get(claimFirst ? 'play-card' : 'submit-claim')!;
+      first.release();
+      await expect.poll(() => acks.get(first.requestId)?.type).toBe('accepted');
+      second.release();
+      await expect
+        .poll(() => acks.get(second.requestId)?.code)
+        .toBe(claimFirst ? 'procedure-active' : 'scope-closed');
+      for (const page of pages) {
+        await expect(page.getByTestId('game-phase')).toHaveText(
+          claimFirst ? 'between-rounds' : 'round',
+        );
+        await expect(page.getByTestId('claim-ballot')).toHaveCount(claimFirst ? 1 : 0);
+        await expect(page.getByTestId('penalty-procedure')).toHaveCount(0);
+      }
+      if (!claimFirst) await claim(claimant, ids[accusedIndex]!, 'First round ballot');
+      await expect(claimant.getByRole('button', { name: 'Vote yes', exact: true })).toBeEnabled();
+      const oldProcedure = ballots.get(claimant)!.timer.id;
+      hold.add('cast-vote');
+      await claimant.getByRole('button', { name: 'Vote yes', exact: true }).click();
+      await expect.poll(() => held.has('cast-vote')).toBe(true);
+      // Leave every other voter silent: only the real server deadline settles A.
+      for (const page of pages)
+        await expect(page.getByTestId('claim-ballot')).toHaveCount(0, { timeout: 15000 });
+      const nextClaimant = pages[(claimantIndex + 2) % 4]!;
+      await claim(nextClaimant, ids[accusedIndex]!, 'Replacement ballot');
+      for (const page of pages)
+        await expect(page.getByTestId('claim-ballot')).toContainText('spoken social allegation');
+      const newProcedure = ballots.get(claimant)!.timer.id;
+      expect(newProcedure).not.toBe(oldProcedure);
+      expect(ballots.get(claimant)!.ownVote).toBeNull();
+      const stale = held.get('cast-vote')!;
+      stale.release();
+      await expect.poll(() => acks.get(stale.requestId)?.code).toBe('stale-timer');
+      // The late original yes vote is rejected, never rewritten for ballot B.
+      expect(votes.filter((vote) => vote.requestId === stale.requestId)).toEqual([
+        { requestId: stale.requestId, procedureId: oldProcedure },
+      ]);
+      expect(ballots.get(claimant)!.timer.id).toBe(newProcedure);
+      expect(ballots.get(claimant)!.ownVote).toBeNull();
+      await expect(claimant.getByRole('button', { name: 'Vote yes', exact: true })).toBeEnabled();
+      for (const page of pages) await expect(page.getByTestId('penalty-procedure')).toHaveCount(0);
+    } finally {
+      await Promise.all(contexts.map((context) => context.close()));
+    }
+  });

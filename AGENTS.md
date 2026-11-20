@@ -51,5 +51,6 @@ These instructions apply to AI coding agents working in this repository, includi
 
 - After verified changes, update only the documentation materially affected: the appropriate status/checklist in `IMPLEMENTATION_PLAN.md`, rule-to-test coverage, and architecture or operations docs when behavior/contracts actually change.
 - Record unresolved gameplay questions in the existing decision workflow; do not silently fill gaps. Revision 1.4's post-game minigame and repetition-result changes remain subject to their documented decisions and stage dependencies.
+- After completing and verifying each increment, commit its changes and push to the configured upstream branch. Include the materially affected documentation; do not include unrelated changes. Report the commit ID and push result. If verification or push is blocked, report the blocker rather than claiming completion; never force-push without explicit approval.
 - At the end of each increment report: implemented behavior, changed files, tests/checks actually run (including skips), unresolved risks, and the next dependency-ready increment.
 - If blocked, stop at a safe boundary and explain what is verified and exactly what decision or environment is needed. Do not mask uncertainty with confident claims.

@@ -70,6 +70,10 @@ test('real deck drag is one draw, including stump passes and deliberate out-of-t
       'draw intent never promises a hand destination',
     ).toHaveCount(0);
     expect(commands[first]!.filter((t) => t === 'draw-card')).toHaveLength(1);
+    // State can arrive before the command acknowledgment; gestures stay blocked
+    // until the original draw is confirmed, even when the card is already shown.
+    await expect(actor.getByTestId('draw-result')).toHaveText('Draw accepted.');
+    await expect(source).toBeEnabled();
     await begin(actor, source);
     await actor.mouse.move(4, 4, { steps: 5 });
     await actor.mouse.up();

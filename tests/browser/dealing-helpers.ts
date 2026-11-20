@@ -7,6 +7,7 @@ export async function setup(
   wall: { now: number },
   count: number,
   prepare?: (page: Page) => Promise<void>,
+  prepareEach = false,
 ) {
   const contexts: BrowserContext[] = [];
   const pages: Page[] = [];
@@ -19,7 +20,7 @@ export async function setup(
       const page = await context.newPage();
       pages.push(page);
       await page.clock.install();
-      if (index === 0) await prepare?.(page);
+      if (index === 0 || prepareEach) await prepare?.(page);
       await page.goto(origin);
       if (index === 0) {
         await page.getByRole('button', { name: 'Create lobby', exact: true }).click();

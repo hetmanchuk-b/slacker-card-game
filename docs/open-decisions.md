@@ -1,5 +1,11 @@
 # Open decisions discovered during implementation
 
+## D006 — Bot observation entitlement (10.1)
+
+**Status:** operator approved committed seat-authorized observations rather than confirmed network deliveries. This is availability to the seat, not proof the human saw it. The pure `src/bots/observation.ts` adapter returns only existing seat projections, including normal finished-seat restrictions. Null state has no seat binding. Exact committed fresh action pairs may supply permitted private observations; duplicate captures disclose none. Recovery, resync and rollback must not replay historical observations as fresh. Commit/freshness classification remains the trusted caller's obligation, not something this stateless adapter can prove.
+
+This authorizes only 10.1. Rollback knowledge (10.2), atomic durability/legacy games (10.3) and autonomous execution remain separate approval gates; no memory or capture integration is implemented.
+
 ## D005 — Stage 8 acceptance and lobby agreements/readiness integration
 
 **Status:** approved and implemented in Stage 8.18. The operator accepted private per-socket routing, all-durable-member acceptance and exact reset causes, then approved the bounded server-only API/persistence proposal in principle and authorized proceeding once acceptance/epoch semantics were clarified below.

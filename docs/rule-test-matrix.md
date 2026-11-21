@@ -2,6 +2,8 @@
 
 Status is updated as executable tests are added. A planned test is not passing coverage.
 
+Stage10.1: `src/bots/observation.test.ts` and `action-observation.test.ts` add 16 pure adapter/runtime-fixture cases at 2/4/8 seats: seat binding, detached projections, hidden-face noninterference, procedures/private reservations, finished seats, timed reveal expiry/suspension/resumption, recipient-only transfers and duplicate suppression. D006 uses committed seat entitlement, not network receipt. These are not bot execution, durable memory, network or database acceptance tests.
+
 ## Approved test seams
 
 The engine command/event/invariant interface, runtime clock/ordering interface, authorized projections, and atomic history interface are established by the implementation plan. Stage 9.1 adds a client HTTP/storage seam and actual HTTPS/disposable-PostgreSQL browser integration; this is not browser gameplay acceptance. See `docs/architecture.md` for what each seam catches and misses.

@@ -996,7 +996,7 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 
 **Depends on:** Stages 8–9; replacement orchestration is implemented in Stage 6.
 
-**Status: breakdown approved; implementation not started.** The operator approved the following ordered increments and this plan-only update. Approval does not choose among unresolved memory/rollback/recovery policies or authorize an unspecified persistence format. All increments below remain unimplemented. Do not begin implementation without the operator's next authorization.
+**Status: 10.1 implemented; verification recorded below.** The operator authorized the seat-constrained adapter with committed seat-authorized observation entitlement. Memory/rollback/recovery policies and persistence formats remain separate approval gates. Increments 10.2–10.9 remain unimplemented.
 
 ### Existing foundations and constraints
 
@@ -1010,7 +1010,7 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 
 | Decision | Required resolution / conservative proposal |
 | --- | --- |
-| Observation entitlement | Define whether memory records committed observations legitimately available to the seat or only confirmed network deliveries. Neither means the human actually saw them. Resolve before 10.1's capture semantics are implemented. |
+| Observation entitlement     | Resolved: committed observations legitimately available to the seat, not confirmed network deliveries. Neither proves the human saw them. See D006.                                                                                                                                                                                                                               |
 | Rollback knowledge | Explicitly choose branch-scoped restoration, retained learned knowledge, or another documented policy. Do not reconstruct abandoned-future secrets for a newly attached bot. Resolve before 10.2. |
 | Durability and legacy games | Approve memory ownership, versioning, atomic commit coupling, recovery and behavior for existing games without recorded memory. A separate post-publication write cannot promise crash-atomic recovery. Resolve before 10.3; missing knowledge must not be filled from private authoritative facts. |
 | Claim/withdrawal policy | Current visible claims do not identify spoken/chat/action evidence. Abstaining on all claim ballots is the proposed conservative initial policy, not an approved evidence classifier. Explicitly choose withdrawal behavior; silence is not approval. Resolve before the corresponding policy slice. Replacement proposals/ballots remain human-only under current runtime rules. |
@@ -1026,6 +1026,9 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 - **Acceptance:** policy receives only current seat-authorized data, never raw state/history/publications or other seats' private cards/ballots. Detached inputs cannot mutate authority. Hidden-state differences cannot affect otherwise identical permitted observations.
 - **Required tests:** failing public-interface privacy tests first at 2/4/8 seats; finished seats, procedures, timed reveals, private transfers and invalid viewer binding.
 - **Risks:** private data hidden inside a nominally safe wrapper; treating historical/recovery information as a fresh disclosure.
+- **Verification:** test-first missing-module failure recorded; final `npm run check` passes **460 tests/seven explicit database skips**, including all16 adapter cases, format/lint/types/build. No database/browser tests required or run for this pure boundary. Independent review found coverage gaps (finished-seat privacy, transfers/detachment, populated answers, reveal lifecycle); focused assertions added and gates rerun; final independent read-only review approved with no remaining issues. Later memory policy remains unresolved; next increment10.2 requires an explicit rollback-knowledge decision.
+- **Implementation:** `src/bots/observation.ts` composes existing current/action projectors with explicit seat binding (including finished seats; null state invalidates binding). Outputs alone are policy inputs; raw snapshots/action pairs remain trusted adapter inputs. No capture integration, memory, persistence, scheduler or autonomous commands.
+- **Coverage:** 16 bot-boundary cases cover 2/4/8-seat procedures, current reveals/expiry, finished-seat visibility, detached outputs, hidden-face noninterference, invalid binding, private transfers and duplicate suppression. Existing projector suites remain the detailed disclosure regression coverage. Stateless adapters cannot prove commit/freshness; callers must not replay history during recovery.
 
 ### Increment 10.2 — Pure permitted-memory reducer
 
@@ -1103,7 +1106,7 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 
 **Dependency order:** decisions → 10.1 → 10.2 → 10.3 → 10.4 → 10.5 → 10.6 → 10.7 → 10.8 → 10.9. Suggested first increment: **10.1**, after observation-entitlement agreement and explicit authorization to begin.
 
-For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. No implementation is authorized by this plan-only update.
+For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1 has subsequently been authorized and implemented; later increments retain their explicit decision gates.
 
 ### Overall Stage 10 checklist
 

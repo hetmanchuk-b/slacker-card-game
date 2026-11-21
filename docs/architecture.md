@@ -1,5 +1,9 @@
 # Architecture decisions — initial implementation
 
+## Bot observation adapter (10.1)
+
+`src/bots/observation.ts` is a trusted pure adapter, not an autonomous policy or runtime subscriber. It binds an existing seat and composes `projectLiveGame`/`projectAction`; only detached returned projections may enter policies. Committed seat entitlement, not network receipt, defines availability (D006). Current views never reconstruct private historical observations. Fresh action capture classification remains server-owned; duplicate captures return no observations. Null-state lifecycle changes invalidate binding. Memory, rollback knowledge, durability and runners remain deferred.
+
 ## Agreed implementation seams
 
 The implementation plan and approved architecture establish the test seams:

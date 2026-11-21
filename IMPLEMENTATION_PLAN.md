@@ -996,7 +996,7 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 
 **Depends on:** Stages 8–9; replacement orchestration is implemented in Stage 6.
 
-**Status: 10.1–10.2 implemented; verification recorded below.** The operator authorized committed seat-authorized entitlement and branch-scoped permitted-memory restoration (D006–D007). Durability/legacy recovery, persistence formats and autonomous execution remain separate approval gates. Increments 10.3–10.9 remain unimplemented.
+**Status: 10.1–10.3 implemented; verification recorded below.** The operator authorized committed seat entitlement, branch-scoped memory and atomic runtime-owned memory recovery (D006–D008). Autonomous execution/policy and admission decisions remain separate approval gates. Increments 10.4–10.9 remain unimplemented.
 
 ### Existing foundations and constraints
 
@@ -1012,7 +1012,7 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 | --- | --- |
 | Observation entitlement     | Resolved: committed observations legitimately available to the seat, not confirmed network deliveries. Neither proves the human saw them. See D006.                                                                                                                                                                                                                               |
 | Rollback knowledge | Resolved in D007: restore exact previously captured permitted memory at the rollback target; missing checkpoints stay unknown. Never reconstruct abandoned-future secrets or enrich from private authoritative history. |
-| Durability and legacy games | Approve memory ownership, versioning, atomic commit coupling, recovery and behavior for existing games without recorded memory. A separate post-publication write cannot promise crash-atomic recovery. Resolve before 10.3; missing knowledge must not be filled from private authoritative facts. |
+| Durability and legacy games | Resolved in D008: runtime-owned memory in the existing atomic frame transaction, explicit versions with legacy unknown knowledge, exact prior checkpoint rollback, corrupt/unsupported memory fails recovery. No private-history enrichment. |
 | Claim/withdrawal policy | Current visible claims do not identify spoken/chat/action evidence. Abstaining on all claim ballots is the proposed conservative initial policy, not an approved evidence classifier. Explicitly choose withdrawal behavior; silence is not approval. Resolve before the corresponding policy slice. Replacement proposals/ballots remain human-only under current runtime rules. |
 | Unknown knowledge | Represent unknown trump separately from known no-trump. Define safe behavior when dealing observations are missing; never expose authoritative next-recipient/trump information as a shortcut. |
 
@@ -1050,6 +1050,10 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 - **Acceptance:** failed commits publish neither new state nor new knowledge. Fresh-process recovery restores only approved memory without replaying raw archives as fresh observations. Missing/legacy knowledge follows the explicit policy.
 - **Required tests:** disposable real PostgreSQL commit failures, fresh-process recovery, duplicate receipts, missing/legacy memory, rollback checkpoints and same-head controls.
 - **Risks:** second writers, non-atomic subscription writes, persistence compatibility and unbounded retained-memory growth. This slice bounds knowledge persistence, not all history resources.
+- **Status: verified.** Runtime checkpoint version2 embeds memory schema version1, captured for every seat independently of subscribers/controllers via existing permitted adapters/reducer. Exact action captures and same-head current observations join the existing frame transaction before publication. A256-entry FIFO retains pre-command knowledge; eviction never removes game history and missing targets restore unknown. Version1 checkpoints remain supported with unknown knowledge. Recovery/rollback suppress historical transient disclosure; no archive observations become fresh. Strict storage validation binds shapes, capacity, game/seat/head, command targets and source ancestry. No SQL migration, network payload, host writer, scheduler or bot command is added.
+- **Verification:** worker test-first implementation and normal `npm run check`: **475 pass/nine explicit DB skips**; focused disposable PostgreSQL suite **16 pass**. Parent final database-enabled `npm run check`: **665 pass/no skips**, including format/lint/types/tests/build. Fresh PostgreSQL18 tmpfs container `penky-memory-103-test`, loopback55453, database `penky_memory_test` only. No browser/manual tests run. Independent read-only review found no issues and approved subject to gates, now passed.
+- **Failure history:** first database gate reached665 test passes but the200-second tool timeout prevented a verified full gate/build completion. Second gate failed an existing host corrupt-recovery cleanup assertion (backend count1 versus0); isolated host suite passed23/23 without changes. Fresh final full gate passed665/no skips and build. No test assertions were weakened or production cleanup code changed.
+- **Next:10.4 only**, after explicit conservative penalty-refusal policy and bot-specific queued admission/exact-head decisions. No autonomous execution is authorized by10.3.
 
 ### Increment 10.4 — Serialized bot runner and one safe action
 
@@ -1109,7 +1113,7 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 
 **Dependency order:** decisions → 10.1 → 10.2 → 10.3 → 10.4 → 10.5 → 10.6 → 10.7 → 10.8 → 10.9. Suggested first increment: **10.1**, after observation-entitlement agreement and explicit authorization to begin.
 
-For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1–10.2 have subsequently been authorized and implemented; later increments retain their explicit decision gates.
+For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1–10.3 have subsequently been authorized and implemented; later increments retain their explicit decision gates.
 
 ### Overall Stage 10 checklist
 

@@ -1,5 +1,11 @@
 # Open decisions discovered during implementation
 
+## D008 — Atomic permitted-memory ownership and recovery (10.3)
+
+**Status:** operator approved runtime ownership of permitted memory for every seat, independent of human/bot controller. Store memory and rollback knowledge checkpoints atomically in the existing authoritative PostgreSQL frame transaction, never via a post-publication write or second writer. Explicitly version the extended format while supporting old records. Legacy/missing knowledge starts unknown; never reconstruct prior observations from private archives. Rollback restores only an exact earlier permitted checkpoint; missing knowledge stays unknown. Corrupt or unsupported memory fails recovery rather than silently granting knowledge.
+
+This approval does not authorize bot scheduling, autonomous decisions or ordinary-command admission changes. Knowledge checkpoints may be bounded and evicted independently of retained game history; an evicted target follows the approved missing-checkpoint policy, not private-history reconstruction.
+
 ## D007 — Branch-scoped permitted bot memory (10.2)
 
 **Status:** operator approved restoring only previously captured permitted seat memory at the exact rollback target. Abandoned-future knowledge is excluded; missing checkpoints start unknown, never reconstructed from private authoritative histories. `restoreBotMemory` accepts an exact checkpoint selected by a trusted caller; version equality validates shape, not ancestry or checkpoint provenance. New-branch current observations remain separately authorized. No persistence format, checkpoint store, runtime capture or recovery policy for legacy games is chosen here.

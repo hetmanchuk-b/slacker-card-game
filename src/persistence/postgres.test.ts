@@ -196,6 +196,9 @@ test('PostgreSQL durable runtime', { skip: !url }, async (t) => {
       });
       t.after(() => runtime.dispose());
       const before = await PostgresSession.load(pool, gameId);
+      assert.equal(before!.checkpoint.schemaVersion, 2);
+      if (before!.checkpoint.schemaVersion !== 2) assert.fail('Expected memory checkpoint');
+      assert.equal(before!.checkpoint.botMemory.current.length, source.seats.length);
       const publications: RuntimePublication[] = [];
       await runtime.subscribe((publication) => {
         publications.push(publication);

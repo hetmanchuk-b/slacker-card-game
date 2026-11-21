@@ -1,3 +1,11 @@
+import { createBotMemory, rememberBotObservation, restoreBotMemory } from '../bots/memory.ts';
+import type { BotMemory } from '../bots/memory.ts';
+import { observeBotCurrent, observeBotAction } from '../bots/observation.ts';
+import {
+  BOT_MEMORY_CHECKPOINT_CAPACITY,
+  validateBotMemoryStorage,
+} from '../bots/memory-storage.ts';
+import type { BotMemoryStorage } from '../bots/memory-storage.ts';
 import { decide } from '../game/engine.ts';
 import { isDeepStrictEqual } from 'node:util';
 import { id } from '../game/ids.ts';
@@ -185,8 +193,7 @@ export type StoredReceipt = Readonly<{
   controller: 'human' | 'bot';
   result: Extract<RuntimeResult, { type: 'accepted' }>;
 }>;
-export type RuntimeCheckpoint = Readonly<{
-  schemaVersion: 1;
+type RuntimeCheckpointBase = Readonly<{
   capturedAtMs: number;
   head: BranchHead;
   connections: readonly SeatPresence[];
@@ -195,9 +202,15 @@ export type RuntimeCheckpoint = Readonly<{
   receipts: readonly StoredReceipt[];
 }>;
 
+export type RuntimeCheckpoint = RuntimeCheckpointBase &
+  (Readonly<{ schemaVersion: 1 }> | Readonly<{ schemaVersion: 2; botMemory: BotMemoryStorage }>);
+
 /** One serialized, server-only runtime per game. Snapshots are not network payloads. */
 export class GameRuntime {
   #options: RuntimeOptions;
+  #memory: BotMemory[] = [];
+  #memoryBefore: BotMemoryStorage['beforeCommands'][number][] = [];
+  #suppressTransient = false;
   #tail: Promise<void> = Promise.resolve();
   #cancel: CancelTask[] = [];
   #generation = 0;
@@ -243,7 +256,10 @@ export class GameRuntime {
     checkpoint: RuntimeCheckpoint,
   ): Promise<GameRuntime> {
     const snapshot = options.history.read();
-    if (checkpoint.schemaVersion !== 1 || !isDeepStrictEqual(snapshot.head, checkpoint.head))
+    if (
+      ![1, 2].includes(checkpoint.schemaVersion) ||
+      !isDeepStrictEqual(snapshot.head, checkpoint.head)
+    )
       throw new Error('Checkpoint does not match the current history head');
     if (
       !Number.isSafeInteger(checkpoint.capturedAtMs) ||
@@ -324,6 +340,18 @@ export class GameRuntime {
         throw new Error('Invalid checkpoint replacement vote');
     }
     const runtime = new GameRuntime({ ...options, connectedSeatIds: [] });
+    if (checkpoint.schemaVersion === 2) {
+      validateBotMemoryStorage(
+        checkpoint.botMemory,
+        options.history,
+        checkpoint.connections.map((item) => item.seatId),
+      );
+      runtime.#memory = structuredClone([...checkpoint.botMemory.current]);
+      runtime.#memoryBefore = structuredClone([...checkpoint.botMemory.beforeCommands]);
+    } else if ('botMemory' in checkpoint) {
+      throw new Error('Invalid legacy bot memory checkpoint');
+    }
+    runtime.#suppressTransient = true;
     runtime.#connections = checkpoint.connections.map((item) => ({
       ...item,
       connected: false,
@@ -355,6 +383,32 @@ export class GameRuntime {
     });
   }
 
+  #remember(snapshot = this.#view(), pair?: RuntimeActionPair): void {
+    const seats =
+      snapshot.state?.players.map((p) => p.id) ?? this.#connections.map((p) => p.seatId);
+    this.#memory = seats.map((seatId) => {
+      const previous =
+        this.#memory.find((m) => m.seatId === seatId) ??
+        createBotMemory(snapshot.head.gameId, seatId);
+      if (!snapshot.state) return previous;
+      const current = observeBotCurrent(snapshot, seatId, this.#options.clock.now());
+      const safeCurrent = this.#suppressTransient
+        ? { ...current, transient: { initialRecipientNotice: false, reveal: null } }
+        : current;
+      return rememberBotObservation(
+        previous,
+        safeCurrent,
+        pair ? observeBotAction(pair, seatId) : undefined,
+      );
+    });
+  }
+
+  #rememberBefore(commandId: CommandId, head: BranchHead): void {
+    if (this.#memoryBefore.some((item) => item.commandId === commandId)) return;
+    this.#memoryBefore.push(structuredClone({ commandId, head, memories: this.#memory }));
+    if (this.#memoryBefore.length > BOT_MEMORY_CHECKPOINT_CAPACITY) this.#memoryBefore.shift();
+  }
+
   #capture(): RuntimeCheckpoint {
     const snapshot = this.#view();
     const capturedAtMs = this.#options.clock.now();
@@ -364,7 +418,8 @@ export class GameRuntime {
     )
       throw new Error('Invalid checkpoint clock');
     return structuredClone({
-      schemaVersion: 1,
+      schemaVersion: 2,
+      botMemory: { schemaVersion: 1, current: this.#memory, beforeCommands: this.#memoryBefore },
       capturedAtMs,
       head: snapshot.head,
       connections: this.#connections,
@@ -593,6 +648,7 @@ export class GameRuntime {
 
   #rollback(command: RollbackCommand): RuntimeResult {
     const point = this.#options.history.rollbackPoint(command.beforeCommandId);
+    const knowledge = this.#memoryBefore.find((item) => item.commandId === command.beforeCommandId);
     const result = this.#options.history.fork(command.expected, {
       id: command.id,
       actorId: command.actorId,
@@ -605,6 +661,19 @@ export class GameRuntime {
     if (result.type === 'rejected') return result;
     if (result.type === 'committed') {
       this.#requiresBranch = true;
+      const target = this.#options.history.read().head;
+      this.#suppressTransient = true;
+      this.#memory = this.#connections.map(({ seatId }) => {
+        const prior =
+          knowledge && point && knowledge.head.version === point.head.version
+            ? knowledge.memories.find((m) => m.seatId === seatId)
+            : undefined;
+        // Administrative rebasing is not a new disclosure.
+        return restoreBotMemory(
+          prior ? { ...prior, head: null } : createBotMemory(target.gameId, seatId),
+          target,
+        );
+      });
       // Fork rebases are new administrative actions on the CHILD branch, not
       // replays of the inherited prefix or observations from abandoned futures.
       if (point?.state && this.#subscriptions.size) {
@@ -966,6 +1035,7 @@ export class GameRuntime {
 
   async #publish(kind?: 'handoff' | 'rollback-closed', persist = true): Promise<void> {
     const view = this.#view();
+    this.#remember(view);
     if (persist && this.#options.commit) await this.#options.commit(this.#capture());
     const previous = this.#published;
     this.#published = view;
@@ -993,16 +1063,33 @@ export class GameRuntime {
     const snapshot = this.#options.history.read();
     const decision = decide(snapshot.state, command, { nowMs, randomInt: this.#options.randomInt });
     if (decision.type === 'rejected') return { ...decision, head: snapshot.head };
+    this.#remember();
+    if (command.type === 'start-game') {
+      this.#memory = command.seatIds.map(
+        (seatId) =>
+          this.#memory.find((m) => m.seatId === seatId) ??
+          createBotMemory(snapshot.head.gameId, seatId),
+      );
+    }
+    this.#rememberBefore(command.id, snapshot.head);
     const appended = this.#options.history.append(snapshot.head, decision.action);
     if (appended.type === 'rejected') throw new Error(`History append rejected: ${appended.code}`);
-    if (appended.type === 'committed' && this.#subscriptions.size) {
+    if (appended.type === 'committed') {
       const after = this.#options.history.read();
-      this.#pendingActions.push({
+      const pair: RuntimeActionPair = {
         before: { head: snapshot.head, state: snapshot.state },
         action: decision.action,
         after: { head: after.head, state: after.state },
         delivery: 'fresh',
-      });
+      };
+      if (
+        decision.action.events.some(
+          (event) => event.event.type === 'card-drawn' || event.event.type === 'game-started',
+        )
+      )
+        this.#suppressTransient = false;
+      this.#remember({ ...this.#view(), head: after.head, state: after.state }, pair);
+      if (this.#subscriptions.size) this.#pendingActions.push(pair);
     }
     return {
       type: 'accepted',

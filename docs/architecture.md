@@ -10,6 +10,10 @@
 
 D007 selects branch-scoped restoration: the caller supplies an exact earlier permitted checkpoint (or empty memory for missing knowledge) at the target. The reducer never selects/checks ancestry against raw history, captures checkpoints, writes storage or schedules commands. Original source heads remain ancestor provenance, not fresh branch disclosures. Generic between-round snapshots cannot prove rights; only a contiguous play-only completion of the preceding round with an empty own hand establishes a known right. Legal opening records consumption, hand obstruction preserves it, and missed/complex boundaries remain unknown. No bot policy may interpret unknown as absent.
 
+## Atomic bot-memory capture (10.3)
+
+The serialized runtime owns current permitted memory for every seat plus a256-entry FIFO of exact pre-command permitted checkpoints. Capture is independent of sockets/subscribers/controller identity and uses the10.1 adapters/10.2 reducer, never archive reconstruction. Runtime checkpoint version2 embeds memory schema version1; existing frame transactions atomically store it with history and receipts. Version1 runtime recovery initializes unknown memory. Restore/rollback suppress historical transient disclosure; missing or evicted target knowledge stays unknown. Strict recovery validation binds seats, heads, command targets and ancestor provenance. No new SQL schema, publication payload, policy scheduler or autonomous command is introduced. See D008, `runtime.md` and `postgres.md`.
+
 ## Agreed implementation seams
 
 The implementation plan and approved architecture establish the test seams:

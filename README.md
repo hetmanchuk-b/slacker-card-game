@@ -92,6 +92,8 @@ The eighth engine/runtime increment completes Stage 7 for the trusted server/sto
 
 **Functional browser Stage9 is complete within that approved automated matrix.** Autonomous bot decisions, polished Three.js, revision1.4/minigame and production certification remain planned; automated browser completion is not a human playtest or release-readiness claim. A source-only HTTPS development launcher exists, not a production game-server CLI. Chat authors and context are bound by the server; claim references are resolved against retained server-owned chat/history.
 
+**Stage10.1–10.3 bot foundations verified:** seat-constrained observations and pure permitted memory now join atomic runtime checkpoints. Every seat's memory is captured independently of human/bot control; versioned recovery supports legacy unknown knowledge and exact branch-scoped rollback checkpoints. The bounded256-entry knowledge cache never deletes game history. Final disposable PostgreSQL gate:665 pass/no skips; normal gate:475 pass/nine database skips. No autonomous bot decisions or runner are implemented.
+
 **New rules, not implemented yet:** revision 1.4 adds a post-game deck-strike minigame and makes remaining participants losers when repetition ends a match. These approved changes are tracked in Stage 11a; current result contracts still follow revision 1.3.
 
 **D001 resolved:** the approved repetition extension detects cycles inside a round without forcing discard or moving cards. See [decision record](docs/open-decisions.md). Full deterministic engine matches for all supported seat counts are covered by regression tests.

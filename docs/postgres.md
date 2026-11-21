@@ -22,6 +22,12 @@ npm run test:postgres
 
 **Use an isolated, disposable database ending in `_test`.** The suite performs DDL, injects an INSERT failure, corrupts its own frames/heads, and terminates its own writer connections in that database. Never point it at a shared application database. CI provisions PostgreSQL 18 on Linux; ordinary Windows/Linux checks do not require Docker.
 
+## Permitted bot-memory recovery — Stage 10.3
+
+Existing schema-version1 game frames now embed runtime checkpoint version2 with a version1 bot-memory payload; no SQL migration or second persistence writer is added. History/state, receipts/control metadata, current permitted seat memories and bounded pre-command knowledge checkpoints share the existing atomic frame transaction. Version1 runtime checkpoints remain supported with unknown knowledge; archives are not replayed as fresh observations. Missing/evicted rollback knowledge stays unknown. Unsupported or malformed new memory fails runtime recovery rather than silently granting knowledge. The host already routes loaded checkpoints through runtime restoration.
+
+The256-entry FIFO bounds knowledge checkpoints independently of retained history; it is not game-frame compaction. Frames still retain full history, so storage cost is not globally bounded. Fresh-process tests and injected INSERT failures use only disposable test databases. See `runtime.md` and D008 for capture, validation and historical-reveal suppression.
+
 ## Migrations
 
 Run migrations explicitly before opening a durable session:

@@ -14,6 +14,10 @@ D007 selects branch-scoped restoration: the caller supplies an exact earlier per
 
 The serialized runtime owns current permitted memory for every seat plus a256-entry FIFO of exact pre-command permitted checkpoints. Capture is independent of sockets/subscribers/controller identity and uses the10.1 adapters/10.2 reducer, never archive reconstruction. Runtime checkpoint version2 embeds memory schema version1; existing frame transactions atomically store it with history and receipts. Version1 runtime recovery initializes unknown memory. Restore/rollback suppress historical transient disclosure; missing or evicted target knowledge stays unknown. Strict recovery validation binds seats, heads, command targets and ancestor provenance. No new SQL schema, publication payload, policy scheduler or autonomous command is introduced. See D008, `runtime.md` and `postgres.md`.
 
+## One-action bot orchestration (10.4)
+
+The host owns a runner subscription for each installed live writer and stops it before release. `choosePenaltyRefusal` receives seat-authorized current views only and selects an explicit refusal for an eligible unanswered bot penalty contribution. Trusted orchestration binds seat/controller/branch and a cancellation signal through `GameRuntime.botAdmission`. Exact head, runtime identity, publication sequence and controller tenure are rechecked before receipts inside the runtime queue. Human command semantics and no-human suspension remain unchanged; admitted atomic actions finish. No dealing/play/ballot/accusation policy, persistence format, network API or dependency is added. See D009 and `runtime.md`.
+
 ## Agreed implementation seams
 
 The implementation plan and approved architecture establish the test seams:

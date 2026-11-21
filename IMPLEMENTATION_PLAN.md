@@ -996,7 +996,7 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 
 **Depends on:** Stages 8–9; replacement orchestration is implemented in Stage 6.
 
-**Status: 10.1–10.3 implemented; verification recorded below.** The operator authorized committed seat entitlement, branch-scoped memory and atomic runtime-owned memory recovery (D006–D008). Autonomous execution/policy and admission decisions remain separate approval gates. Increments 10.4–10.9 remain unimplemented.
+**Status: 10.1–10.4 implemented; verification recorded below.** D006–D009 approve seat entitlement, branch-scoped atomic memory and the one-action refusal runner with bot-only exact-head admission. Increments10.5–10.9 remain unimplemented; further policies retain their scoped decision gates.
 
 ### Existing foundations and constraints
 
@@ -1063,6 +1063,10 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 - **Acceptance:** ordinary dispatch binds server-owned seat, bot controller and branch. Queued admission checks captured writer/game/branch/controller tenure and decision cancellation token. Handback, pause, rollback, recovery and successor invalidate obsolete work; no-human suspension remains intact.
 - **Required tests:** replacement→refusal→human return, queued handback, bot→human→bot ABA, duplicate publications, stale decisions, no-human pause and already-admitted atomic completion.
 - **Risks:** outside-queue authorization, duplicate scheduling and subscription feedback loops. Decide bot-specific exact-head admission explicitly; do not change ordinary-human command semantics.
+- **Status: verified.** D009 approves only eligible unanswered penalty refusal. `src/bots/runner.ts` passes seat-projected current views to the policy; dispatch binds server-owned seat, bot controller, branch and cancellation signal. `GameRuntime.botAdmission` checks runtime instance, exact head, committed publication sequence, controller tenure, pause and cancellation inside the queue before receipts. Controller transitions fence ABA; new publications cancel/reconsider unadmitted work. Admitted atomic completion drains. Host installs runners only on live entries and stops them before release; recovery/successors get new fences. Human command semantics, no-human suspension and persistence/network formats are unchanged.
+- **Verification:** test-first focused runtime/runner suites89 pass; final focused runner10 pass and real PostgreSQL host25 pass. Parent final database-enabled `npm run check`: **677 pass/no skips**, format/lint/types/tests/build passed. New disposable PostgreSQL18 tmpfs container `penky-runner-104-test`, loopback55454, database `penky_runner_test` only. Parent normal `npm run check`: **485 pass/nine explicit database skips**, including build. No browser/manual tests or complete autonomous matches claimed.
+- **Review:** initial independent review confirmed policy/fences but found autonomous dispatch failures bypassed host invalidation. Both runner installations now report to non-awaited epoch-fenced host health cleanup. New real PostgreSQL failure regression requires invalidation without another host request, no draft publication, safe recovery and exactly one committed refusal. Follow-up read-only review approved with no remaining issues. Earlier pre-fix full database gate passed676; final677 includes the regression.
+- **Next:10.5 only:** legal dealing and reveal observation, with no play/ballot/claim-policy expansion. Stop after10.4.
 
 ### Increment 10.5 — Legal dealing and reveal observation
 
@@ -1113,7 +1117,7 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 
 **Dependency order:** decisions → 10.1 → 10.2 → 10.3 → 10.4 → 10.5 → 10.6 → 10.7 → 10.8 → 10.9. Suggested first increment: **10.1**, after observation-entitlement agreement and explicit authorization to begin.
 
-For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1–10.3 have subsequently been authorized and implemented; later increments retain their explicit decision gates.
+For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1–10.4 have subsequently been authorized and implemented; later increments retain their explicit decision gates.
 
 ### Overall Stage 10 checklist
 

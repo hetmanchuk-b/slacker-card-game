@@ -1,3 +1,4 @@
+import { startBotRunner } from '../bots/runner.ts';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Pool } from 'pg';
@@ -37,7 +38,7 @@ export type OwnerRollbackRequest = Readonly<{
 }>;
 
 type Inputs = Omit<RuntimeOptions, 'history' | 'commit' | 'connectedSeatIds'>;
-type Entry = LiveMatch & { gameId: GameId; lobbyId: LobbyId; epoch: string };
+type Entry = LiveMatch & { gameId: GameId; lobbyId: LobbyId; epoch: string; stopBots?: () => void };
 type Connection = Pick<GuestMembership, 'lobbyId' | 'seatId'>;
 export type HostedSnapshot = Readonly<{ epoch: string; snapshot: RuntimeSnapshot }>;
 /** Private committed stream/lifecycle seam, never a network payload. */
@@ -508,6 +509,11 @@ export class PostgresGameHost {
       try {
         await this.#presence(entry);
         await this.#bindObservers(entry);
+        entry.stopBots = await startBotRunner(
+          entry.runtime,
+          () => id('command', randomUUID()),
+          () => this.#checkRuntimeHealth(entry.gameId, entry.epoch),
+        );
       } catch {
         await this.#release(entry, false);
         throw new GameHostError('game-unavailable');
@@ -558,15 +564,17 @@ export class PostgresGameHost {
     return result;
   }
 
+  #checkRuntimeHealth(gameId: GameId, epoch: string): void {
+    // Never await the host queue from runtime work: a trusted host operation
+    // may itself await it. Late failures cannot evict a replacement writer.
+    void this.#enqueue(async () => {
+      const entry = this.#entries.get(gameId);
+      if (entry?.epoch === epoch && !this.#healthy(entry)) await this.#release(entry, false);
+    }).catch(() => {});
+  }
+
   #runtimeInputs(gameId: GameId, epoch: string): Inputs {
-    const check = () => {
-      // Do not await this queue from a clock task: a trusted host operation may
-      // itself be waiting for that task. Late old tasks cannot evict a new epoch.
-      void this.#enqueue(async () => {
-        const entry = this.#entries.get(gameId);
-        if (entry?.epoch === epoch && !this.#healthy(entry)) await this.#release(entry, false);
-      }).catch(() => {});
-    };
+    const check = () => this.#checkRuntimeHealth(gameId, epoch);
     const inputs = this.#inputs(check);
     return {
       ...inputs,
@@ -635,6 +643,11 @@ export class PostgresGameHost {
       this.#entries.set(currentGameId, entry);
       try {
         await this.#bindObservers(entry);
+        entry.stopBots = await startBotRunner(
+          entry.runtime,
+          () => id('command', randomUUID()),
+          () => this.#checkRuntimeHealth(entry.gameId, entry.epoch),
+        );
       } catch (error) {
         await this.#release(entry, false);
         throw error;
@@ -665,6 +678,7 @@ export class PostgresGameHost {
   }
 
   async #release(entry: Entry, save: boolean): Promise<void> {
+    entry.stopBots?.();
     if (this.#entries.get(entry.gameId) === entry) this.#entries.delete(entry.gameId);
     for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])]) {
       if (observer.epoch !== entry.epoch) continue;

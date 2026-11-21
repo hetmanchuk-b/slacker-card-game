@@ -225,6 +225,7 @@ export class GameRuntime {
   #receipts = new Map<CommandId, StoredReceipt>();
   #subscriptions = new Set<Subscription>();
   #publicationSequence = 0;
+  #controllerTenures = new Map<SeatId, number>();
   #pendingActions: RuntimeActionPair[] = [];
   #pendingPublication: RuntimePublication | null = null;
   #pendingClosure = false;
@@ -495,6 +496,28 @@ export class GameRuntime {
       paused: state?.clock.type === 'suspended',
       replacementVote: structuredClone(this.#replacement),
       controlEvents: structuredClone(this.#controlEvents),
+    };
+  }
+
+  /** Process-local bot decision fence. Never persisted or applied to human commands.
+   * Writer identity is this runtime instance; cancellation is checked at admission
+   * only, so an admitted atomic action still drains after handback/retirement.
+   */
+  botAdmission(seatId: SeatId, signal: AbortSignal): DispatchOptions {
+    const captured = this.read();
+    const sequence = this.#publicationSequence;
+    const tenure = this.#controllerTenures.get(seatId) ?? 0;
+    return {
+      controller: 'bot',
+      branchId: captured.head.branchId,
+      admit: (current) =>
+        !signal.aborted &&
+        !this.#closed &&
+        !current.paused &&
+        sequence === this.#publicationSequence &&
+        tenure === (this.#controllerTenures.get(seatId) ?? 0) &&
+        isDeepStrictEqual(captured.head, current.head) &&
+        current.connections.some((p) => p.seatId === seatId && p.controller === 'bot'),
     };
   }
 
@@ -777,6 +800,11 @@ export class GameRuntime {
       connected: command.type === 'reconnect',
     });
     if (command.type === 'reconnect' && current.controller === 'bot')
+      this.#controllerTenures.set(
+        command.seatId,
+        (this.#controllerTenures.get(command.seatId) ?? 0) + 1,
+      );
+    if (command.type === 'reconnect' && current.controller === 'bot')
       this.#controlEvents.push({
         type: 'human-control-restored',
         commandId: command.id,
@@ -893,6 +921,11 @@ export class GameRuntime {
       !target.connected &&
       state?.players.some((player) => player.id === target.seatId && player.status === 'active') ===
         true;
+    if (replaced)
+      this.#controllerTenures.set(
+        vote.absentSeatId,
+        (this.#controllerTenures.get(vote.absentSeatId) ?? 0) + 1,
+      );
     const next = this.#connections.map((item) =>
       replaced && item.seatId === vote.absentSeatId
         ? { ...item, controller: 'bot' as const }

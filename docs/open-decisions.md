@@ -1,5 +1,11 @@
 # Open decisions discovered during implementation
 
+## D009 — One safe autonomous action and bot-only admission (10.4)
+
+**Status:** operator approved automatic refusal of an eligible, unanswered penalty contribution only. No dealing, play, accusation, ballot, withdrawal or replacement decisions are authorized in this slice. Policy receives only permitted seat observations; server-owned identity and lifecycle metadata are admission concerns, not privileged policy knowledge.
+
+Bot-only admission must recheck the captured exact head, writer/game/branch, controller tenure and cancellation token inside the runtime queue before receipt lookup. Stale decisions cancel and are reconsidered from fresh permitted observations. Handback, pause, rollback, recovery, successor and writer retirement invalidate pending work; bot→human→bot must not revive old work. Already-admitted atomic actions drain. No-human suspension and ordinary human command semantics remain unchanged.
+
 ## D008 — Atomic permitted-memory ownership and recovery (10.3)
 
 **Status:** operator approved runtime ownership of permitted memory for every seat, independent of human/bot controller. Store memory and rollback knowledge checkpoints atomically in the existing authoritative PostgreSQL frame transaction, never via a post-publication write or second writer. Explicitly version the extended format while supporting old records. Legacy/missing knowledge starts unknown; never reconstruct prior observations from private archives. Rollback restores only an exact earlier permitted checkpoint; missing knowledge stays unknown. Corrupt or unsupported memory fails recovery rather than silently granting knowledge.

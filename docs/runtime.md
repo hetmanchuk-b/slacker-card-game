@@ -28,6 +28,12 @@ The payload stores current per-seat memories and at most256 FIFO pre-command kno
 
 Memory lives only in server-private checkpoints, not generic runtime snapshots, publications or network projections. The host's existing checkpoint restoration and atomic successor handoff carry it without a new writer or SQL table. `src/runtime/memory.test.ts`, `src/bots/memory-storage.test.ts` and `src/persistence/bot-memory.test.ts` cover the boundary. Runtime instances without `commit` remain memory-only, not crash durable.
 
+## Bot-only queued admission — Stage 10.4
+
+`botAdmission(seatId, signal)` captures this live runtime's exact head, committed publication sequence and process-local controller tenure, returning ordinary bot dispatch options. Its guard runs inside serialized admission before receipt lookup. Cancellation, retirement, pause, changed head/control publication or bot→human→bot tenure rejects stale work without faulting the runtime. Runtime-instance ownership fences recovery/writer replacement; host-owned runner disposal fences lifecycle retirement. These fences are process-local, never persisted or applied to ordinary human commands. Once admitted, the existing atomic action drains even if cancellation arrives later.
+
+`src/bots/runner.ts` subscribes to committed notices and passes only detached seat projections to `choosePenaltyRefusal`. Eligible unanswered unpaused bot penalty contributions are explicitly refused; the runner never submits timeout commands, plays cards, deals, votes or accuses. Each new publication cancels unadmitted decisions and reconsiders from fresh observations; duplicate publications are ignored. Stop cancels pending tokens and unsubscribes. No-human suspension remains authoritative. Tests in `src/bots/runner.test.ts` cover stale work, exact-head and tenure fences, handback/ABA, cancellation, pause and already-admitted completion.
+
 ## Optional authenticated queue admission — Stage 8.9
 
 The operator approved additive `DispatchOptions.admit(snapshot): boolean | Promise<boolean>`. It runs inside the serialized runtime queue, **before receipt lookup, branch/rule processing or mutation**. Its detached snapshot is private server data. Only `true` admits the command; false produces a headless `RuntimeAdmissionError` with fixed code `unauthorized`. A thrown/rejected guard produces the same fixed exception with code `unavailable`, without retaining its diagnostic/cause. Infrastructure failure is not reported as invalid identity.

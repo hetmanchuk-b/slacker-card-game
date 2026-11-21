@@ -112,6 +112,186 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   }
 
   await t.test(
+    'live runner replaces an absent seat, refuses once, recovers and returns human control',
+    async (t) => {
+      const { host, clock, member, joined, request, leaveGuest, guest } = await setup(t);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        assert.equal(
+          (
+            await runtime.dispatch({
+              type: 'draw-card',
+              id: id('command', randomUUID()),
+              actorId: member.seatId,
+            })
+          ).type,
+          'accepted',
+        );
+        for (let index = 0; index < 36; index++) {
+          const phase = runtime.read().state!.phase;
+          if (phase.type !== 'dealing') assert.fail();
+          await runtime.dispatch({
+            type: 'draw-card',
+            id: id('command', randomUUID()),
+            actorId: phase.nextSeatId,
+          });
+        }
+        await clock.advanceBy(10000);
+        assert.equal(runtime.read().state!.procedure?.type, 'penalty');
+      });
+      await leaveGuest();
+      await clock.advanceBy(30001);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        await runtime.dispatch({
+          type: 'propose-bot',
+          id: id('command', randomUUID()),
+          actorId: member.seatId,
+          seatId: joined.seatId,
+        });
+        await runtime.dispatch({
+          type: 'replacement-vote',
+          id: id('command', randomUUID()),
+          actorId: member.seatId,
+          procedureId: runtime.read().replacementVote!.timer.id,
+          vote: 'yes',
+        });
+        await runtime.observe(async () => {});
+        assert.equal(runtime.read().state!.procedure, null);
+        const checkpoint = await runtime.checkpoint();
+        const refusals = checkpoint.receipts.filter((r) => r.command.type === 'penalty-response');
+        assert.equal(refusals.length, 1);
+        assert.equal(refusals[0]!.controller, 'bot');
+      });
+      const previous = (await host.read(member.lobbyId))!.epoch;
+      await host.recover(member.lobbyId);
+      assert.notEqual((await host.read(member.lobbyId))!.epoch, previous);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        assert.equal(
+          (await runtime.checkpoint()).receipts.filter((r) => r.command.type === 'penalty-response')
+            .length,
+          1,
+        );
+      });
+      const leaveAgain = await host.attach(
+        await access.membership(guest.token, member.lobbyId, clock.now()),
+      );
+      t.after(leaveAgain);
+      assert.equal(
+        (await host.read(member.lobbyId))!.snapshot.connections.find(
+          (p) => p.seatId === joined.seatId,
+        )!.controller,
+        'human',
+      );
+    },
+  );
+
+  await t.test(
+    'autonomous refusal commit failure invalidates its writer without another host request',
+    { timeout: 10000 },
+    async (t) => {
+      const { host, clock, member, joined, request, leaveGuest } = await setup(t);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        await runtime.dispatch({
+          type: 'draw-card',
+          id: id('command', randomUUID()),
+          actorId: member.seatId,
+        });
+        for (let index = 0; index < 36; index++) {
+          const phase = runtime.read().state!.phase;
+          if (phase.type !== 'dealing') assert.fail();
+          await runtime.dispatch({
+            type: 'draw-card',
+            id: id('command', randomUUID()),
+            actorId: phase.nextSeatId,
+          });
+        }
+        await clock.advanceBy(10000);
+      });
+      await leaveGuest();
+      await clock.advanceBy(30001);
+      const before = (await host.read(member.lobbyId))!;
+      const notices: HostPublication[] = [];
+      let invalidate!: () => void;
+      const invalidated = new Promise<void>((resolve) => {
+        invalidate = resolve;
+      });
+      const stop = await host.subscribe(member.lobbyId, (notice) => {
+        notices.push(notice);
+        if (notice.type === 'invalidated') invalidate();
+      });
+      t.after(stop);
+      const lock = Number.parseInt(randomUUID().slice(0, 8), 16);
+      const blocker = await pool.connect();
+      const remove = await failFrames(
+        t,
+        request.gameId,
+        `jsonb_path_exists(NEW.payload, '$.checkpoint.receipts[*] ? (@.command.type == "penalty-response")') AND (SELECT true FROM pg_advisory_xact_lock(${lock}::bigint))`,
+      );
+      await blocker.query('SELECT pg_advisory_lock($1::bigint)', [lock]);
+      try {
+        await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+          await runtime.dispatch({
+            type: 'propose-bot',
+            id: id('command', randomUUID()),
+            actorId: member.seatId,
+            seatId: joined.seatId,
+          });
+          await runtime.dispatch({
+            type: 'replacement-vote',
+            id: id('command', randomUUID()),
+            actorId: member.seatId,
+            procedureId: runtime.read().replacementVote!.timer.id,
+            vote: 'yes',
+          });
+        });
+        // The host operation is now finished. Only the autonomous commit remains;
+        // SQL holds its failure until no host request can discover the fault.
+      } finally {
+        await blocker.query('SELECT pg_advisory_unlock($1::bigint)', [lock]);
+        blocker.release();
+      }
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        invalidated,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('Autonomous fault did not invalidate writer')),
+            3000,
+          );
+        }),
+      ]).finally(() => clearTimeout(timeout));
+      assert.equal(notices.at(-1)!.type, 'invalidated');
+      assert.equal(notices.at(-1)!.epoch, before.epoch);
+      assert.equal(
+        notices.some(
+          (notice) =>
+            notice.type === 'publication' &&
+            notice.publication.actions.some((pair) =>
+              pair.action.events.some(({ event }) => event.type === 'penalty-answered'),
+            ),
+        ),
+        false,
+      );
+      const publications = notices.filter((notice) => notice.type === 'publication');
+      assert.equal(publications.at(-1)!.publication.snapshot.state!.procedure?.type, 'penalty');
+      await writerExited(request.gameId);
+      await remove();
+      // Recovery must load the durable pre-refusal penalty, then safely reconsider
+      // it once with the newly installed runner rather than publishing the draft.
+      const recovered = (await host.read(member.lobbyId))!;
+      assert.notEqual(recovered.epoch, before.epoch);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        await runtime.observe(async () => {});
+        const checkpoint = await runtime.checkpoint();
+        assert.equal(
+          checkpoint.receipts.filter((r) => r.command.type === 'penalty-response').length,
+          1,
+        );
+        assert.equal(runtime.read().state!.procedure, null);
+      });
+    },
+  );
+
+  await t.test(
     'late start denial remains unauthorized while failed authorization remains unavailable without closing rollback',
     async (t) => {
       const { host, clock, member, owner, request } = await setup(t);

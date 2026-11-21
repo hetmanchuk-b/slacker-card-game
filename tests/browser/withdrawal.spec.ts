@@ -185,8 +185,12 @@ test('real delayed withdrawal request cannot cancel punishment after the cutoff'
     await expect(pages[0]!.getByTestId('claim-ballot')).toContainText('Your confirmed vote: yes');
     await pages[0]!.getByRole('button', { name: 'Request withdrawal', exact: true }).click();
     await expect.poll(() => !!held).toBe(true);
-    for (const index of [2, 3])
-      await pages[index]!.getByRole('button', { name: 'Vote yes', exact: true }).click();
+    // Independent seats can answer concurrently within the real ballot deadline.
+    await Promise.all(
+      [2, 3].map((index) =>
+        pages[index]!.getByRole('button', { name: 'Vote yes', exact: true }).click(),
+      ),
+    );
     for (const page of pages) await expect(page.getByTestId('penalty-procedure')).toBeVisible();
     held!();
     await expect.poll(() => rejection).toBe('punishment-started');

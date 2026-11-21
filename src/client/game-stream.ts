@@ -35,6 +35,12 @@ export type Withdrawal = Readonly<{
   ownApproval: boolean | null;
   timer: DisplayTimer;
 }>;
+export type ReplacementVote = Readonly<{
+  absentSeatId: string;
+  eligibleSeatIds: readonly string[];
+  ownVote: Vote | null;
+  timer: DisplayTimer;
+}>;
 export type Transfer = Readonly<{ fromSeatId: string; toSeatId: string; card: Card }>;
 export type PlayObservation =
   | Readonly<{ type: 'card-played'; seatId: string; card: Card }>
@@ -53,6 +59,7 @@ const violationReasons = [
 export const remainingTime = (timer: DisplayTimer, now: number): number =>
   timer.paused ? timer.remainingMs : Math.max(0, (timer.expiresAt ?? now) - now);
 export type GameSnapshot = Readonly<{
+  replacementVote: ReplacementVote | null;
   penalty: Penalty | null;
   ballot: Ballot | null;
   withdrawal: Withdrawal | null;
@@ -338,6 +345,39 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
       controller: c.controller,
     });
   }
+  let replacementVote: ReplacementVote | null = null;
+  const r = raw.control.replacementVote;
+  if (r !== null) {
+    if (
+      !state ||
+      !exact(r, ['absentSeatId', 'eligibleSeatIds', 'ownVote', 'timer']) ||
+      !text(r.absentSeatId) ||
+      !state.players.some((p) => p.id === r.absentSeatId && p.status === 'active') ||
+      !Array.isArray(r.eligibleSeatIds) ||
+      !r.eligibleSeatIds.every(text) ||
+      new Set(r.eligibleSeatIds).size !== r.eligibleSeatIds.length ||
+      r.eligibleSeatIds.some(
+        (id) =>
+          id === r.absentSeatId ||
+          !state!.players.some((p) => p.id === id && p.status === 'active'),
+      ) ||
+      (r.ownVote !== null &&
+        (!r.eligibleSeatIds.includes(seatId) ||
+          typeof r.ownVote !== 'string' ||
+          !['yes', 'no', 'abstain'].includes(r.ownVote))) ||
+      !exact(r.timer, ['id', 'remainingMs', 'paused']) ||
+      !text(r.timer.id) ||
+      !count(r.timer.remainingMs, 10000) ||
+      r.timer.paused !== false
+    )
+      return null;
+    replacementVote = {
+      absentSeatId: r.absentSeatId,
+      eligibleSeatIds: [...r.eligibleSeatIds],
+      ownVote: r.ownVote as Vote | null,
+      timer: { id: r.timer.id, remainingMs: r.timer.remainingMs, paused: false, expiresAt: null },
+    };
+  }
   if (
     !exact(raw.transient, ['initialRecipientNotice', 'reveal']) ||
     typeof raw.transient.initialRecipientNotice !== 'boolean'
@@ -508,6 +548,7 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
     }
   }
   return {
+    replacementVote,
     penalty,
     ballot,
     withdrawal,
@@ -521,6 +562,7 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
   };
 }
 export class GameStream {
+  #replacementTimer: { key: string; timer: DisplayTimer } | null = null;
   readonly #seatId: string;
   #epoch: string | null = null;
   #sequence = -1;
@@ -770,6 +812,19 @@ export class GameStream {
       )
     )
       return 'invalid';
+    if (next.replacementVote) {
+      const r = next.replacementVote;
+      const key = JSON.stringify([next.head.gameId, next.head.branchId, r.timer.id]);
+      const timer = {
+        ...r.timer,
+        expiresAt: Math.min(
+          this.#now() + r.timer.remainingMs,
+          this.#replacementTimer?.key === key ? this.#replacementTimer.timer.expiresAt! : Infinity,
+        ),
+      };
+      this.#replacementTimer = { key, timer };
+      next = { ...next, replacementVote: { ...r, timer } };
+    } else this.#replacementTimer = null;
     if (next.withdrawal) {
       const b = next.withdrawal;
       const key = JSON.stringify([next.head.gameId, next.head.branchId, b.timer.id]);

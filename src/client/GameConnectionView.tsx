@@ -1,3 +1,4 @@
+import { PresenceView } from './PresenceView.tsx';
 import { ClaimsView } from './ClaimsView.tsx';
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
@@ -206,6 +207,12 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
             : 'Public table — release to attempt play.'}
         </div>
       ) : null}
+      <PresenceView
+        client={client}
+        connection={connection}
+        busy={busy}
+        seatId={membership.seatId}
+      />
       <DealingView
         drag={drag}
         connection={connection}
@@ -233,8 +240,8 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
         onRespond={(id) => client.respondToPenalty(id)}
       />
       <p className="quiet">
-        Withdrawal and owner-history controls arrive in later increments. No permanent trump or
-        next-recipient indicator is shown.
+        Owner-history controls arrive in a later increment. No permanent trump or next-recipient
+        indicator is shown.
       </p>
     </section>
   );

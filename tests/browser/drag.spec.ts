@@ -135,7 +135,7 @@ test('real hand drag to the table strip uses one authenticated play intent and c
   }
 });
 
-test('explicit wire fixture: mouse hand drag to public table sends exactly one existing play command', async ({
+test('explicit wire fixture: mouse hand drag to table drop strip sends exactly one existing play command', async ({
   browser,
   origin,
   wall,
@@ -147,7 +147,9 @@ test('explicit wire fixture: mouse hand drag to public table sends exactly one e
     await page.setViewportSize({ width: 1000, height: 2200 });
     const source = page.getByRole('button', { name: 'Play 6 of hearts', exact: true });
     await begin(page, source);
-    await drop(page, page.getByTestId('public-table'));
+    // Presence controls can put the physical table below the viewport. Use the
+    // existing fixed table target rather than offscreen mouse coordinates.
+    await drop(page, page.getByTestId('gesture-drop-target'));
     await expect(page.getByTestId('public-table')).toContainText('6 of hearts');
     await expect(page.getByTestId('own-hand').getByRole('listitem')).toHaveCount(1);
     expect(fixture.commands).toEqual([{ type: 'play-card', actor: 0 }]);

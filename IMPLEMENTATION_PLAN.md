@@ -996,6 +996,117 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 
 **Depends on:** Stages 8–9; replacement orchestration is implemented in Stage 6.
 
+**Status: breakdown approved; implementation not started.** The operator approved the following ordered increments and this plan-only update. Approval does not choose among unresolved memory/rollback/recovery policies or authorize an unspecified persistence format. All increments below remain unimplemented. Do not begin implementation without the operator's next authorization.
+
+### Existing foundations and constraints
+
+- Reuse `src/projections/game.ts`, `live.ts` and `actions.ts` for seat-authorized current and fresh observations. Raw `GameState`, runtime publications, checkpoints, histories and action batches must never become policy inputs. Projectors are not themselves bot-memory or delivery-freshness APIs.
+- Reuse `src/game/cards.ts` for pure comparison, and ordinary serialized `GameRuntime.dispatch` with bot controller/branch binding and queued admission. Do not introduce a parallel rules engine or ordinary-human turn/version restrictions.
+- Reuse runtime/host subscriptions, replacement, handback, recovery and successor lifecycle seams. A controller check alone does not fence a bot→human→bot ABA transition: capture decision/controller tenure and revalidate inside the queue before receipt lookup. Already-admitted atomic actions drain; obsolete unadmitted work is canceled.
+- `src/server/external-match.postgres.test.ts` and `tests/browser/acceptance.spec.ts` supply observation-driven test strategies, not production bot interfaces. Proposed `src/bots/` paths below do not yet exist.
+- Preserve no-human suspension, fixed N, opaque hidden IDs, nested timers, committed publication and atomic persistence. Bot decisions, randomness and timers remain server-authoritative. No new dependencies, accounts, services, minigame strategy or revision-1.4 result substitution belong here.
+
+### Decisions required before autonomous execution
+
+| Decision | Required resolution / conservative proposal |
+| --- | --- |
+| Observation entitlement | Define whether memory records committed observations legitimately available to the seat or only confirmed network deliveries. Neither means the human actually saw them. Resolve before 10.1's capture semantics are implemented. |
+| Rollback knowledge | Explicitly choose branch-scoped restoration, retained learned knowledge, or another documented policy. Do not reconstruct abandoned-future secrets for a newly attached bot. Resolve before 10.2. |
+| Durability and legacy games | Approve memory ownership, versioning, atomic commit coupling, recovery and behavior for existing games without recorded memory. A separate post-publication write cannot promise crash-atomic recovery. Resolve before 10.3; missing knowledge must not be filled from private authoritative facts. |
+| Claim/withdrawal policy | Current visible claims do not identify spoken/chat/action evidence. Abstaining on all claim ballots is the proposed conservative initial policy, not an approved evidence classifier. Explicitly choose withdrawal behavior; silence is not approval. Resolve before the corresponding policy slice. Replacement proposals/ballots remain human-only under current runtime rules. |
+| Unknown knowledge | Represent unknown trump separately from known no-trump. Define safe behavior when dealing observations are missing; never expose authoritative next-recipient/trump information as a shortcut. |
+
+These are approval gates, not permission to invent game rules. Add the chosen decisions to the existing decision workflow when resolved; significant interfaces and persistence changes still require explicit approval.
+
+### Increment 10.1 — Seat-constrained observation boundary
+
+- **Goal/scope:** pure policy-input adapter and narrow observation contract; no scheduler or autonomous commands.
+- **Dependencies:** existing projectors; resolved observation-entitlement semantics.
+- **Expected files/modules:** proposed `src/bots/observation.ts` and tests; relevant projection tests and architecture documentation.
+- **Acceptance:** policy receives only current seat-authorized data, never raw state/history/publications or other seats' private cards/ballots. Detached inputs cannot mutate authority. Hidden-state differences cannot affect otherwise identical permitted observations.
+- **Required tests:** failing public-interface privacy tests first at 2/4/8 seats; finished seats, procedures, timed reveals, private transfers and invalid viewer binding.
+- **Risks:** private data hidden inside a nominally safe wrapper; treating historical/recovery information as a fresh disclosure.
+
+### Increment 10.2 — Pure permitted-memory reducer
+
+- **Goal/scope:** accumulate only approved observations per game/seat, independently of current human/bot control; no autonomous execution.
+- **Dependencies:** 10.1 and explicit rollback-memory policy.
+- **Expected files/modules:** proposed `src/bots/memory.ts` and tests; decision/coverage documentation.
+- **Acceptance:** record observed dealing progress, legitimately observed trump and necessary opening-right history with provenance. Unknown knowledge stays unknown. Duplicate observations and rejected draws do not advance dealing memory. Branch transitions follow the chosen policy without private-history enrichment.
+- **Required tests:** initial notice, successful/rejected draws, interrupted reveal, duplicate delivery, recipient-private observations, consumed/preserved opening rights and rollback branches.
+- **Risks:** face inference from opaque IDs, authoritative trump lookup or incomplete round observations masquerading as knowledge.
+
+### Increment 10.3 — Durable memory capture and recovery
+
+- **Goal/scope:** make approved seat memory recoverable at the same authoritative commit boundary as the actions producing it; not a general history redesign.
+- **Dependencies:** 10.2 and separately approved storage ownership/versioning/legacy-game policy.
+- **Expected files/modules:** relevant runtime/checkpoint and `src/persistence/postgres.ts` seams, host integration and proposed bot-memory persistence tests. Add a migration only if the approved design requires one.
+- **Acceptance:** failed commits publish neither new state nor new knowledge. Fresh-process recovery restores only approved memory without replaying raw archives as fresh observations. Missing/legacy knowledge follows the explicit policy.
+- **Required tests:** disposable real PostgreSQL commit failures, fresh-process recovery, duplicate receipts, missing/legacy memory, rollback checkpoints and same-head controls.
+- **Risks:** second writers, non-atomic subscription writes, persistence compatibility and unbounded retained-memory growth. This slice bounds knowledge persistence, not all history resources.
+
+### Increment 10.4 — Serialized bot runner and one safe action
+
+- **Goal/scope:** first autonomous vertical slice: replacement leads to one eligible bot penalty refusal, then human handback.
+- **Dependencies:** 10.3 and approval of this conservative refusal policy.
+- **Expected files/modules:** proposed `src/bots/runner.ts`, host lifecycle integration and focused runtime tests.
+- **Acceptance:** ordinary dispatch binds server-owned seat, bot controller and branch. Queued admission checks captured writer/game/branch/controller tenure and decision cancellation token. Handback, pause, rollback, recovery and successor invalidate obsolete work; no-human suspension remains intact.
+- **Required tests:** replacement→refusal→human return, queued handback, bot→human→bot ABA, duplicate publications, stale decisions, no-human pause and already-admitted atomic completion.
+- **Risks:** outside-queue authorization, duplicate scheduling and subscription feedback loops. Decide bot-specific exact-head admission explicitly; do not change ordinary-human command semantics.
+
+### Increment 10.5 — Legal dealing and reveal observation
+
+- **Goal/scope:** bots take their dealing turns and remember the permitted final reveal; never submit timer-expiry commands.
+- **Dependencies:** 10.4.
+- **Expected files/modules:** proposed dealing policy module, observation/memory tests and runtime integration tests.
+- **Acceptance:** draw only from the personal initial notice or remembered successful clockwise draws. Wait through authoritative reveal/procedure boundaries. Never read hidden dealing order, fabricate a permanent dealing-turn hint or recover historical trump from authoritative state.
+- **Required tests:** 2/4/8 seats, two stump passes, unequal final hands, rejected draws, replacement during dealing, suspended reveal and unknown-memory recovery.
+- **Risks:** deadlock with unavailable historical knowledge; missing observations must use the approved fallback, not privileged hints.
+
+### Increment 10.6 — Legal round play and stump opening
+
+- **Goal/scope:** simple legal leads, beats, pickups and mandatory stump openings; no strategic search or need for voluntary out-of-turn opening.
+- **Dependencies:** 10.5.
+- **Expected files/modules:** proposed play policy module and tests; reuse `canBeat` from `src/game/cards.ts`.
+- **Acceptance:** use own cards, public table and approved memory only. Respect spade isolation, six-over-ace and one-use opening rights. Unknown trump permits only provably legal choices and is not treated as no-trump. Preserve fixed N and authoritative automatic consequences.
+- **Required tests:** approved round/stump scenarios, empty hands, automatic pickups, preserved/consumed rights, interrupted turns, penalty-restored hands and repetition completion.
+- **Risks:** inferred rights, mistaking intermediate events for settled state and unnecessary strategy complexity.
+
+### Increment 10.7 — Remaining procedure behavior
+
+- **Goal/scope:** complete conservative claim and penalty participation under approved policy.
+- **Dependencies:** 10.6 and explicit claim/withdrawal policy decisions.
+- **Expected files/modules:** proposed procedure policy module/tests and existing projection/runtime test suites.
+- **Acceptance:** never originate spoken accusations; abstain as approved. Respond only to eligible unanswered procedures. If contribution choices are included, use only own cards and preserve last-card protection/reservations. Do not conflate withdrawal consent, claim votes and human-only replacement voting.
+- **Required tests:** claimant/accused electorates, sequential claims, abstention, withdrawal unanimity semantics, nested timers, contribution/refusal completion and stale procedure IDs.
+- **Risks:** treating unlike procedures identically or inventing evidence classification. No new claim-evidence projection is implicitly authorized.
+
+### Increment 10.8 — Lifecycle, rollback and successor integration
+
+- **Goal/scope:** cross-feature verification of the complete runner and approved knowledge treatment. Basic cancellation already belongs in 10.4.
+- **Dependencies:** 10.7.
+- **Expected files/modules:** bot runner/host integration, runtime rollback/recovery/handoff and PostgreSQL integration tests.
+- **Acceptance:** obsolete work cannot survive rollback, handback, writer replacement or successor adoption. Current presence stays live. Failed successor preparation preserves the old runner; successful handoff retires it. No knowledge leaks across branches or games.
+- **Required tests:** rollback to null, nested timer remainder, abandoned-future knowledge exclusion, fresh-process recovery, storage faults, multiple absences and no-human suspension/resume.
+- **Risks:** old epoch reuse, cross-game memory leakage and accidental human-command suppression by bot-specific fences.
+
+### Increment 10.9 — Stage 10 acceptance gate
+
+- **Goal/scope:** prove mixed human/bot complete matches and replacement flows end to end; confirmed integration fixes only.
+- **Dependencies:** 10.8.
+- **Expected files/modules:** bot acceptance tests, real transport/PostgreSQL tests, focused browser replacement tests and coverage/operations documentation.
+- **Acceptance:** bots complete legal turns at 2/4/8 seats, preserve N, relinquish control correctly and never continue without a connected active human. Policies never receive privileged state.
+- **Required tests:** complete matches; replacement during dealing/play/procedures; reconnect races, rollback/recovery, successor transition and adversarial privacy checks. Real bot execution must not be substituted by trusted match finishers or test drivers.
+- **Risks:** test harnesses accidentally doing bot work; unit passes mistaken for live orchestration evidence. Record executed browser/database/manual boundaries accurately.
+
+### Order, verification and implementation stop boundary
+
+**Dependency order:** decisions → 10.1 → 10.2 → 10.3 → 10.4 → 10.5 → 10.6 → 10.7 → 10.8 → 10.9. Suggested first increment: **10.1**, after observation-entitlement agreement and explicit authorization to begin.
+
+For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. No implementation is authorized by this plan-only update.
+
+### Overall Stage 10 checklist
+
 - [ ] Define a bot observation interface with the same permitted information as its human seat.
 - [ ] Transfer only the seat's allowed observation memory, including the initial trump observation when available.
 - [ ] Implement simple legal choices for dealing, opening stumps, playing, taking, and penalty contribution/refusal.

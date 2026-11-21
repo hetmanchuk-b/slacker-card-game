@@ -217,6 +217,7 @@ export class GameRuntime {
   #closed = false;
   #fault: unknown = null;
   #published: RuntimeSnapshot | null = null;
+  #publishedMemory: readonly BotMemory[] = [];
   #schedulePending = false;
   #requiresBranch: boolean;
   #connections: SeatPresence[];
@@ -434,6 +435,16 @@ export class GameRuntime {
     if (this.#fault !== null) throw new Error('Runtime scheduling failed', { cause: this.#fault });
     if (this.#published === null) throw new Error('Runtime is not initialized');
     return structuredClone(this.#published);
+  }
+
+  /** Detached, seat-scoped knowledge from the same committed frame as read(). */
+  readBotMemory(seatId: SeatId): BotMemory {
+    const snapshot = this.read();
+    if (this.#closed) throw new Error('Game runtime is closed');
+    const memory = this.#publishedMemory.find((item) => item.seatId === seatId);
+    if (!snapshot.state?.players.some((player) => player.id === seatId) || !memory)
+      throw new Error('Invalid bot seat');
+    return structuredClone(memory);
   }
 
   /** Subscribe only after obtaining a live runtime (never during private match
@@ -1072,6 +1083,7 @@ export class GameRuntime {
     if (persist && this.#options.commit) await this.#options.commit(this.#capture());
     const previous = this.#published;
     this.#published = view;
+    this.#publishedMemory = structuredClone(this.#memory);
     if (kind || previous === null || !isDeepStrictEqual(previous, view)) {
       this.#publicationSequence++;
       if (this.#subscriptions.size)

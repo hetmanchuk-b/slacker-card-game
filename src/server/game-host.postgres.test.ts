@@ -112,6 +112,50 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   }
 
   await t.test(
+    'live dealing runner commits one draw and recovers permitted seat knowledge',
+    async (t) => {
+      const { host, clock, member, joined, request, leaveGuest } = await setup(t);
+      await leaveGuest();
+      await clock.advanceBy(30001);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        await runtime.dispatch({
+          type: 'propose-bot',
+          id: id('command', randomUUID()),
+          actorId: member.seatId,
+          seatId: joined.seatId,
+        });
+        await runtime.dispatch({
+          type: 'replacement-vote',
+          id: id('command', randomUUID()),
+          actorId: member.seatId,
+          procedureId: runtime.read().replacementVote!.timer.id,
+          vote: 'yes',
+        });
+        await runtime.observe(async () => {});
+        const checkpoint = await runtime.checkpoint();
+        const draws = checkpoint.receipts.filter(
+          (r) => r.controller === 'bot' && r.command.type === 'draw-card',
+        );
+        assert.equal(draws.length, 1);
+        assert.equal(runtime.read().state!.deck.length, 35);
+        assert.equal(runtime.readBotMemory(joined.seatId).dealing?.nextSeatId, member.seatId);
+      });
+      await host.recover(member.lobbyId);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        assert.equal(runtime.read().state!.deck.length, 35);
+        // Presence reconciliation has no fresh draw capture: continuity is unknown.
+        assert.equal(runtime.readBotMemory(joined.seatId).dealing, null);
+        assert.equal(
+          (await runtime.checkpoint()).receipts.filter(
+            (r) => r.controller === 'bot' && r.command.type === 'draw-card',
+          ).length,
+          1,
+        );
+      });
+    },
+  );
+
+  await t.test(
     'live runner replaces an absent seat, refuses once, recovers and returns human control',
     async (t) => {
       const { host, clock, member, joined, request, leaveGuest, guest } = await setup(t);

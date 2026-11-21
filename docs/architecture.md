@@ -18,6 +18,10 @@ The serialized runtime owns current permitted memory for every seat plus a256-en
 
 The host owns a runner subscription for each installed live writer and stops it before release. `choosePenaltyRefusal` receives seat-authorized current views only and selects an explicit refusal for an eligible unanswered bot penalty contribution. Trusted orchestration binds seat/controller/branch and a cancellation signal through `GameRuntime.botAdmission`. Exact head, runtime identity, publication sequence and controller tenure are rechecked before receipts inside the runtime queue. Human command semantics and no-human suspension remain unchanged; admitted atomic actions finish. No dealing/play/ballot/accusation policy, persistence format, network API or dependency is added. See D009 and `runtime.md`.
 
+## Legal dealing with permitted memory (10.5)
+
+The runner now composes refusal with `src/bots/dealing.ts`. Policy inputs are only seat-projected current observations and detached committed own-seat memory. Runtime installs the readable memory copy only after persistence with its published snapshot, preventing draft disclosure during blocked/failed commits. Draws require the private initial notice or remembered successful clockwise draws at the exact head. Missing order waits (D010), including legacy recovery; no authoritative dealing-order/trump lookup is allowed. Existing projected reveal capture supplies legitimate trump memory; pause/procedures/reveal block draws. No round play, permanent recipient hint, expiry command or broader social policy is added.
+
 ## Agreed implementation seams
 
 The implementation plan and approved architecture establish the test seams:

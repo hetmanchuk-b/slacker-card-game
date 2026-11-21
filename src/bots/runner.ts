@@ -2,9 +2,10 @@ import type { CommandId, ProcedureId, SeatId } from '../game/ids.ts';
 import { RuntimeAdmissionError } from '../runtime/runtime.ts';
 import type { GameRuntime } from '../runtime/runtime.ts';
 import { observeBotCurrent } from './observation.ts';
+import { chooseDealingDraw } from './dealing.ts';
 import type { BotCurrentObservation } from './observation.ts';
 
-/** The sole approved policy: explicit refusal, never a timeout or contribution. */
+/** Explicit refusal, never a timeout or contribution. */
 export function choosePenaltyRefusal(view: BotCurrentObservation): ProcedureId | null {
   const own = view.state?.own;
   const procedure = view.procedure;
@@ -43,19 +44,24 @@ export async function startBotRunner(
         const seatId: SeatId = presence.seatId;
         const view = observeBotCurrent(publication.snapshot, seatId, publication.nowMs);
         const procedureId = choosePenaltyRefusal(view);
-        if (procedureId === null) continue;
+        const draw =
+          view.state?.phase.type === 'dealing' &&
+          chooseDealingDraw(view, runtime.readBotMemory(seatId));
+        if (procedureId === null && !draw) continue;
         const token = new AbortController();
         pending.push(token);
         const admission = runtime.botAdmission(seatId, token.signal);
         void runtime
           .dispatch(
-            {
-              type: 'penalty-response',
-              id: nextCommandId(),
-              actorId: seatId,
-              procedureId,
-              cardId: null,
-            },
+            procedureId !== null
+              ? {
+                  type: 'penalty-response',
+                  id: nextCommandId(),
+                  actorId: seatId,
+                  procedureId,
+                  cardId: null,
+                }
+              : { type: 'draw-card', id: nextCommandId(), actorId: seatId },
             admission,
           )
           .catch((error: unknown) => {

@@ -1,5 +1,9 @@
 # Open decisions discovered during implementation
 
+## D010 — Legal dealing and unknown-order fallback (10.5)
+
+**Status:** operator approved drawing only from the seat's private initial notice or remembered successful clockwise draws. If that knowledge is missing, wait without drawing until a fresh permitted observation establishes the order, even if dealing temporarily stalls. Never consult authoritative dealing order, infer card faces from opaque handles, reconstruct missed trump reveals or submit timer-expiry commands. Remember only legitimately permitted reveals, with unknown distinct from known no-trump. Wait through procedures, suspension and final reveal. This authorizes dealing/reveal integration only, not round-play or additional social policy.
+
 ## D009 — One safe autonomous action and bot-only admission (10.4)
 
 **Status:** operator approved automatic refusal of an eligible, unanswered penalty contribution only. No dealing, play, accusation, ballot, withdrawal or replacement decisions are authorized in this slice. Policy receives only permitted seat observations; server-owned identity and lifecycle metadata are admission concerns, not privileged policy knowledge.

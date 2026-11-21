@@ -28,11 +28,17 @@ The payload stores current per-seat memories and at most256 FIFO pre-command kno
 
 Memory lives only in server-private checkpoints, not generic runtime snapshots, publications or network projections. The host's existing checkpoint restoration and atomic successor handoff carry it without a new writer or SQL table. `src/runtime/memory.test.ts`, `src/bots/memory-storage.test.ts` and `src/persistence/bot-memory.test.ts` cover the boundary. Runtime instances without `commit` remain memory-only, not crash durable.
 
+## Committed seat memory and dealing — Stage 10.5
+
+`readBotMemory(seatId)` returns detached knowledge for one existing seat from the same successfully persisted publication as `read()`. Draft memory is not visible during blocked commits; failed runtimes reject reads. This is a trusted server seam, not a network endpoint or a whole-checkpoint policy input. It rejects closed runtimes and invalid/null-state seat bindings.
+
+`chooseDealingDraw(view, memory)` uses only the own initial notice or permitted successful clockwise-draw memory bound to the exact game/seat/branch/head. Missing order waits, even if stalled (D010); neither authoritative order nor historical trump supplies a shortcut. Procedures, pause and final reveal prevent drawing. Existing fresh reveal capture remembers permitted trump, including known no-trump versus unknown, without any expiry command. Runner keeps refusal and10.4 admission/lifecycle fencing; no round-play policy is added.
+
 ## Bot-only queued admission — Stage 10.4
 
 `botAdmission(seatId, signal)` captures this live runtime's exact head, committed publication sequence and process-local controller tenure, returning ordinary bot dispatch options. Its guard runs inside serialized admission before receipt lookup. Cancellation, retirement, pause, changed head/control publication or bot→human→bot tenure rejects stale work without faulting the runtime. Runtime-instance ownership fences recovery/writer replacement; host-owned runner disposal fences lifecycle retirement. These fences are process-local, never persisted or applied to ordinary human commands. Once admitted, the existing atomic action drains even if cancellation arrives later.
 
-`src/bots/runner.ts` subscribes to committed notices and passes only detached seat projections to `choosePenaltyRefusal`. Eligible unanswered unpaused bot penalty contributions are explicitly refused; the runner never submits timeout commands, plays cards, deals, votes or accuses. Each new publication cancels unadmitted decisions and reconsiders from fresh observations; duplicate publications are ignored. Stop cancels pending tokens and unsubscribes. No-human suspension remains authoritative. Tests in `src/bots/runner.test.ts` cover stale work, exact-head and tenure fences, handback/ABA, cancellation, pause and already-admitted completion.
+`src/bots/runner.ts` subscribes to committed notices and passes only detached seat projections to `choosePenaltyRefusal`. Eligible unanswered unpaused bot penalty contributions are explicitly refused;10.5 separately adds legal dealing as described above. The runner never submits timeout commands, plays cards, votes or accuses. Each new publication cancels unadmitted decisions and reconsiders from fresh observations; duplicate publications are ignored. Stop cancels pending tokens and unsubscribes. No-human suspension remains authoritative. Tests in `src/bots/runner.test.ts` cover stale work, exact-head and tenure fences, handback/ABA, cancellation, pause and already-admitted completion.
 
 ## Optional authenticated queue admission — Stage 8.9
 

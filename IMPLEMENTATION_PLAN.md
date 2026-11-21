@@ -996,7 +996,7 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 
 **Depends on:** Stages 8–9; replacement orchestration is implemented in Stage 6.
 
-**Status: 10.1–10.4 implemented; verification recorded below.** D006–D009 approve seat entitlement, branch-scoped atomic memory and the one-action refusal runner with bot-only exact-head admission. Increments10.5–10.9 remain unimplemented; further policies retain their scoped decision gates.
+**Status: 10.1–10.5 implemented; verification recorded below.** D006–D010 approve seat entitlement, branch-scoped atomic memory, refusal runner, bot-only exact-head admission and legal dealing with wait-on-unknown fallback. Increments10.6–10.9 remain unimplemented; further policies retain their scoped decision gates.
 
 ### Existing foundations and constraints
 
@@ -1014,7 +1014,7 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 | Rollback knowledge | Resolved in D007: restore exact previously captured permitted memory at the rollback target; missing checkpoints stay unknown. Never reconstruct abandoned-future secrets or enrich from private authoritative history. |
 | Durability and legacy games | Resolved in D008: runtime-owned memory in the existing atomic frame transaction, explicit versions with legacy unknown knowledge, exact prior checkpoint rollback, corrupt/unsupported memory fails recovery. No private-history enrichment. |
 | Claim/withdrawal policy | Current visible claims do not identify spoken/chat/action evidence. Abstaining on all claim ballots is the proposed conservative initial policy, not an approved evidence classifier. Explicitly choose withdrawal behavior; silence is not approval. Resolve before the corresponding policy slice. Replacement proposals/ballots remain human-only under current runtime rules. |
-| Unknown knowledge | Represent unknown trump separately from known no-trump. Define safe behavior when dealing observations are missing; never expose authoritative next-recipient/trump information as a shortcut. |
+| Unknown knowledge | D010 resolves dealing fallback: wait when order is unknown until fresh permitted observation establishes it, even if stalled. Unknown trump stays distinct from known no-trump; no authoritative next-recipient/trump shortcut. |
 
 These are approval gates, not permission to invent game rules. Add the chosen decisions to the existing decision workflow when resolved; significant interfaces and persistence changes still require explicit approval.
 
@@ -1076,6 +1076,10 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 - **Acceptance:** draw only from the personal initial notice or remembered successful clockwise draws. Wait through authoritative reveal/procedure boundaries. Never read hidden dealing order, fabricate a permanent dealing-turn hint or recover historical trump from authoritative state.
 - **Required tests:** 2/4/8 seats, two stump passes, unequal final hands, rejected draws, replacement during dealing, suspended reveal and unknown-memory recovery.
 - **Risks:** deadlock with unavailable historical knowledge; missing observations must use the approved fallback, not privileged hints.
+- **Status: verified.** `src/bots/dealing.ts` chooses draws only from the personal initial notice or permitted clockwise-draw memory for the exact current seat/game/branch/head. Unknown knowledge waits (D010), including legacy recovery. Procedures, pause and reveal prevent drawing. Runner retains refusal and existing bot admission/cancellation/error-cleanup fences. `readBotMemory(seatId)` returns detached seat-only memory installed with the committed snapshot after persistence, never staged/failed knowledge. Existing permitted reveal capture remembers trump; no historical reconstruction, next-recipient hint, expiry command or play policy is added.
+- **Coverage:** nine `runner-dealing.test.ts` cases include real engine/projector/runtime 2/4/8-seat dealing, separate stump passes, unequal final hands, replacement, rejected/duplicate draws, unknown legacy recovery, suspended reveal and blocked/failed-commit memory privacy. One additional real PostgreSQL host case verifies installed-runner dealing, durable receipts, recovery and no repeated draw after continuity is lost.
+- **Verification:** worker test-first focused50 pass and PostgreSQL host26 pass; parent normal `npm run check`: **494 pass/nine explicit DB skips**; final database-enabled `npm run check`: **687 pass/no skips**, format/lint/types/tests/build passed. New disposable PostgreSQL18 tmpfs container `penky-dealing-105-test`, loopback55455, database `penky_dealing_test` only. Independent read-only review found no issues. No browser/manual or complete autonomous-match acceptance claimed. Missing order can intentionally stall until a permitted fresh observation; no private fallback is invented.
+- **Next:10.6 only**, legal round play and stump opening using permitted memory. Stop after10.5.
 
 ### Increment 10.6 — Legal round play and stump opening
 
@@ -1117,7 +1121,7 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 
 **Dependency order:** decisions → 10.1 → 10.2 → 10.3 → 10.4 → 10.5 → 10.6 → 10.7 → 10.8 → 10.9. Suggested first increment: **10.1**, after observation-entitlement agreement and explicit authorization to begin.
 
-For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1–10.4 have subsequently been authorized and implemented; later increments retain their explicit decision gates.
+For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1–10.5 have subsequently been authorized and implemented; later increments retain their explicit decision gates.
 
 ### Overall Stage 10 checklist
 

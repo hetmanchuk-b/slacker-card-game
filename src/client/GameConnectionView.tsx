@@ -1,3 +1,4 @@
+import { ResultsView } from './ResultsView.tsx';
 import { RollbackView } from './RollbackView.tsx';
 import { OwnerHistoryView } from './OwnerHistoryView.tsx';
 import { PresenceView } from './PresenceView.tsx';
@@ -218,6 +219,12 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
             : 'Public table — release to attempt play.'}
         </div>
       ) : null}
+      <ResultsView
+        client={client}
+        connection={connection}
+        isOwner={membership.isOwner}
+        busy={busy}
+      />
       <PresenceView
         client={client}
         connection={connection}

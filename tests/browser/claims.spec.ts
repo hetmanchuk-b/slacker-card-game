@@ -58,6 +58,12 @@ for (const count of [2, 4, 8])
         .locator('p')
         .first()
         .innerText();
+      // The first ballot may render before its acknowledgment. Settle that
+      // request/head before editing the version-keyed form for the queued claim.
+      await expect.poll(() => acceptedVersion).toBeGreaterThan(0);
+      await expect
+        .poll(async () => Number(await pages[0]!.getByTestId('game-version').innerText()))
+        .toBeGreaterThanOrEqual(acceptedVersion);
       // Queue a second explicit episode while the first procedure is still active.
       await claim(pages[0]!, accused, 'Next manual episode');
       await Promise.all(
@@ -69,6 +75,7 @@ for (const count of [2, 4, 8])
             await page.getByRole('button', { name, exact: true }).click();
           }),
       );
+      await expect.poll(() => acceptedVotes.size).toBe(count - 1);
       // All abstentions produce 0:0, no punishment; FIFO exposes the next claim.
       await Promise.all(
         pages.map(async (page) => {

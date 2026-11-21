@@ -61,6 +61,7 @@ export type ConnectionState = Readonly<{
   selectedCardId: string | null;
   transfers: readonly Transfer[];
   assigned: boolean;
+  successorRetry: boolean;
   retry: boolean;
   note:
     | 'none'
@@ -119,6 +120,8 @@ export class GameConnection {
   #cancel: (() => void) | null = null;
   #listener: ((state: ConnectionState) => void) | null = null;
   #start: Start | null = null;
+  #successor: ClientMessage | null = null;
+  #activeStart: Start | ClientMessage | null = null;
   #busy = false;
   #storageBlocked = false;
   current: ConnectionState = {
@@ -146,6 +149,7 @@ export class GameConnection {
     transfers: [],
     assigned: false,
     retry: false,
+    successorRetry: false,
     note: 'none',
   };
   constructor(dependencies: Dependencies) {
@@ -381,10 +385,33 @@ export class GameConnection {
         return;
       }
     }
+    this.#activeStart = this.#start;
     this.#pending = 'start';
     this.#deadline();
     this.#publish({ status: 'starting', retry: true, note: 'none' });
     this.#socket.send(this.#start);
+  }
+  startNext() {
+    if (!this.#deps.isOwner || !this.#chatAvailable()) return;
+    if (!this.#successor) {
+      const view = this.current.view;
+      if (view?.state?.phase !== 'finished') return;
+      this.#successor = {
+        protocolVersion: 1,
+        requestId: this.#deps.requestId(),
+        intent: { type: 'start-match', lobbyId: this.#deps.lobbyId, expected: { ...view.head } },
+      } as ClientMessage;
+    }
+    this.#activeStart = this.#successor;
+    this.#pending = 'start';
+    this.#deadline();
+    this.#publish({ status: 'starting', successorRetry: true, note: 'none' });
+    this.#socket!.send(this.#successor);
+  }
+  discardSuccessorRetry() {
+    if (this.#pending) return;
+    this.#successor = null;
+    this.#publish({ successorRetry: false });
   }
   #chatAvailable() {
     return (
@@ -923,7 +950,7 @@ export class GameConnection {
       return;
     }
     if (message.type === 'match-start-ack') {
-      if (this.#pending !== 'start' || message.requestId !== this.#start?.requestId) return;
+      if (this.#pending !== 'start' || message.requestId !== this.#activeStart?.requestId) return;
       if (!object(message.result)) {
         this.#fail('invalid-message', 'uncertain');
         return;

@@ -49,6 +49,7 @@ for (const outcome of ['approval', 'denial', 'silence'] as const)
       await expect(
         pages[0]!.getByRole('button', { name: 'Approve withdrawal', exact: true }),
       ).toHaveCount(0);
+      const frozenProcedureIndex = procedures.length - 1;
       const frozenBallotMs = procedures.at(-1)!.suspendedVote!.timer.remainingMs;
       expect(frozenBallotMs).toBeLessThan(9000);
       expect(frozenBallotMs).toBeGreaterThan(0);
@@ -86,6 +87,13 @@ for (const outcome of ['approval', 'denial', 'silence'] as const)
           await pages[1]!.getByRole('button', { name: 'Refuse withdrawal', exact: true }).click();
         for (const page of pages)
           await expect(page.getByTestId('withdrawal-procedure')).toHaveCount(0, { timeout: 15000 });
+        // Procedure disappearance can precede its resumed state. Do not read
+        // the earlier pre-withdrawal ballot when checking the restored remainder.
+        await expect
+          .poll(() =>
+            procedures.slice(frozenProcedureIndex + 1).some((p) => p.type === 'claim-vote'),
+          )
+          .toBe(true);
         // The wire projection may already have consumed a few real milliseconds
         // after resume; it must never restart the original ten-second duration.
         const resumedMs = procedures.findLast((p) => p.type === 'claim-vote')!.timer.remainingMs;

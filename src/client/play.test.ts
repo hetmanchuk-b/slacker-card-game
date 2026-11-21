@@ -172,3 +172,25 @@ test('peek hides on penalty completion, pause, reset, null state and state-only 
     'invalid',
   );
 });
+test('finished results retain strict executable variants and earlier winners without exposing additional cards', () => {
+  for (const result of [
+    { type: 'last-player', loserId: 'other' },
+    { type: 'all-won' },
+    { type: 'draw', remainingSeatIds: ['other'] },
+  ]) {
+    const stream = new GameStream('own');
+    const value = wire();
+    value.view.state.phase = { type: 'finished', result };
+    value.view.state.players[0]!.status = 'won';
+    assert.equal(stream.receive(value), 'state');
+    assert.deepEqual(stream.snapshot?.state?.result, result);
+    assert.equal(stream.snapshot?.state?.players[0]?.status, 'won');
+    assert.deepEqual(stream.snapshot?.state?.own.hand, [face('hand')]);
+    const malformed = wire(2);
+    malformed.view.state.phase = {
+      type: 'finished',
+      result: { ...result, hiddenCards: [face('secret')] },
+    };
+    assert.equal(stream.receive(malformed), 'invalid');
+  }
+});

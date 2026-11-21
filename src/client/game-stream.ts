@@ -1,4 +1,8 @@
 import { validLobbyLocator as text } from './lobby-membership.ts';
+export type MatchResult =
+  | Readonly<{ type: 'all-won' }>
+  | Readonly<{ type: 'last-player'; loserId: string }>
+  | Readonly<{ type: 'draw'; remainingSeatIds: readonly string[] }>;
 export type Card = Readonly<{ id: string; face: Readonly<{ suit: string; rank: number }> }>;
 export type Draw = Readonly<{ seatId: string; rejected: boolean; destination?: 'hand' | 'stump' }>;
 export type Reveal = Readonly<{ card: Card; recipientId: string; expiresAt: number }>;
@@ -71,6 +75,7 @@ export type GameSnapshot = Readonly<{
   state: Readonly<{
     own: Readonly<{ hand: readonly Card[]; stumps: readonly string[] }>;
     phase: string;
+    result: MatchResult | null;
     table: readonly Card[];
     leaderId: string | null;
     round: Readonly<{ number: number; targetSize: number; turnSeatId: string }> | null;
@@ -322,6 +327,7 @@ function snapshot(raw: unknown, seatId: string): GameSnapshot | null {
       own: { hand: hand as Card[], stumps: [...stumps] },
       players,
       phase: s.phase.type,
+      result: s.phase.type === 'finished' ? (structuredClone(s.phase.result) as MatchResult) : null,
       deckCount: s.deckCount,
       tableCount: s.table.length,
       discardCount: s.discardCount,

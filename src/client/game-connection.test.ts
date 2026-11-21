@@ -719,3 +719,75 @@ test('idle stream updates cannot release another UI operation guard; malformed r
   assert.equal(client.current.view, null);
   client.close();
 });
+function finished(sequence = 1, result: object = { type: 'last-player', loserId: 'other' }) {
+  const value = dealing(sequence);
+  const state = (
+    value.view as unknown as { state: { phase: object; players: { status: string }[] } }
+  ).state;
+  state.phase = { type: 'finished', result };
+  state.players[0]!.status = 'won';
+  value.view.transient.initialRecipientNotice = false;
+  return value;
+}
+test('successor captures exact finished raw head, survives failed start and reconnect/fork, never installs historical acknowledgment', () => {
+  const { client, sockets, storage, makeClient } = fixture();
+  client.connect();
+  sockets[0]!.deliver(finished());
+  client.startNext();
+  const original = sockets[0]!.sent.at(-1) as { requestId: string; intent: { expected: object } };
+  assert.deepEqual(original.intent.expected, {
+    gameId: 'assigned-game',
+    branchId: 'branch',
+    version: 0,
+  });
+  assert.equal(storage.size, 0, 'successor adds no persistence format');
+  sockets[0]!.deliver({
+    protocolVersion: 1,
+    type: 'match-start-ack',
+    requestId: original.requestId,
+    result: { type: 'rejected', code: 'unavailable' },
+  });
+  assert.equal(client.current.view?.state?.phase, 'finished');
+  client.startNext();
+  assert.deepEqual(sockets[0]!.sent.at(-1), original);
+  sockets[0]!.disconnect();
+  client.connect();
+  const fork = finished();
+  fork.view.head.branchId = 'fork';
+  sockets[1]!.deliver(fork);
+  assert.equal(sockets[1]!.sent.length, 1, 'no automatic resend');
+  client.startNext();
+  assert.deepEqual(sockets[1]!.sent.at(-1), original, 'explicit retry never retargets fork');
+  sockets[1]!.deliver({
+    protocolVersion: 1,
+    type: 'match-start-ack',
+    requestId: original.requestId,
+    result: { type: 'started', gameId: 'historical-game', duplicate: true },
+  });
+  assert.equal(client.current.view, null);
+  const successor = dealing();
+  successor.view.head.gameId = 'actual-successor';
+  sockets[2]!.deliver(successor);
+  assert.equal(currentView(client)?.head.gameId, 'actual-successor');
+  assert.equal(client.current.draw, null);
+  client.startNext();
+  assert.deepEqual(
+    sockets[2]!.sent.at(-1),
+    original,
+    'receipt remains explicitly retryable after actual adoption',
+  );
+  assert.equal(makeClient().current.successorRetry, false, 'reload loses mounted-memory locator');
+  client.close();
+});
+test('successor requires owner confirmed finished baseline, never assigned null or ongoing game', () => {
+  const { client, sockets } = fixture();
+  client.startNext();
+  client.connect();
+  sockets[0]!.deliver(baseline());
+  client.startNext();
+  assert.equal(sockets[0]!.sent.length, 1);
+  sockets[0]!.deliver(dealing(2));
+  client.startNext();
+  assert.equal(sockets[0]!.sent.length, 1);
+  client.close();
+});

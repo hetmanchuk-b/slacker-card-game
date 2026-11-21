@@ -1,5 +1,7 @@
 # Rules and scenario coverage
 
+Stage10.2: `src/bots/memory.test.ts`, `memory-dealing.test.ts` and `memory-integration.test.ts` add seven reducer cases: six across 2/4/8 seats plus one real engine/projector boundary composition. Empty duplicate-redacted captures at unseen heads clear uncertain continuity; same-head duplicates remain idempotent. Permitted projection fixtures and explicitly synthetic observation transitions cover notice/draw progress, rejected/duplicate/gapped actions, unknown versus known no-trump, private final draw recipient restriction, interrupted reveals, conservative unknown rights, consumed/preserved rights, provenance/detachment, game/seat binding and exact branch checkpoint restoration. These are not durable recovery, network delivery or autonomous bot acceptance. D007 defines branch-scoped memory; missing knowledge is never filled from authoritative state.
+
 Status is updated as executable tests are added. A planned test is not passing coverage.
 
 Stage10.1: `src/bots/observation.test.ts` and `action-observation.test.ts` add 16 pure adapter/runtime-fixture cases at 2/4/8 seats: seat binding, detached projections, hidden-face noninterference, procedures/private reservations, finished seats, timed reveal expiry/suspension/resumption, recipient-only transfers and duplicate suppression. D006 uses committed seat entitlement, not network receipt. These are not bot execution, durable memory, network or database acceptance tests.

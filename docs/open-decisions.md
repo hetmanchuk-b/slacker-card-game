@@ -1,10 +1,16 @@
 # Open decisions discovered during implementation
 
+## D007 — Branch-scoped permitted bot memory (10.2)
+
+**Status:** operator approved restoring only previously captured permitted seat memory at the exact rollback target. Abandoned-future knowledge is excluded; missing checkpoints start unknown, never reconstructed from private authoritative histories. `restoreBotMemory` accepts an exact checkpoint selected by a trusted caller; version equality validates shape, not ancestry or checkpoint provenance. New-branch current observations remain separately authorized. No persistence format, checkpoint store, runtime capture or recovery policy for legacy games is chosen here.
+
+The pure reducer retains source heads for observed dealing progress, trump (unknown distinct from known no-trump), and conservative own opening-right knowledge. Generic between-round/current empty-hand baselines cannot prove a right: only a continuously observed simple play-only round completion can grant known entitlement; missed/complex boundaries stay unknown. Legal opening proves consumption; temporary nonempty hands do not erase known rights. This conservative knowledge ceiling does not change engine rules.
+
 ## D006 — Bot observation entitlement (10.1)
 
 **Status:** operator approved committed seat-authorized observations rather than confirmed network deliveries. This is availability to the seat, not proof the human saw it. The pure `src/bots/observation.ts` adapter returns only existing seat projections, including normal finished-seat restrictions. Null state has no seat binding. Exact committed fresh action pairs may supply permitted private observations; duplicate captures disclose none. Recovery, resync and rollback must not replay historical observations as fresh. Commit/freshness classification remains the trusted caller's obligation, not something this stateless adapter can prove.
 
-This authorizes only 10.1. Rollback knowledge (10.2), atomic durability/legacy games (10.3) and autonomous execution remain separate approval gates; no memory or capture integration is implemented.
+The original approval authorized only 10.1. D007 subsequently resolves pure memory rollback for 10.2; atomic durability/legacy games (10.3) and autonomous execution remain separate approval gates. No runtime capture integration is implemented.
 
 ## D005 — Stage 8 acceptance and lobby agreements/readiness integration
 

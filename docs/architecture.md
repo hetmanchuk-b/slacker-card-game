@@ -4,6 +4,12 @@
 
 `src/bots/observation.ts` is a trusted pure adapter, not an autonomous policy or runtime subscriber. It binds an existing seat and composes `projectLiveGame`/`projectAction`; only detached returned projections may enter policies. Committed seat entitlement, not network receipt, defines availability (D006). Current views never reconstruct private historical observations. Fresh action capture classification remains server-owned; duplicate captures return no observations. Null-state lifecycle changes invalidate binding. Memory, rollback knowledge, durability and runners remain deferred.
 
+## Pure permitted bot memory (10.2)
+
+`src/bots/memory.ts` consumes only 10.1 outputs, keyed by game/seat, independently of controller identity. Source heads preserve provenance. Current views and matching fresh action captures must be supplied together once per committed head; repeated heads do not reapply actions, while same-head live reveals may teach trump. Gaps and unseen heads with empty captures invalidate dealing/opening continuity, not already learned trump. Empty captures may be duplicate-redacted rather than proof of no effect; this conservatively also forgets continuity for genuinely empty fresh actions. Unknown trump is distinct from an observed spade/no-trump reveal. Private final-hand draws can teach trump only with the matching empty-deck reveal phase. No general private-face ledger is added.
+
+D007 selects branch-scoped restoration: the caller supplies an exact earlier permitted checkpoint (or empty memory for missing knowledge) at the target. The reducer never selects/checks ancestry against raw history, captures checkpoints, writes storage or schedules commands. Original source heads remain ancestor provenance, not fresh branch disclosures. Generic between-round snapshots cannot prove rights; only a contiguous play-only completion of the preceding round with an empty own hand establishes a known right. Legal opening records consumption, hand obstruction preserves it, and missed/complex boundaries remain unknown. No bot policy may interpret unknown as absent.
+
 ## Agreed implementation seams
 
 The implementation plan and approved architecture establish the test seams:

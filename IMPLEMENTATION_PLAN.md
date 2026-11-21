@@ -996,7 +996,7 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 
 **Depends on:** Stages 8–9; replacement orchestration is implemented in Stage 6.
 
-**Status: 10.1 implemented; verification recorded below.** The operator authorized the seat-constrained adapter with committed seat-authorized observation entitlement. Memory/rollback/recovery policies and persistence formats remain separate approval gates. Increments 10.2–10.9 remain unimplemented.
+**Status: 10.1–10.2 implemented; verification recorded below.** The operator authorized committed seat-authorized entitlement and branch-scoped permitted-memory restoration (D006–D007). Durability/legacy recovery, persistence formats and autonomous execution remain separate approval gates. Increments 10.3–10.9 remain unimplemented.
 
 ### Existing foundations and constraints
 
@@ -1011,7 +1011,7 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 | Decision | Required resolution / conservative proposal |
 | --- | --- |
 | Observation entitlement     | Resolved: committed observations legitimately available to the seat, not confirmed network deliveries. Neither proves the human saw them. See D006.                                                                                                                                                                                                                               |
-| Rollback knowledge | Explicitly choose branch-scoped restoration, retained learned knowledge, or another documented policy. Do not reconstruct abandoned-future secrets for a newly attached bot. Resolve before 10.2. |
+| Rollback knowledge | Resolved in D007: restore exact previously captured permitted memory at the rollback target; missing checkpoints stay unknown. Never reconstruct abandoned-future secrets or enrich from private authoritative history. |
 | Durability and legacy games | Approve memory ownership, versioning, atomic commit coupling, recovery and behavior for existing games without recorded memory. A separate post-publication write cannot promise crash-atomic recovery. Resolve before 10.3; missing knowledge must not be filled from private authoritative facts. |
 | Claim/withdrawal policy | Current visible claims do not identify spoken/chat/action evidence. Abstaining on all claim ballots is the proposed conservative initial policy, not an approved evidence classifier. Explicitly choose withdrawal behavior; silence is not approval. Resolve before the corresponding policy slice. Replacement proposals/ballots remain human-only under current runtime rules. |
 | Unknown knowledge | Represent unknown trump separately from known no-trump. Define safe behavior when dealing observations are missing; never expose authoritative next-recipient/trump information as a shortcut. |
@@ -1038,6 +1038,9 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 - **Acceptance:** record observed dealing progress, legitimately observed trump and necessary opening-right history with provenance. Unknown knowledge stays unknown. Duplicate observations and rejected draws do not advance dealing memory. Branch transitions follow the chosen policy without private-history enrichment.
 - **Required tests:** initial notice, successful/rejected draws, interrupted reveal, duplicate delivery, recipient-private observations, consumed/preserved opening rights and rollback branches.
 - **Risks:** face inference from opaque IDs, authoritative trump lookup or incomplete round observations masquerading as knowledge.
+- **Implementation:** pure `src/bots/memory.ts` records dealing progress/next observed recipient, observed trump (including known no-trump) and conservative own opening-right provenance. Controller identity is irrelevant. Same-head duplicates do not advance actions; gaps discard continuity. Rights are inferred only at a contiguous play-only exact round completion, consumed by legal opening, preserved through hand obstruction; generic/complex boundaries stay unknown. Matching final own private draw can establish trump; another seat's redacted draw cannot. Branch restore uses an exact trusted prior permitted checkpoint; no archive reconstruction, runtime integration, persistence or commands.
+- **Verification:** missing-module red recorded before implementation; seven reducer cases pass: six at 2/4/8 seats using explicitly synthetic permitted-observation transitions plus one real engine/projector boundary composition (not network/DB integration). `npm run check`: **467 pass/seven explicit database skips**, format/lint/types/build passed. Database/browser integration not required or run for this pure increment. Independent review identified stale continuity from duplicate-redacted captures; unseen heads with empty captures now conservatively clear dealing/opening knowledge, with regressions. Added real engine/projector boundary coverage plus missing/mixed capture negatives. Final independent read-only review approved with no remaining issues.
+- **Next:** 10.3 requires separate storage ownership/versioning, atomic commit coupling and legacy/missing-memory decisions. Stop after10.2; no runtime capture or persistence format authorized.
 
 ### Increment 10.3 — Durable memory capture and recovery
 
@@ -1106,7 +1109,7 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 
 **Dependency order:** decisions → 10.1 → 10.2 → 10.3 → 10.4 → 10.5 → 10.6 → 10.7 → 10.8 → 10.9. Suggested first increment: **10.1**, after observation-entitlement agreement and explicit authorization to begin.
 
-For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1 has subsequently been authorized and implemented; later increments retain their explicit decision gates.
+For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1–10.2 have subsequently been authorized and implemented; later increments retain their explicit decision gates.
 
 ### Overall Stage 10 checklist
 

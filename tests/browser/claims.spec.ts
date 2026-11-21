@@ -50,7 +50,9 @@ for (const count of [2, 4, 8])
     try {
       const accused = await pages[1]!.getByTestId('seat-id').innerText();
       await claim(pages[0]!, accused, '  Exact manually entered Episode  ');
-      for (const page of pages) await expect(page.getByTestId('claim-ballot')).toBeVisible();
+      await Promise.all(
+        pages.map((page) => expect(page.getByTestId('claim-ballot')).toBeVisible()),
+      );
       await expect(pages[1]!.getByRole('button', { name: 'Vote yes', exact: true })).toHaveCount(0);
       await expect(pages[0]!.getByLabel('Exact spoken episode key (required)')).toHaveValue('');
       const firstClaim = await pages[0]!
@@ -65,7 +67,14 @@ for (const count of [2, 4, 8])
         .poll(async () => Number(await pages[0]!.getByTestId('game-version').innerText()))
         .toBeGreaterThanOrEqual(acceptedVersion);
       // Queue a second explicit episode while the first procedure is still active.
+      const beforeQueuedClaim = acceptedVersion;
       await claim(pages[0]!, accused, 'Next manual episode');
+      // The claimant shares one pending-command slot with voting. Settle its
+      // queued submission before the independent voters race to answer.
+      await expect.poll(() => acceptedVersion).toBeGreaterThan(beforeQueuedClaim);
+      await expect
+        .poll(async () => Number(await pages[0]!.getByTestId('game-version').innerText()))
+        .toBeGreaterThanOrEqual(acceptedVersion);
       await Promise.all(
         pages
           .filter((_, i) => i !== 1)

@@ -25,7 +25,8 @@ jobs:
 
   postgres:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Full UI-driven 2/4/8-seat matches run serially after the database gates.
+    timeout-minutes: 45
     strategy:
       matrix:
         node: [24, 26]

@@ -15,7 +15,21 @@ const stump = (page: Page) =>
 async function refuse(pages: Page[], recipient: number) {
   for (const [index, page] of pages.entries())
     if (index !== recipient) {
+      const before = Number(await page.getByTestId('game-version').innerText());
       await page.getByRole('button', { name: 'Refuse contribution', exact: true }).click();
+      // Reconnect/action delivery can precede its settled baseline. Require a
+      // committed response before moving on to the next independent responder.
+      await expect
+        .poll(async () => Number(await page.getByTestId('game-version').innerText()))
+        .toBeGreaterThan(before);
+      const committed = Number(await page.getByTestId('game-version').innerText());
+      await Promise.all(
+        pages.map((other) =>
+          expect
+            .poll(async () => Number(await other.getByTestId('game-version').innerText()))
+            .toBeGreaterThanOrEqual(committed),
+        ),
+      );
     }
   for (const page of pages) await expect(page.getByTestId('penalty-procedure')).toHaveCount(0);
 }

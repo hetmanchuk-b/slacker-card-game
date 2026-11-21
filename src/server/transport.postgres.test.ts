@@ -18,7 +18,7 @@ import { finishMatch } from '../runtime/testing/match.ts';
 import { GUEST_COOKIE_NAME, GUEST_TTL_MS, guestTokenHash } from './guest-session.ts';
 import { PenkyTransport } from './transport.ts';
 import type { TransportOptions } from './transport.ts';
-import type { ServerMessage } from '../protocol/contracts.ts';
+import type { OwnerHistoryCursor, ServerMessage } from '../protocol/contracts.ts';
 
 const cert = readFileSync(new URL('./testing/localhost-cert.pem', import.meta.url));
 const key = readFileSync(new URL('./testing/localhost-key.pem', import.meta.url));
@@ -108,6 +108,7 @@ async function message(socket: Socket, payload: unknown): Promise<ServerMessage>
   const input = payload as { requestId?: string; intent?: { type?: string } };
   const resyncing = input?.intent?.type === 'resync';
   const history = input?.intent?.type === 'owner-history';
+  const historyPage = input?.intent?.type === 'owner-history-page';
   const chat = input?.intent?.type === 'post-chat' || input?.intent?.type === 'chat-history';
   const starting = input?.intent?.type === 'start-match';
   const oldEpoch = latestEpoch.get(socket);
@@ -123,11 +124,13 @@ async function message(socket: Socket, payload: unknown): Promise<ServerMessage>
           ? value.type === 'state' && value.delivery.epoch !== oldEpoch
           : history
             ? value.type === 'owner-history'
-            : chat
-              ? value.type === 'chat-page' && value.requestId === input?.requestId
-              : starting
-                ? value.type === 'match-start-ack' && value.requestId === input?.requestId
-                : value.type === 'command-ack' && value.requestId === input?.requestId)
+            : historyPage
+              ? value.type === 'owner-history-page' && value.requestId === input?.requestId
+              : chat
+                ? value.type === 'chat-page' && value.requestId === input?.requestId
+                : starting
+                  ? value.type === 'match-start-ack' && value.requestId === input?.requestId
+                  : value.type === 'command-ack' && value.requestId === input?.requestId)
       )
         return;
       clearTimeout(timer);
@@ -1697,6 +1700,179 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
   );
 
   await t.test(
+    'owner history pages terminate when a tiny budget cannot fit the correlated failure',
+    async (t) => {
+      const bytes = 600;
+      const context = await fixture(t, 2, 60000, { bytes, ackTimeoutMs: 100 });
+      const lobbyId = context.members[0]!.lobbyId;
+      const detach = await context.host.attach(
+        await context.access.membership(context.grants[0]!.token, lobbyId, context.now()),
+      );
+      t.after(detach);
+      const snapshot = (await context.host.read(lobbyId))!.snapshot;
+      const rollback = await context.host.rollback(lobbyId, context.start.gameId, {
+        id: id('command', randomUUID()),
+        actorId: context.members[0]!.seatId,
+        target: {
+          expected: { gameId: context.start.gameId, branch: 1, version: snapshot.head.version },
+          beforeActionVersion: 1,
+        },
+        knowledgeWarningAcknowledged: true,
+      });
+      assert.equal(rollback.type, 'accepted');
+      const socket = await context.connect();
+      const baseline = await message(socket, resync(lobbyId));
+      if (baseline.type !== 'state') assert.fail();
+      assert.equal(baseline.view.state, null);
+      assert.ok(Buffer.byteLength(JSON.stringify(baseline)) + 128 <= bytes);
+      // Let the acknowledged baseline release the sole 600-byte wire reservation.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(socket.connected, true);
+      const requestId = '界'.repeat(128);
+      assert.ok(
+        Buffer.byteLength(
+          JSON.stringify({
+            protocolVersion: 1,
+            type: 'owner-history-page',
+            requestId,
+            delivery: baseline.delivery,
+            result: { type: 'unavailable' },
+          }),
+        ) +
+          128 >
+          bytes,
+      );
+      const reply = await message(socket, {
+        protocolVersion: 1,
+        requestId,
+        intent: {
+          type: 'owner-history-page',
+          gameId: context.start.gameId,
+          cursor: null,
+          limit: 1,
+        },
+      });
+      assert.deepEqual(reply, { protocolVersion: 1, type: 'error', code: 'unavailable' });
+      assert.ok(Buffer.byteLength(JSON.stringify(reply)) + 128 <= bytes);
+      assert.equal(socket.connected, true);
+    },
+  );
+
+  await t.test('owner history pages revalidate authorization, branches and recovery', async (t) => {
+    const context = await fixture(t, 8, 60000);
+    const sockets = await Promise.all(
+      context.grants.map((_grant, index) => context.connect(index)),
+    );
+    const lobbyId = context.members[0]!.lobbyId;
+    for (const socket of sockets) await message(socket, resync(lobbyId));
+    const readPage = async (
+      cursor: OwnerHistoryCursor | null = null,
+      index = 0,
+      gameId = context.start.gameId,
+    ) => {
+      const requestId = randomUUID();
+      const response = await message(sockets[index]!, {
+        protocolVersion: 1,
+        requestId,
+        intent: { type: 'owner-history-page', gameId, cursor, limit: 1 },
+      });
+      if (response.type === 'owner-history-page') {
+        assert.equal(response.requestId, requestId);
+        assert.ok(Buffer.byteLength(JSON.stringify(response)) + 128 <= 65536);
+        for (const card of context.start.cardIds)
+          assert.equal(JSON.stringify(response).includes(card), false);
+      }
+      return response;
+    };
+    assert.deepEqual(await readPage(null, 1), {
+      protocolVersion: 1,
+      type: 'error',
+      code: 'unauthorized',
+    });
+    assert.deepEqual(await readPage(null, 0, id('game', 'wrong')), {
+      protocolVersion: 1,
+      type: 'error',
+      code: 'wrong-game',
+    });
+    const first = await readPage();
+    if (first.type !== 'owner-history-page' || first.result.type !== 'page' || !first.result.next)
+      assert.fail();
+    const cursor = first.result.next;
+    assert.ok(await context.host.recover(lobbyId));
+    await message(sockets[0]!, resync(lobbyId));
+    const recovered = await readPage(cursor);
+    if (recovered.type !== 'owner-history-page') assert.fail();
+    // Recovery rebinds presence and can record public clock actions; old cursors must not silently resume.
+    assert.equal(recovered.result.type, 'stale');
+    const history = await message(sockets[0]!, {
+      protocolVersion: 1,
+      requestId: randomUUID(),
+      intent: { type: 'owner-history', gameId: context.start.gameId },
+    });
+    if (history.type !== 'owner-history') assert.fail();
+    accepted(
+      await message(sockets[0]!, {
+        protocolVersion: 1,
+        requestId: randomUUID(),
+        intent: {
+          type: 'rollback',
+          target: { expected: history.view.head, beforeActionVersion: 1 },
+          knowledgeWarningAcknowledged: true,
+        },
+      }),
+      'control',
+    );
+    const stale = await readPage(cursor);
+    if (stale.type !== 'owner-history-page') assert.fail();
+    assert.deepEqual(stale.result, { type: 'stale' });
+    const empty = await readPage();
+    if (empty.type !== 'owner-history-page' || empty.result.type !== 'page') assert.fail();
+    assert.equal(empty.result.head.version, 0);
+    assert.equal(empty.result.entries[0]!.type, 'branch');
+    assert.ok(empty.result.next);
+    await context.access.revoke(context.grants[0]!.token, Date.now());
+    assert.deepEqual(await readPage(empty.result.next), {
+      protocolVersion: 1,
+      type: 'error',
+      code: 'unauthorized',
+    });
+  });
+
+  await t.test(
+    'owner history pages reject same-head committed closure after finishing',
+    async (t) => {
+      const context = await fixture(t);
+      const socket = await context.connect();
+      const other = await context.connect(1);
+      const lobbyId = context.members[0]!.lobbyId;
+      await message(socket, resync(lobbyId));
+      await message(other, resync(lobbyId));
+      await ready(context);
+      await finishHosted(context);
+      const request = (cursor: OwnerHistoryCursor | null) =>
+        message(socket, {
+          protocolVersion: 1,
+          requestId: randomUUID(),
+          intent: { type: 'owner-history-page', gameId: context.start.gameId, cursor, limit: 1 },
+        });
+      const first = await request(null);
+      if (first.type !== 'owner-history-page' || first.result.type !== 'page' || !first.result.next)
+        assert.fail();
+      assert.equal(first.result.rollbackOpen, true);
+      await context.host.withCurrent(lobbyId, context.start.gameId, async (runtime) => {
+        await runtime.closeForNextMatch();
+      });
+      const stale = await request(first.result.next);
+      if (stale.type !== 'owner-history-page') assert.fail();
+      assert.deepEqual(stale.result, { type: 'stale' });
+      const closed = await request(null);
+      if (closed.type !== 'owner-history-page' || closed.result.type !== 'page') assert.fail();
+      assert.equal(closed.result.rollbackOpen, false);
+      assert.deepEqual(closed.result.head, first.result.head);
+    },
+  );
+
+  await t.test(
     'owner history and rollback enforce ownership, warning, exact heads and canonical retries across forks/recovery',
     async (t) => {
       const context = await fixture(t);
@@ -2802,7 +2978,15 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
     },
   );
 
-  for (const kind of ['draw', 'claim', 'rollback', 'history', 'post-chat', 'chat-history'] as const)
+  for (const kind of [
+    'draw',
+    'claim',
+    'rollback',
+    'history',
+    'history-page',
+    'post-chat',
+    'chat-history',
+  ] as const)
     for (const mode of ['disconnect', 'revoke', 'expire'] as const)
       await t.test(
         `${mode} while a ${kind} command waits in the runtime queue cannot execute through retained seat presence`,
@@ -2813,7 +2997,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
           const initial = (await context.host.read(context.members[0]!.lobbyId))!.snapshot;
           if (initial.state!.phase.type !== 'dealing') assert.fail();
           const actor =
-            kind === 'rollback' || kind === 'history'
+            kind === 'rollback' || kind === 'history' || kind === 'history-page'
               ? 0
               : context.members.findIndex(
                   (member) =>
@@ -2889,20 +3073,27 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
                         },
                         knowledgeWarningAcknowledged: true,
                       }
-                    : kind === 'history'
-                      ? { type: 'owner-history', gameId: context.start.gameId }
-                      : {
-                          ...(kind === 'draw'
-                            ? { type: 'draw-card' }
-                            : {
-                                type: 'submit-claim',
-                                accusedId: context.members[(actor + 1) % 2]!.seatId,
-                                reason: 'Queued claim',
-                                evidence: { type: 'spoken', key: 'queued' },
-                              }),
+                    : kind === 'history-page'
+                      ? {
+                          type: 'owner-history-page',
                           gameId: context.start.gameId,
-                          branchId: context.start.branchId,
-                        },
+                          cursor: null,
+                          limit: 1,
+                        }
+                      : kind === 'history'
+                        ? { type: 'owner-history', gameId: context.start.gameId }
+                        : {
+                            ...(kind === 'draw'
+                              ? { type: 'draw-card' }
+                              : {
+                                  type: 'submit-claim',
+                                  accusedId: context.members[(actor + 1) % 2]!.seatId,
+                                  reason: 'Queued claim',
+                                  evidence: { type: 'spoken', key: 'queued' },
+                                }),
+                            gameId: context.start.gameId,
+                            branchId: context.start.branchId,
+                          },
           });
           await until(
             async () =>
@@ -2956,6 +3147,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
               (reply) =>
                 reply.type === 'command-ack' ||
                 reply.type === 'owner-history' ||
+                reply.type === 'owner-history-page' ||
                 reply.type === 'chat-page',
             ),
             false,

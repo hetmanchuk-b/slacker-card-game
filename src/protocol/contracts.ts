@@ -59,6 +59,12 @@ export type ClientIntent =
       knowledgeWarningAcknowledged: boolean;
     }>
   | Readonly<{ type: 'owner-history'; gameId: GameId }>
+  | Readonly<{
+      type: 'owner-history-page';
+      gameId: GameId;
+      cursor: OwnerHistoryCursor | null;
+      limit: number;
+    }>
   | Readonly<{ type: 'resync'; lobbyId: LobbyId }>
   | Readonly<{ type: 'post-chat'; lobbyId: LobbyId; messageId: MessageId; text: string }>
   | Readonly<{ type: 'chat-history'; lobbyId: LobbyId; afterSequence: string; limit: number }>
@@ -155,6 +161,31 @@ export type OwnerHistoryMessage = Readonly<{
   delivery: Delivery;
   view: OwnerHistoryView;
 }>;
+export type OwnerHistoryCursor = Readonly<{ snapshot: string; offset: number }>;
+export type OwnerHistoryEntry =
+  | Readonly<{ type: 'branch'; branch: Omit<OwnerHistoryView['branches'][number], 'actions'> }>
+  | Readonly<{
+      type: 'action';
+      branch: number;
+      action: OwnerHistoryView['branches'][number]['actions'][number];
+    }>
+  | Readonly<{ type: 'rollback'; rollback: OwnerHistoryView['rollbacks'][number] }>;
+export type OwnerHistoryPageMessage = Readonly<{
+  protocolVersion: 1;
+  type: 'owner-history-page';
+  requestId: CommandId;
+  delivery: Delivery;
+  result:
+    | Readonly<{
+        type: 'page';
+        head: HistoryHead;
+        rollbackOpen: boolean;
+        snapshot: string;
+        entries: readonly OwnerHistoryEntry[];
+        next: OwnerHistoryCursor | null;
+      }>
+    | Readonly<{ type: 'stale' | 'unavailable' }>;
+}>;
 export type RollbackNoticeMessage = Readonly<{
   protocolVersion: 1;
   type: 'rollback-notice';
@@ -204,6 +235,7 @@ export type ServerMessage =
   | StateMessage
   | ActionMessage
   | OwnerHistoryMessage
+  | OwnerHistoryPageMessage
   | RollbackNoticeMessage
   | ChatPage
   | MatchStartAck;

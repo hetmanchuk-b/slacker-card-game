@@ -906,13 +906,27 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 - **Regression history:** first full browser run73/74 failed an old synthetic drag using offscreen physical table coordinates after the new panel expanded layout; reproduced2/2. Test uses the existing fixed table drop strip, retains all movement/one-command assertions, and passes2/2. Second full run73/74 failed the old cutoff case; reproduced in isolation. Independent voters now click concurrently within the real ten-second deadline, retaining exact held-request/`punishment-started`/persistent-penalty assertions. Focused recheck and final full74/74 pass. Both bounded test fixes were independently approved; no failure is reclassified as passing.
 - **Next: 9.13 only; stop here.** Manual assistive-technology/native-device/full UI match/production certification and autonomous bots remain deferred.
 
+### Approved prerequisite 9.13p — Bounded metadata history pagination
+
+**Authorization/scope:** after early 9.13 measurement, the operator explicitly approved a separately scoped pagination contract extension. This prerequisite is one increment; the 9.13 browser timeline and 9.14 rollback controls are not implemented here. Existing full-history/rollback contracts, storage and engine/runtime rules stay unchanged.
+
+**Measured blocker:** trusted legal 2/4/8-seat completed-match history envelopes plus outbound allowance measured 24,062/28,608/58,625 bytes; one retained fork measured 39,956/47,425/97,174 bytes. Eight-seat abandoned history exceeds the legacy 65,536-byte delivery ceiling. No UI code was added before seeking approval.
+
+**Implemented contract:** additive `owner-history-page` with strict null/64-hex-snapshot+offset cursor and 1–100 entry limit; request-correlated page/stale/unavailable result. Whole allowlisted history is projected before flattening ordered branch descriptors, complete rows and rollback audits; inherited origins and exact active/open selectors are unchanged. SHA-256 over the complete public projection binds continuation to actions/forks/audit and same-head closure. Every page reauthorizes current-game owner access inside the existing committed wire slot. No split/truncation/skipping or stored pagination state; full projection remains O(total history) per page, not a CPU/memory-bound streaming reader.
+
+**Status: complete.** Six new protocol/pager cases cover strict cursors/limits, lossless reconstruction of synthetic and real legal eight-seat retained histories, exact byte/Unicode/atomic-item bounds, empty-action branches, freshness including same-head closure, recovery and private-extra exclusion. Six real TLS/PostgreSQL cases cover correlated multi-page owner traversal and byte bounds, null/finished/abandoned/closed metadata, stale continuation on action/fork/closure/recovery, fresh authorization/revocation/current-game checks and tiny-budget terminal fallback. Existing rollback/history APIs remain covered by the full suite.
+
+**Verified gates:** database-enabled `npm run check`: **591 pass/no skips**, including all188 PostgreSQL cases. Dedicated PG runner was not separately repeated because its cases ran in that gate. A new disposable tmpfs PostgreSQL18 container on loopback55445 (`penky_history_page_test`) was used. Final normal `npm run check`: **403 pass/seven explicit PG skips**. Browser tests were not rerun: this prerequisite changes no browser code and its network behavior is verified by actual TLS/PG scenarios. Independent read-only review found one P1: tiny configured budgets silently suppressed oversized correlated failure replies. A failing transport regression reproduced it; fixed bounded unavailable error or disconnect provides a terminal outcome, and follow-up review found no issues. The below-minimum-error disconnect branch is implemented but not independently integration-exercised. Reviewer executed no checks. A full transport attempt during implementation timed out; final complete database-enabled gate passed. Final gate initially caught formatting in `transport.ts`; formatted and reran the complete gate successfully.
+
+**Limits/next:** wire bytes, not full-history CPU/memory, are bounded. Histories changing during traversal require explicit restart; an indivisible oversized row fails unavailable. No UI/rollback dispatch, persisted pagination session, engine rule, schema or dependency change. **Next: resume 9.13 browser timeline using the approved paged reader; stop here.**
+
 ### Increment 9.13 — Metadata owner timeline
 
 - **Goal/scope:** current-match owner action/branch browsing and selectable completed-action rollback targets.
-- **Dependencies/files:** 9.4 and 9.7; metadata history view and ordinal target presentation.
+- **Dependencies/files:** 9.4, 9.7 and completed approved prerequisite 9.13p; metadata history view and ordinal target presentation.
 - **Acceptance:** owner-only, active/abandoned labels and closure; no faces/handles/previews/other ballots, including historical own cards.
 - **Tests:** nonowner denial, finished owner, null pre-creation state, abandoned/read-only and closed targets.
-- **Risks:** frame-bounded history has no pagination; measure representative long matches early and seek separate approval if pagination is necessary.
+- **Risks:** the legacy whole-history endpoint remains frame-bounded; use the newly approved paged reader. Restart stale traversals explicitly, preserve complete page/branch/audit order, and do not silently truncate data. Early size measurements and pagination approval are recorded in 9.13p.
 
 ### Increment 9.14 — Owner rollback and interaction invalidation
 

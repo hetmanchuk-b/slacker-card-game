@@ -83,7 +83,7 @@ Workflow HTTP errors are fixed empty responses: 400 invalid shape/Unicode/bounds
 
 Namespace `/`, default `/socket.io/` path. Handshake `auth` must be empty; cookie authentication is checked before namespace admission. Both direct WebSocket and polling admission enforce Origin. A rejected upgrade may close the transport rather than return an application envelope.
 
-- Incoming event: `client-message` with exactly one existing version-1 protocol object: `resync`, `submit-claim`, `owner-history`, `rollback`, `post-chat`, `chat-history`, `start-match`, or one of the ten gameplay intents below.
+- Incoming event: `client-message` with exactly one existing version-1 protocol object: `resync`, `submit-claim`, `owner-history`, `owner-history-page`, `rollback`, `post-chat`, `chat-history`, `start-match`, or one of the ten gameplay intents below.
 - Outgoing event: `server-message(message, receipt, acknowledge)`, carrying an existing `StateMessage`, `ActionMessage`, allowlisted `CommandAck`, owner-only `OwnerHistoryMessage`, public metadata-only `RollbackNoticeMessage`, redacted `ChatPage` or fixed `ErrorMessage`. The receiver must promptly call the Socket.IO acknowledgment callback with the **exact opaque receipt string**. This new transport receipt is not a gameplay command, cookie or reliable-delivery/replay capability.
 - Deferred well-shaped intents return `unavailable`; malformed shapes use existing decoder errors. Technical failures never become gameplay punishments.
 
@@ -126,6 +126,12 @@ Both routes require an authenticated one-lobby attachment and fresh `requireOwne
 `rollback` maps display branch ordinals/action versions from a fresh committed capture into the exact trusted runtime command. Dispatch happens after exiting observe (never reentrant); optimistic expected-head and closure checks reject intervening changes instead of retargeting. Retained source branches reconstruct accepted retries across forks/recovery, preserving request ID, actor, expected head, target and warning. A new archived/stale selector remains invalid. Do not pass the original branch as a dispatch branch gate: rollback receipts intentionally survive their source branch becoming archived. Unknown selectors return allowlisted unknown-target; owner/warning/head/closure/controller errors retain existing behavior. No new persistence/receipt/runtime API contract is introduced.
 
 A successful committed rollback rotates the stream and emits approved `rollback-notice` metadata to each freshly authorized current participant, before its fresh action/state packets. The notice contains actor seat, ordinal target/expected head and ordinal result head only. This covers rollback before creation where no rebase action exists. No raw IDs, private observations or history are broadcast. Failed commits, duplicates, resync/recovery and successor baselines do not replay notices. Already observed human knowledge cannot be undone; bounded best-effort delivery does not guarantee offline receipt. See `protocol.md` for the additive version-1 envelope.
+
+## Bounded owner-history pages — approved 9.13 prerequisite
+
+`owner-history-page` reuses the current-match administrative path, `requireOwner`, committed `observeHistory` capture and prepared outbound slot. Session/seat ownership, credential expiry/revocation, current-game routing and stream generation/epoch are checked afresh for every page; the cursor does not authorize access. Finished owners and null pre-creation state retain metadata access. Legacy `owner-history` and rollback remain unchanged.
+
+Responses are request-correlated and byte-bounded complete-entry prefixes. Stale public-history fingerprints require explicit restart; indivisible oversized entries yield fixed unavailable rather than omission. The full encoded reply plus 128-byte allowance must fit the reserved budget. When even the correlated failure cannot fit, send fixed `error: unavailable` if possible, otherwise disconnect; never leave the request silently pending. Existing receipt timeout/backpressure policies still apply to every emitted reply. No raw archive, private ballot, card face/handle or preview is added; no UI or stored pagination session is introduced. See `protocol.md` for cursor/result fields and full-projection resource limitations.
 
 ## Retained chat request/response — Stage 8.13
 

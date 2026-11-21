@@ -78,6 +78,21 @@ Selectors map persisted display ordinals and completed-action versions to exact 
 
 The operator approved additive `RollbackNoticeMessage`: `{ protocolVersion: 1, type: 'rollback-notice', delivery, notice: { actorId, target: { expected: HistoryHead, beforeActionVersion }, head: HistoryHead } }`. Heads use display branch ordinals, not private correlated identifiers. It contains no card faces/handles, raw command IDs, events, ballots, snapshots or previews. Only a fresh committed rollback emits the notice to freshly authorized current-match participants, before its action/state stream, including a rollback to null state with no action pair. Duplicates, initial/resync/recovery baselines and failed commits never replay it. Delivery remains bounded best-effort, not an outbox or an offline-notification guarantee.
 
+### Bounded owner-history pages — approved 9.13 prerequisite
+
+The additive `owner-history-page` intent is `{ type, gameId, cursor, limit }`. `cursor` is null for an explicit new traversal, otherwise exactly `{ snapshot, offset }`: a lowercase 64-hex SHA-256 digest and a nonnegative safe integer. `limit` is an integer from 1 to 100 counting entries, not bytes. Strict decoding rejects unknown fields. The original `owner-history`/rollback contracts are unchanged; the legacy whole-history endpoint retains its existing size behavior.
+
+The correlated response is `{ protocolVersion: 1, type: 'owner-history-page', requestId, delivery, result }`. Results are:
+- `{ type: 'page', head, rollbackOpen, snapshot, entries, next }`, with `next` a continuation cursor or null at completion;
+- `{ type: 'stale' }`, requiring an explicit restart rather than merging incompatible snapshots;
+- `{ type: 'unavailable' }`, including invalid in-snapshot offsets or a complete entry that cannot fit.
+
+Entries are ordered branch descriptors (`{ type: 'branch', branch: { head, label, parent } }`), then each branch's complete action rows (`{ type: 'action', branch: ordinal, action: HistoryRow }`), followed by rollback audits (`{ type: 'rollback', rollback }`). Inherited rows are intentionally repeated as in the original complete view; origin and exact selectors are unchanged. Empty branches still have descriptors. No faces/handles/raw private IDs/ballot maps or state previews are added.
+
+The digest covers the entire allowlisted `OwnerHistoryView`, with a versioned prefix, including closure, branches, selectors and audit. Every continuation reprojects a fresh committed capture: actions, forks or same-head rollback closure invalidate the prior snapshot. Identical recovery can retain the digest. Cursor fields are addressing metadata, never authorization. Every page rechecks authenticated current-game owner access and existing delivery generation/epoch fences.
+
+The server emits the longest contiguous complete-entry prefix up to `limit` whose actual UTF-8 encoded envelope plus the outbound 128-byte allowance fits `min(65536, delivery.bytes)`. A short page is not completion unless `next` is null. Entries are never split, truncated or skipped. No nonterminal empty-success page is emitted. The implementation still constructs the full safe projection per page: wire size is bounded, not total projection CPU/memory; a changing history may require restarting traversal. Tiny configured budgets must yield a fixed unavailable error if it fits, otherwise disconnect; they never silently strand a request.
+
 ### Authenticated retained chat — Stage 8.13
 
 The operator approved **messageId as durable chat identity, requestId as correlation only**. `(lobbyId, messageId)` binds exact server-authenticated author session/seat and verbatim text to one immutable record. Identical retries may use another requestId; they return the same message/sequence/time/original context. The same requestId with a different new messageId is another operation. Changed author/text reuse is fixed unavailable, without prior-record disclosure. No request ledger, schema, DTO or gameplay command-ID namespace changes.

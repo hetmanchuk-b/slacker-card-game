@@ -1,3 +1,5 @@
+import { makeOwnerHistoryPage } from '../protocol/history-page.ts';
+import { projectOwnerHistory } from '../projections/history.ts';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:https';
 import type { Server as HttpsServer, ServerOptions } from 'node:https';
@@ -769,12 +771,17 @@ export class PenkyTransport {
 
   async #admin(peer: Peer, message: ClientMessage, generation: number): Promise<void> {
     const intent = message.intent;
-    if (intent.type !== 'owner-history' && intent.type !== 'rollback') return;
+    if (
+      intent.type !== 'owner-history' &&
+      intent.type !== 'owner-history-page' &&
+      intent.type !== 'rollback'
+    )
+      return;
     if (!peer.lobbyId || !peer.detach) {
       this.#error(peer, 'unauthorized');
       return;
     }
-    const gameId = intent.type === 'owner-history' ? intent.gameId : intent.target.expected.gameId;
+    const gameId = intent.type !== 'rollback' ? intent.gameId : intent.target.expected.gameId;
     try {
       const binding = await this.#options.access.requireOwner(
         peer.token,
@@ -786,7 +793,7 @@ export class PenkyTransport {
         this.#error(peer, 'wrong-game');
         return;
       }
-      if (intent.type === 'owner-history') {
+      if (intent.type === 'owner-history' || intent.type === 'owner-history-page') {
         await peer.outbound.prepare(
           async (emit) => {
             if (!this.#live(peer) || generation !== peer.generation) return;
@@ -816,13 +823,34 @@ export class PenkyTransport {
                   (peer.epoch !== null && peer.epoch !== epoch)
                 )
                   return;
-                emit(
-                  makeOwnerHistoryMessage(
-                    capture,
-                    { type: 'seat', seatId: valid.seatId },
-                    { epoch: `${epoch}:${peer.streamId}`, sequence: ++peer.sequence },
-                  ),
-                );
+                const response =
+                  intent.type === 'owner-history-page'
+                    ? makeOwnerHistoryPage(
+                        projectOwnerHistory(capture, { type: 'seat', seatId: valid.seatId }),
+                        message.requestId,
+                        { epoch: `${epoch}:${peer.streamId}`, sequence: ++peer.sequence },
+                        intent.cursor,
+                        intent.limit,
+                        Math.min(65536, this.#delivery.bytes),
+                      )
+                    : makeOwnerHistoryMessage(
+                        capture,
+                        { type: 'seat', seatId: valid.seatId },
+                        { epoch: `${epoch}:${peer.streamId}`, sequence: ++peer.sequence },
+                      );
+                const maxBytes = Math.min(65536, this.#delivery.bytes);
+                if (
+                  intent.type !== 'owner-history-page' ||
+                  Buffer.byteLength(JSON.stringify(response)) + 128 <= maxBytes
+                ) {
+                  emit(response);
+                } else {
+                  // Even the correlated failure can exceed a tiny budget. End
+                  // the request explicitly rather than waiting for no receipt.
+                  const failure = protocolError('unavailable');
+                  if (Buffer.byteLength(JSON.stringify(failure)) + 128 <= maxBytes) emit(failure);
+                  else this.#stop(peer);
+                }
               },
             );
           },
@@ -1250,10 +1278,12 @@ export class PenkyTransport {
     }
     if (
       decoded.message.intent.type === 'owner-history' ||
+      decoded.message.intent.type === 'owner-history-page' ||
       decoded.message.intent.type === 'rollback'
     ) {
       if (
-        decoded.message.intent.type === 'owner-history' &&
+        (decoded.message.intent.type === 'owner-history' ||
+          decoded.message.intent.type === 'owner-history-page') &&
         (watch !== peer.watch || generation !== peer.generation)
       )
         return;

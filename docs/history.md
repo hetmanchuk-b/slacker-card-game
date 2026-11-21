@@ -36,6 +36,14 @@ The host resolves display ordinal/action selectors in `observe`, then dispatches
 
 Fresh committed rollbacks supply a public metadata-only actor/ordinal-target/result notice to authorized current participants, including pre-creation rollback with no action pair. This approved protocol addition never broadcasts owner history or private audit records. Duplicate/recovery/resync baselines do not replay it; delivery is bounded best-effort. Only the current lobby match is routable—historical-game access after successor start remains outside this increment. See `protocol.md` and `transport.md`.
 
+## Approved bounded history pagination prerequisite
+
+`owner-history-page` is an additive current-match owner reader; the original whole-history and ordinal rollback APIs remain unchanged. The pager first projects the complete allowlisted metadata view, then emits ordered branch descriptors, complete branch action rows and rollback audit entries in byte-bounded pages. This preserves inherited origins and cross-page claim references without exposing snapshots, faces, handles or other ballots. Selectors are identical to the original projector and remain subject to fresh rollback authorization/head/closure checks.
+
+A stateless continuation binds offset to a SHA-256 digest of the complete public view, including same-head closure and audit. Each page obtains a new committed capture and reauthorizes the owner in the existing wire slot. Changed public history yields explicit stale status, requiring restart; cursor knowledge grants no access. Stable recovery may retain a snapshot identity. No stored snapshot/session ledger or persistence format is added. Full projection remains O(total history) per page; this bounds wire bytes, not history CPU/memory.
+
+Representative trusted legal 2/4/8-seat match fixtures measured complete envelopes plus outbound allowance at 24,062/28,608/58,625 bytes. A retained final-action fork measured 39,956/47,425/97,174 bytes. The eight-seat retained timeline exceeds the 65,536-byte legacy bound, motivating explicit operator approval for this prerequisite. These measurements are trusted engine/runtime evidence, not browser acceptance. No timeline UI or rollback control is implemented by this prerequisite; see `protocol.md` for the exact new contract.
+
 ## Durable runtime seam (Stage 7)
 
 Extend the approved persistence/runtime seams with an awaited runtime `commit(checkpoint)` adapter. A complete queue job (including logical suspension, receipts and live control changes) is staged in private history; one database transaction stores its versioned history archive, active-state snapshot, checkpoint and revision. The public runtime view and acknowledgment are published only after commit. Commit failure faults the runtime; discard its draft and recover from storage. Do not schedule gameplay callbacks before the initial durable commit.

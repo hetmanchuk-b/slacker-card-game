@@ -176,6 +176,19 @@ function intent(value: unknown): ClientIntent {
         knowledgeWarningAcknowledged: boolean(record.knowledgeWarningAcknowledged),
       };
     }
+    case 'owner-history-page': {
+      const record = fields(value, ['type', 'gameId', 'cursor', 'limit']);
+      const limit = integer(record.limit, 1);
+      if (limit > PROTOCOL_LIMITS.page) throw new Error();
+      let cursor = null;
+      if (record.cursor !== null) {
+        const item = fields(record.cursor, ['snapshot', 'offset']);
+        const snapshot = text(item.snapshot, 64);
+        if (!/^[a-f0-9]{64}$/.test(snapshot)) throw new Error();
+        cursor = { snapshot, offset: integer(item.offset, 0) };
+      }
+      return { type, gameId: id('game', reference(record.gameId)), cursor, limit };
+    }
     case 'owner-history': {
       const record = fields(value, ['type', 'gameId']);
       return { type, gameId: id('game', reference(record.gameId)) };

@@ -154,6 +154,24 @@ function entry(v: unknown): boolean {
         a.rollbackTarget.beforeActionVersion === a.version))
   );
 }
+export type RollbackCapture = Readonly<{
+  snapshot: string;
+  selected: Readonly<{ branch: number; version: number }>;
+  target: Readonly<{
+    expected: { gameId: string; branch: number; version: number };
+    beforeActionVersion: number;
+  }>;
+}>;
+export function rollbackNotice(v: unknown): boolean {
+  return (
+    exact(v, ['actorId', 'target', 'head']) &&
+    id(v.actorId) &&
+    hh(v.head) &&
+    exact(v.target, ['expected', 'beforeActionVersion']) &&
+    hh(v.target.expected) &&
+    pos(v.target.beforeActionVersion)
+  );
+}
 export class OwnerHistory {
   #pending: { requestId: string; gameId: string; offset: number } | null = null;
   current: {
@@ -208,6 +226,25 @@ export class OwnerHistory {
           e.action.rollbackTarget !== null,
       );
     this.current = { ...this.current, selected: found ? { branch, version } : null };
+  }
+  captureRollback(): RollbackCapture | null {
+    const c = this.current;
+    if (c.status !== 'complete' || !c.snapshot || !c.selected || !c.rollbackOpen) return null;
+    const row = c.entries.find(
+      (e) =>
+        e.type === 'action' &&
+        e.branch === c.selected!.branch &&
+        e.action.version === c.selected!.version,
+    );
+    if (!row || row.type !== 'action' || !row.action.rollbackTarget) return null;
+    return structuredClone({
+      snapshot: c.snapshot,
+      selected: c.selected,
+      target: row.action.rollbackTarget,
+    });
+  }
+  matchesRollback(capture: RollbackCapture): boolean {
+    return same(this.captureRollback(), capture);
   }
   receive(raw: unknown): 'accepted' | 'ignored' | 'invalid' {
     if (!object(raw) || raw.requestId !== this.#pending?.requestId) return 'ignored';

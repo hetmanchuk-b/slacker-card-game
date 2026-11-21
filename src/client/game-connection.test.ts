@@ -298,7 +298,14 @@ test('a rotated rollback stream invalidates an old pending draw and its late ack
     protocolVersion: 1,
     type: 'rollback-notice',
     delivery: { epoch: 'rollback', sequence: 1 },
-    notice: {},
+    notice: {
+      actorId: 'own',
+      target: {
+        expected: { gameId: 'assigned-game', branch: 1, version: 10 },
+        beforeActionVersion: 1,
+      },
+      head: { gameId: 'assigned-game', branch: 2, version: 0 },
+    },
   });
   assert.notEqual(client.current.drawStatus, 'pending');
   const next = dealing(2);
@@ -481,7 +488,14 @@ test('new procedure and rotated stream clear obsolete penalty drafts/pending com
     protocolVersion: 1,
     type: 'rollback-notice',
     delivery: { epoch: 'rollback', sequence: 1 },
-    notice: {},
+    notice: {
+      actorId: 'own',
+      target: {
+        expected: { gameId: 'assigned-game', branch: 1, version: 10 },
+        beforeActionVersion: 1,
+      },
+      head: { gameId: 'assigned-game', branch: 2, version: 0 },
+    },
   });
   assert.notEqual(client.current.penaltyStatus, 'pending');
   assert.equal(client.current.selectedCardId, null);
@@ -604,7 +618,14 @@ test('uncertain moves clear face feedback and are not replayed; reset invalidate
     protocolVersion: 1,
     type: 'rollback-notice',
     delivery: { epoch: 'rollback', sequence: 1 },
-    notice: {},
+    notice: {
+      actorId: 'own',
+      target: {
+        expected: { gameId: 'assigned-game', branch: 1, version: 10 },
+        beforeActionVersion: 1,
+      },
+      head: { gameId: 'assigned-game', branch: 2, version: 0 },
+    },
   });
   assert.notEqual(client.current.moveStatus, 'pending');
   sockets[1]!.deliver({
@@ -633,7 +654,14 @@ test('lobby chat survives denied game visibility on the same socket and never in
     protocolVersion: 1,
     type: 'rollback-notice',
     delivery: { epoch: 'rollback', sequence: 1 },
-    notice: {},
+    notice: {
+      actorId: 'own',
+      target: {
+        expected: { gameId: 'assigned-game', branch: 1, version: 10 },
+        beforeActionVersion: 1,
+      },
+      head: { gameId: 'assigned-game', branch: 2, version: 0 },
+    },
   });
   socket.deliver({
     protocolVersion: 1,

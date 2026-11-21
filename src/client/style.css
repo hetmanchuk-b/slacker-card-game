@@ -359,3 +359,13 @@ textarea:user-invalid {
     font-weight: bold;
   }
 }
+
+dialog:modal {
+  overscroll-behavior: contain;
+  max-inline-size: min(36rem, 90vw);
+}
+dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+  background: #0008;
+}

@@ -1,4 +1,6 @@
-import { OwnerHistory } from './owner-history.ts';
+import type { RollbackCapture } from './owner-history.ts';
+import type { RollbackNoticeMessage, ClientMessage } from '../protocol/contracts.ts';
+import { rollbackNotice, OwnerHistory } from './owner-history.ts';
 export type ClaimEvidence =
   | Readonly<{ type: 'spoken'; key: string }>
   | Readonly<{ type: 'chat'; messageId: string }>
@@ -43,6 +45,10 @@ export type ConnectionState = Readonly<{
   replacementRejection: string | null;
   replacementStatus: 'none' | 'pending' | 'accepted' | 'rejected' | 'uncertain';
   voteStatus: 'none' | 'pending' | 'accepted' | 'rejected' | 'uncertain';
+  interactionRevision: number;
+  rollbackNotice: RollbackNoticeMessage['notice'] | null;
+  rollbackStatus: 'none' | 'pending' | 'accepted' | 'rejected' | 'uncertain';
+  rollbackRetry: boolean;
   history: OwnerHistory['current'];
   chat: LobbyChat['current'];
   view: GameSnapshot | null;
@@ -89,6 +95,7 @@ export class GameConnection {
     | 'draw'
     | 'penalty'
     | 'move'
+    | 'rollback'
     | 'history'
     | 'chat'
     | 'claim'
@@ -96,6 +103,7 @@ export class GameConnection {
     | 'replacement'
     | 'vote'
     | null = null;
+  #rollback: ClientMessage | null = null;
   readonly #history = new OwnerHistory();
   readonly #chat: LobbyChat;
   #pendingReplacementVoteId: string | null = null;
@@ -114,6 +122,10 @@ export class GameConnection {
   #busy = false;
   #storageBlocked = false;
   current: ConnectionState = {
+    interactionRevision: 0,
+    rollbackNotice: null,
+    rollbackStatus: 'none',
+    rollbackRetry: false,
     history: new OwnerHistory().current,
     actionIds: [],
     claimStatus: 'none',
@@ -215,6 +227,12 @@ export class GameConnection {
     this.#pendingPenaltyScope = null;
   }
   #drop() {
+    this.current = {
+      ...this.current,
+      interactionRevision: this.current.interactionRevision + 1,
+      rollbackNotice: null,
+      ...(this.#pending === 'rollback' ? { rollbackStatus: 'uncertain' as const } : {}),
+    };
     this.#history.interrupt();
     if (this.#chat.pending) this.#chat.interrupt();
     this.#generation++;
@@ -226,6 +244,7 @@ export class GameConnection {
     this.#stream = new GameStream(this.#deps.seatId, this.#deps.now);
   }
   #fail(note: ConnectionState['note'], status: ConnectionState['status'] = 'failed') {
+    const rollbackUncertain = this.#pending === 'rollback';
     const drawUncertain = this.#pending === 'draw';
     const penaltyUncertain = this.#pending === 'penalty';
     const moveUncertain = this.#pending === 'move';
@@ -244,6 +263,7 @@ export class GameConnection {
     this.#finish();
     this.#drop();
     this.#publish({
+      ...(rollbackUncertain ? { rollbackStatus: 'uncertain' } : {}),
       status: uncertain ? 'uncertain' : status,
       note,
       view: null,
@@ -260,6 +280,8 @@ export class GameConnection {
     });
   }
   close() {
+    if (this.#pending === 'rollback')
+      this.current = { ...this.current, rollbackStatus: 'uncertain' };
     this.#finish();
     this.#drop();
     this.#publish({
@@ -401,6 +423,41 @@ export class GameConnection {
     if (!this.#deps.isOwner || this.#pending) return;
     this.#history.select(branch, version);
     this.#publish();
+  }
+  captureRollback() {
+    return this.#history.captureRollback();
+  }
+  confirmRollback(capture: RollbackCapture) {
+    if (
+      !this.#deps.isOwner ||
+      this.#rollback ||
+      !this.#chatAvailable() ||
+      !this.#history.matchesRollback(capture)
+    )
+      return;
+    this.#rollback = structuredClone({
+      protocolVersion: 1,
+      requestId: this.#deps.requestId(),
+      intent: { type: 'rollback', target: capture.target, knowledgeWarningAcknowledged: true },
+    }) as ClientMessage;
+    this.#sendRollback();
+  }
+  retryRollback() {
+    if (
+      !this.#deps.isOwner ||
+      !this.#rollback ||
+      this.current.rollbackStatus !== 'uncertain' ||
+      !this.#chatAvailable()
+    )
+      return;
+    this.#sendRollback();
+  }
+  #sendRollback() {
+    this.#pending = 'rollback';
+    this.#commandRequest = this.#rollback!.requestId;
+    this.#deadline();
+    this.#publish({ rollbackStatus: 'pending', rollbackRetry: true });
+    this.#socket!.send(structuredClone(this.#rollback!));
   }
   submitClaim(accusedId: string, reason: string, evidence: ClaimEvidence) {
     const view = this.current.view;
@@ -795,7 +852,8 @@ export class GameConnection {
     }
     if (message.type === 'command-ack') {
       if (
-        (this.#pending !== 'draw' &&
+        (this.#pending !== 'rollback' &&
+          this.#pending !== 'draw' &&
           this.#pending !== 'penalty' &&
           this.#pending !== 'move' &&
           this.#pending !== 'claim' &&
@@ -817,21 +875,24 @@ export class GameConnection {
         (r.outcome === 'played' || r.outcome === 'violation' || r.outcome === 'control') &&
         typeof r.duplicate === 'boolean'
       ) {
+        if (kind === 'rollback') this.#rollback = null;
         this.#finish();
         this.#publish(
-          kind === 'replacement'
-            ? { replacementStatus: 'accepted', replacementRejection: null }
-            : kind === 'withdrawal'
-              ? { withdrawalStatus: 'accepted' }
-              : kind === 'claim'
-                ? { claimStatus: 'accepted' }
-                : kind === 'vote'
-                  ? { voteStatus: 'accepted' }
-                  : kind === 'penalty'
-                    ? { penaltyStatus: 'accepted' }
-                    : kind === 'move'
-                      ? { moveStatus: r.outcome === 'violation' ? 'violation' : 'played' }
-                      : { drawStatus: r.outcome === 'violation' ? 'violation' : 'played' },
+          kind === 'rollback'
+            ? { rollbackStatus: 'accepted', rollbackRetry: false }
+            : kind === 'replacement'
+              ? { replacementStatus: 'accepted', replacementRejection: null }
+              : kind === 'withdrawal'
+                ? { withdrawalStatus: 'accepted' }
+                : kind === 'claim'
+                  ? { claimStatus: 'accepted' }
+                  : kind === 'vote'
+                    ? { voteStatus: 'accepted' }
+                    : kind === 'penalty'
+                      ? { penaltyStatus: 'accepted' }
+                      : kind === 'move'
+                        ? { moveStatus: r.outcome === 'violation' ? 'violation' : 'played' }
+                        : { drawStatus: r.outcome === 'violation' ? 'violation' : 'played' },
         );
       } else if (
         exact(r, ['type', 'code', 'head']) &&
@@ -839,21 +900,24 @@ export class GameConnection {
         typeof r.code === 'string' &&
         PUBLIC_REJECTIONS.some((code) => code === r.code)
       ) {
+        if (kind === 'rollback') this.#rollback = null;
         this.#finish();
         this.#publish(
-          kind === 'replacement'
-            ? { replacementStatus: 'rejected', replacementRejection: r.code }
-            : kind === 'withdrawal'
-              ? { withdrawalStatus: 'rejected' }
-              : kind === 'claim'
-                ? { claimStatus: 'rejected' }
-                : kind === 'vote'
-                  ? { voteStatus: 'rejected' }
-                  : kind === 'penalty'
-                    ? { penaltyStatus: 'rejected', selectedCardId: null }
-                    : kind === 'move'
-                      ? { moveStatus: 'rejected' }
-                      : { drawStatus: 'rejected' },
+          kind === 'rollback'
+            ? { rollbackStatus: 'rejected', rollbackRetry: false }
+            : kind === 'replacement'
+              ? { replacementStatus: 'rejected', replacementRejection: r.code }
+              : kind === 'withdrawal'
+                ? { withdrawalStatus: 'rejected' }
+                : kind === 'claim'
+                  ? { claimStatus: 'rejected' }
+                  : kind === 'vote'
+                    ? { voteStatus: 'rejected' }
+                    : kind === 'penalty'
+                      ? { penaltyStatus: 'rejected', selectedCardId: null }
+                      : kind === 'move'
+                        ? { moveStatus: 'rejected' }
+                        : { drawStatus: 'rejected' },
         );
       } else this.#fail('invalid-message');
       return;
@@ -903,7 +967,22 @@ export class GameConnection {
       this.#history.interrupt();
       if (this.#pending === 'history') this.#finish();
     }
+    if (message.type === 'rollback-notice') {
+      if (
+        !exact(message, ['protocolVersion', 'type', 'delivery', 'notice']) ||
+        !rollbackNotice(message.notice)
+      ) {
+        this.#fail('invalid-message');
+        return;
+      }
+      this.current = {
+        ...this.current,
+        rollbackNotice: structuredClone(message.notice) as RollbackNoticeMessage['notice'],
+      };
+    }
     if (this.#stream.reset) {
+      this.current = { ...this.current, interactionRevision: this.current.interactionRevision + 1 };
+
       if (
         this.#pending === 'draw' ||
         this.#pending === 'penalty' ||

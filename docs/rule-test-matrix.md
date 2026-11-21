@@ -44,7 +44,7 @@ The engine command/event/invariant interface, runtime clock/ordering interface, 
 | 12 | Conservation, structural validity, deterministic replay | `engine.test.ts`, `invariants.test.ts`, scenario helpers, history tests | Current engine phases, nested replay and generated rollback histories passing; broader adversarial command fuzzing remains Stage 12 |
 | 13.3 | Unused stump right survives temporary cards | `stumps.test.ts` | Passing |
 | 13.7 | Third repeated meaningful state, prior wins retained | `repetition.test.ts`, `match.test.ts` | Passing at settled action checkpoints, including in-round cycles (D001 resolved) |
-| 15.2–15.5 | Owner rollback, branches, timers, chat, knowledge warning | `persistence/branches.test.ts`, `runtime/rollback.test.ts`, `projections/history.test.ts`; stages 7–9 | Core/durable rollback and metadata-only owner timelines/targets passing, including pre-creation ownership, inherited prefixes and closure; authenticated current-match history/ordinal rollback routing, canonical fork/recovery retries and pre-creation participant notices passing; UI pending |
+| 15.2–15.5 | Owner rollback, branches, timers, chat, knowledge warning | `persistence/branches.test.ts`, `runtime/rollback.test.ts`, `projections/history.test.ts`; stages 7–9 | Core/durable rollback and metadata-only owner timelines/targets passing, including pre-creation ownership, inherited prefixes and closure; authenticated current-match history/ordinal rollback routing, canonical fork/recovery retries and pre-creation participant notices passing; 9.13–9.14 UI verified within real/fixture boundaries below |
 | 16 | Post-game strikes, card counts, force/aim, dodges, connection handling | Stage 11a | Approved rules documented; no implementation yet; revision 1.4 repetition-loser outcome also pending |
 
 ## Scenario coverage
@@ -67,8 +67,8 @@ The engine command/event/invariant interface, runtime clock/ordering interface, 
 | 14. Claim vs completing play | Both event orders, closed scope, repeat incident | 5–6, 8.11 (queued ordering, authenticated scopes and repeat rejection passing) |
 | 15. Everyone wins | Zero remaining participants is victory, not draw | 4 |
 | 16. Repetition draw | Third meaningful occurrence after the 12-round cycle | 4 |
-| 17. Administrative rollback | Restore cards/turn/N, retain abandoned branch and chat | 7, 8.12 (authenticated metadata history/rollback/notices passing); UI pending |
-| 18. Rollback result and timers | Restore procedure/remaining time; live absence still pauses | 7, 8.12 (runtime/storage, authenticated admin, closure and recovery retries passing); UI pending |
+| 17. Administrative rollback | Restore cards/turn/N, retain abandoned branch and chat | 7, 8.12 authenticated controls; 9.14 UI rollback with explicit engine/projector scenario17 wire fixture (see boundaries below) |
+| 18. Rollback result and timers | Restore procedure/remaining time; live absence still pauses | 7, 8.12 runtime/storage/authenticated controls; 9.14 explicit runtime/projector scenario18 wire fixture (see boundaries below) |
 | 19. In-round cycle (D001) | Third state occurrence draws; table/discard preserved | 4 (passing) |
 
 ## Stage 8.15 — authenticated lobby admission
@@ -208,3 +208,11 @@ Final normal `npm run check`:403 pass/seven explicit PG skips. Final database-en
 `tests/browser/owner-history.spec.ts`: three cases: real owner read/nonowner denial plus authenticated Node rollback precondition for null/abandoned metadata; explicitly engine/projector-fixtured finished owner and large retained timeline paging/selection/closure/stale/narrow keyboard rendering. No browser rollback or real UI-completed finished match is claimed. Audit-only label regression is test-first fixed and independently approved. No historical card faces/handles/previews or other ballots are added; selection sends no rollback.
 
 Normal check420pass/seven explicit PG skips. Database-enabled check608pass/no skips, including188PG tests; complete Chromium suite77pass/no retries. Dedicated PG runner not separately repeated. Disposable tmpfs PG18 loopback55446 only. Fixture measurements:8seats33pages156,768bytes646rows3,277nodes3,382ms;2finished5pages32,369bytes99rows698nodes407ms. Both document360px/history280px without overflow. Four-seat DOM/manual assistive-technology/native-device/full-match performance certification not claimed. Reviewer executed no checks and found no remaining issues after the audit-label fix.
+
+### Stage 9.14 browser rollback — verified
+
+`src/client/rollback.test.ts`: four new cases cover snapshot/selector capture and stale refusal, exact request/warning/ID binding, historical acknowledgment not becoming state, strict fresh participant notice/duplicate suppression, central reset/chat preservation, immutable uncertain retry across reconnect/fork and no automatic replay. Updated connection/withdrawal tests retain shared sequencing and invalidation assertions. Counts include imported helper test registrations.
+
+`tests/browser/rollback.spec.ts`: four cases. Two real authenticated HTTPS/PG flows verify native cancel/focus, exact lost-ack retry, owner null-state, retained branch/chat, participant notice, stale confirmation and cleared evidence. Two explicitly labeled engine/runtime-projector wire fixtures cover scenarios17–18 late-state card/table/N/turn restoration and finished-state rollback to a six-second ballot with live absent participant. These fixtures are not real UI-completed matches or persisted late-state reachability evidence. No private observations are replayed.
+
+Normal gate441pass/seven explicit PG skips. Database-enabled gate629pass/no skips (all188PG cases); final full browser81pass/no retries. Dedicated PG runner not separately repeated. Fresh disposable tmpfs PG18 loopback55447 only. Initial check628/629 exposed an older empty-notice fixture, now valid metadata without weakening malformed-notice rejection. Initial browser80/81 peek/penalty failure passed isolated and in final full rerun without code changes. Independent read-only review/follow-up found no issues and executed no checks. Mounted-memory-only retry lifetime, native-device/manual accessibility/full-match certification remain limitations.

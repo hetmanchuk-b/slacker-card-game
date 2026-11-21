@@ -52,6 +52,16 @@ The browser uses only `owner-history-page` through the existing shared connectio
 
 Three browser cases distinguish real authorization and authenticated Node null/abandoned setup from explicitly engine/projector-fixtured finished and large-history rendering. No full UI-completed match or browser rollback is claimed. Large-history fixture measurements and verification limits are recorded in `IMPLEMENTATION_PLAN.md` and `docs/browser-client.md`.
 
+## Browser rollback — Stage 9.14
+
+`RollbackView` opens a native modal with safe Cancel focus and an explicit warning that seen cards/trump cannot be forgotten. The exact selected ordinal target is captured with its complete history snapshot; changed history/selection makes confirmation stale. Confirm sends the existing rollback intent with true knowledge acknowledgment, never raw branch/command identity or a reconstructed target.
+
+`GameConnection` freezes the complete request ID/target/warning for explicit retry after uncertain delivery. It remains only in mounted memory; disconnect/reconnect does not automatically send it, and reload/unmount loses it. An original duplicate acknowledgment may describe an abandoned head and never becomes the current baseline. Inspect authoritative state/history before a genuinely new attempt; there is no promise of durable outbox or erased human knowledge.
+
+Fresh allowlisted notices show actor and display-ordinal target/result to current authorized participants, not just the owner. Shared stream sequencing and central interaction revision clear stale evidence forms, gestures, procedure/card/history selections and old pending work, while preserving retained chat. Resync supplies only current state, never replays notices or private faces. Current live absence can keep restored timers frozen; sockets/controllers are not historical state.
+
+Two real browser HTTPS/PG flows verify confirmation/cancellation, exact lost-ack retry, null-state/retained fork/chat and participant notices, plus stale-confirmation refusal. Two explicitly engine/runtime-projector wire scenarios cover approved17–18 late-state restoration, including a six-second ballot and current absent participant; they are not real UI-completed matches. See the plan for executed gates and remaining manual verification limits.
+
 ## Durable runtime seam (Stage 7)
 
 Extend the approved persistence/runtime seams with an awaited runtime `commit(checkpoint)` adapter. A complete queue job (including logical suspension, receipts and live control changes) is staged in private history; one database transaction stores its versioned history archive, active-state snapshot, checkpoint and revision. The public runtime view and acknowledgment are published only after commit. Commit failure faults the runtime; discard its draft and recover from storage. Do not schedule gameplay callbacks before the initial durable commit.

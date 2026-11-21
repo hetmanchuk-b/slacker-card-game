@@ -174,7 +174,14 @@ test('withdrawal pending is invalidated by epoch and rollback; delayed acknowled
         protocolVersion: 1,
         type: 'rollback-notice',
         delivery: { epoch: 'new', sequence: 1 },
-        notice: {},
+        notice: {
+          actorId: 'seat-0',
+          target: {
+            expected: { gameId: 'game', branch: 1, version: 2 },
+            beforeActionVersion: 1,
+          },
+          head: { gameId: 'game', branch: 2, version: 0 },
+        },
       });
     const next = ballotWire(4, rollback ? 2 : 1);
     next.delivery.epoch = 'new';

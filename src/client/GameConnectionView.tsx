@@ -1,3 +1,4 @@
+import { RollbackView } from './RollbackView.tsx';
 import { OwnerHistoryView } from './OwnerHistoryView.tsx';
 import { PresenceView } from './PresenceView.tsx';
 import { ClaimsView } from './ClaimsView.tsx';
@@ -143,6 +144,15 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
         observations are replayed. First-start retries keep the original ID and null expected head;
         this is a proposal, not a claim that the lobby is unassigned.
       </p>
+      {connection.rollbackNotice && (
+        <p role="status" data-testid="rollback-notice">
+          Owner rollback by {connection.rollbackNotice.actorId}: before branch{' '}
+          {connection.rollbackNotice.target.expected.branch}, action{' '}
+          {connection.rollbackNotice.target.beforeActionVersion}; restored branch{' '}
+          {connection.rollbackNotice.head.branch}, action {connection.rollbackNotice.head.version}.
+          Human knowledge is not erased.
+        </p>
+      )}
       {view ? (
         <section aria-labelledby="game-baseline-title">
           <h4 id="game-baseline-title">Confirmed game baseline</h4>
@@ -240,8 +250,15 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
           select={(branch, version) => client.selectHistory(branch, version)}
         />
       )}
+      {membership.isOwner && <RollbackView client={client} connection={connection} busy={busy} />}
       <LobbyChatView client={client} connection={connection} busy={busy} />
-      <ClaimsView client={client} connection={connection} busy={busy} seatId={membership.seatId} />
+      <ClaimsView
+        key={connection.interactionRevision}
+        client={client}
+        connection={connection}
+        busy={busy}
+        seatId={membership.seatId}
+      />
       <PenaltyView
         connection={connection}
         seatId={membership.seatId}
@@ -250,7 +267,7 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
         onRespond={(id) => client.respondToPenalty(id)}
       />
       <p className="quiet">
-        Owner-history controls arrive in a later increment. No permanent trump or next-recipient
+        History and rollback never replay private observations. No permanent trump or next-recipient
         indicator is shown.
       </p>
     </section>

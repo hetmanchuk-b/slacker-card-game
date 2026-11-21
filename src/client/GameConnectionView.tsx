@@ -1,3 +1,4 @@
+import { OwnerHistoryView } from './OwnerHistoryView.tsx';
 import { PresenceView } from './PresenceView.tsx';
 import { ClaimsView } from './ClaimsView.tsx';
 import { useEffect, useRef, useState } from 'react';
@@ -230,6 +231,15 @@ export function GameConnectionView({ membership, busy, onBusy, onRouteChange }: 
         onTake={() => client.takeBottom()}
         onDismissPeek={() => client.dismissPeek()}
       />
+      {membership.isOwner && (
+        <OwnerHistoryView
+          history={connection.history}
+          busy={busy}
+          available={attached && view !== null}
+          read={(first) => client.readHistory(first)}
+          select={(branch, version) => client.selectHistory(branch, version)}
+        />
+      )}
       <LobbyChatView client={client} connection={connection} busy={busy} />
       <ClaimsView client={client} connection={connection} busy={busy} seatId={membership.seatId} />
       <PenaltyView

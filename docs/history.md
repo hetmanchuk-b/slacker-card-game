@@ -44,6 +44,14 @@ A stateless continuation binds offset to a SHA-256 digest of the complete public
 
 Representative trusted legal 2/4/8-seat match fixtures measured complete envelopes plus outbound allowance at 24,062/28,608/58,625 bytes. A retained final-action fork measured 39,956/47,425/97,174 bytes. The eight-seat retained timeline exceeds the 65,536-byte legacy bound, motivating explicit operator approval for this prerequisite. These measurements are trusted engine/runtime evidence, not browser acceptance. No timeline UI or rollback control is implemented by this prerequisite; see `protocol.md` for the exact new contract.
 
+## Browser metadata timeline — Stage 9.13
+
+The browser uses only `owner-history-page` through the existing shared connection. `OwnerHistory` strictly checks/detaches the public summary/branch/action/audit schemas, requires ordered progress under an identical snapshot/head/closure, and follows explicit cursors without assuming a short page is complete. No partial traversal can authorize selection. Metadata deliveries participate in epoch/sequence ordering but never install historical heads or faces as current state.
+
+`OwnerHistoryView` renders named active/abandoned branches, inherited origins, action summaries and audit-only numbered rollback records in a keyboard-scrollable semantic table. Only complete active/open rows with server-supplied selectors expose native radio selection. Selection is local presentation, bound to that history snapshot; refresh, stale/malformed pages, authoritative live changes and connection/route/epoch/rollback resets invalidate it. No previews, hidden IDs/cards, other ballots, warning confirmation or rollback dispatch are implemented. Finished/null-state owner metadata access does not require active-player status; the server remains the authority.
+
+Three browser cases distinguish real authorization and authenticated Node null/abandoned setup from explicitly engine/projector-fixtured finished and large-history rendering. No full UI-completed match or browser rollback is claimed. Large-history fixture measurements and verification limits are recorded in `IMPLEMENTATION_PLAN.md` and `docs/browser-client.md`.
+
 ## Durable runtime seam (Stage 7)
 
 Extend the approved persistence/runtime seams with an awaited runtime `commit(checkpoint)` adapter. A complete queue job (including logical suspension, receipts and live control changes) is staged in private history; one database transaction stores its versioned history archive, active-state snapshot, checkpoint and revision. The public runtime view and acknowledgment are published only after commit. Commit failure faults the runtime; discard its draft and recover from storage. Do not schedule gameplay callbacks before the initial durable commit.

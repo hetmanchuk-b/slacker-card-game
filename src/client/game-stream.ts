@@ -617,7 +617,9 @@ export class GameStream {
       return 'invalid';
     if (['command-ack', 'match-start-ack', 'chat-page'].includes(message.type)) return 'ignored';
     if (
-      !['state', 'action', 'rollback-notice', 'owner-history'].includes(message.type) ||
+      !['state', 'action', 'rollback-notice', 'owner-history', 'owner-history-page'].includes(
+        message.type,
+      ) ||
       !exact(message.delivery, ['epoch', 'sequence']) ||
       !text(message.delivery.epoch) ||
       !count(message.delivery.sequence, Number.MAX_SAFE_INTEGER)
@@ -765,7 +767,8 @@ export class GameStream {
           this.#pendingPeek = peek;
         }
       }
-      if (message.type !== 'owner-history') this.snapshot = null;
+      if (message.type !== 'owner-history' && message.type !== 'owner-history-page')
+        this.snapshot = null;
       if (message.type === 'rollback-notice') {
         this.dismissPeek();
         this.playObservations = [];

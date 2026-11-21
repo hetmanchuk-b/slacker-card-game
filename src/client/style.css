@@ -300,3 +300,62 @@ textarea:user-invalid {
   outline: 3px solid #20303a;
   outline-offset: 4px;
 }
+
+.history-scroll {
+  overflow: auto;
+  max-inline-size: 100%;
+  max-block-size: min(600px, 75vh);
+  container-type: inline-size;
+}
+.history-scroll table {
+  border-collapse: separate;
+  border-spacing: 0;
+  inline-size: 100%;
+}
+.history-scroll th,
+.history-scroll td {
+  padding: 0.65rem;
+  text-align: start;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  border-block-end: 1px solid #888;
+}
+.history-scroll thead {
+  position: sticky;
+  inset-block-start: 0;
+  background: #fff;
+  color: #111;
+  z-index: 1;
+}
+.history-scroll label {
+  display: inline-block;
+  min-block-size: 24px;
+}
+.history-scroll input {
+  min-inline-size: 24px;
+  min-block-size: 24px;
+}
+@container (width < 600px) {
+  .history-scroll table,
+  .history-scroll tbody,
+  .history-scroll tr,
+  .history-scroll th,
+  .history-scroll td {
+    display: block;
+  }
+  .history-scroll thead {
+    display: none;
+  }
+  .history-scroll tr {
+    border: 1px solid #888;
+    margin-block-end: 1rem;
+  }
+  .history-scroll td:nth-child(2)::before {
+    content: 'Details: ';
+    font-weight: bold;
+  }
+  .history-scroll td:nth-child(3)::before {
+    content: 'Target: ';
+    font-weight: bold;
+  }
+}

@@ -1,3 +1,4 @@
+import { OwnerHistory } from './owner-history.ts';
 export type ClaimEvidence =
   | Readonly<{ type: 'spoken'; key: string }>
   | Readonly<{ type: 'chat'; messageId: string }>
@@ -42,6 +43,7 @@ export type ConnectionState = Readonly<{
   replacementRejection: string | null;
   replacementStatus: 'none' | 'pending' | 'accepted' | 'rejected' | 'uncertain';
   voteStatus: 'none' | 'pending' | 'accepted' | 'rejected' | 'uncertain';
+  history: OwnerHistory['current'];
   chat: LobbyChat['current'];
   view: GameSnapshot | null;
   draw: Draw | null;
@@ -87,12 +89,14 @@ export class GameConnection {
     | 'draw'
     | 'penalty'
     | 'move'
+    | 'history'
     | 'chat'
     | 'claim'
     | 'withdrawal'
     | 'replacement'
     | 'vote'
     | null = null;
+  readonly #history = new OwnerHistory();
   readonly #chat: LobbyChat;
   #pendingReplacementVoteId: string | null = null;
   #pendingWithdrawalTarget: string | null = null;
@@ -110,6 +114,7 @@ export class GameConnection {
   #busy = false;
   #storageBlocked = false;
   current: ConnectionState = {
+    history: new OwnerHistory().current,
     actionIds: [],
     claimStatus: 'none',
     withdrawalStatus: 'none',
@@ -168,6 +173,7 @@ export class GameConnection {
     this.current = {
       ...this.current,
       ...next,
+      history: this.#history.current,
       chat: this.#chat.current,
       actionIds: this.#stream.actionIds,
       playObservations: this.#stream.playObservations,
@@ -209,6 +215,7 @@ export class GameConnection {
     this.#pendingPenaltyScope = null;
   }
   #drop() {
+    this.#history.interrupt();
     if (this.#chat.pending) this.#chat.interrupt();
     this.#generation++;
     const socket = this.#socket;
@@ -379,6 +386,21 @@ export class GameConnection {
   }
   readChat(first = false) {
     if (this.#chatAvailable()) this.#sendChat(this.#chat.read(first));
+  }
+  readHistory(first = true) {
+    const gameId = this.current.view?.head.gameId;
+    if (!this.#deps.isOwner || !gameId || !this.#chatAvailable()) return;
+    const message = this.#history.request(this.#deps.requestId(), gameId, first);
+    if (!message) return;
+    this.#pending = 'history';
+    this.#deadline();
+    this.#publish();
+    this.#socket!.send(message);
+  }
+  selectHistory(branch: number, version: number) {
+    if (!this.#deps.isOwner || this.#pending) return;
+    this.#history.select(branch, version);
+    this.#publish();
   }
   submitClaim(accusedId: string, reason: string, evidence: ClaimEvidence) {
     const view = this.current.view;
@@ -865,6 +887,22 @@ export class GameConnection {
       return;
     }
     if (result === 'ignored') return;
+    if (message.type === 'owner-history-page' && !this.#stream.reset) {
+      const historyResult = this.#history.receive(message);
+      if (historyResult === 'invalid') {
+        this.#fail('invalid-message');
+        return;
+      }
+      if (historyResult === 'accepted') {
+        this.#finish();
+        this.#publish();
+      }
+      return;
+    }
+    if (message.type !== 'owner-history' && this.#history.current.status !== 'idle') {
+      this.#history.interrupt();
+      if (this.#pending === 'history') this.#finish();
+    }
     if (this.#stream.reset) {
       if (
         this.#pending === 'draw' ||

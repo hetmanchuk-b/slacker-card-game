@@ -28,6 +28,12 @@ The payload stores current per-seat memories and at most256 FIFO pre-command kno
 
 Memory lives only in server-private checkpoints, not generic runtime snapshots, publications or network projections. The host's existing checkpoint restoration and atomic successor handoff carry it without a new writer or SQL table. `src/runtime/memory.test.ts`, `src/bots/memory-storage.test.ts` and `src/persistence/bot-memory.test.ts` cover the boundary. Runtime instances without `commit` remain memory-only, not crash durable.
 
+## Runner lifecycle integration — Stage 10.8
+
+Cross-feature tests exercise the installed runner rather than treating assigned bot controllers as autonomous execution. Coverage combines rollback-to-null/current live presence, exact permitted knowledge exclusion after rollback, nested timer remainder with multiple absences and no-human pause/resume, fresh-process host recovery and existing autonomous storage-fault cleanup. Old writer references and new-game seat memories are checked separately; no abandoned-future observations or cross-game knowledge are used to make a bot progress.
+
+These are lifecycle tests, not complete autonomous-match acceptance. Trusted finishing is allowed only as an explicitly labeled successor precondition; D010/D011 unknown-order/right waits remain unchanged. No runner policy, gameplay rule, persistence format or human-command fence is changed by this increment.
+
 ## Conservative procedure responses — Stage 10.7
 
 `chooseProcedureResponse(view)` uses the seat-private current projection only: explicitly abstain on eligible unanswered claim ballots, approve eligible unanswered withdrawal consent, and refuse eligible unanswered penalty contributions (D012). Eligibility, own-answer strict null and unpaused top-level timer/control are required. A false prior approval is answered, not absent. `suspendedVote` is context only, never an actionable second ballot. Evidence type is not inferred from claim text or hidden history. Bots never initiate accusations/withdrawal requests or answer human-only replacement votes.

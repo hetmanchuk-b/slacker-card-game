@@ -996,7 +996,7 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 
 **Depends on:** Stages 8–9; replacement orchestration is implemented in Stage 6.
 
-**Status: 10.1–10.7 implemented; verification recorded below.** D006–D012 approve constrained memory, atomic capture, fenced runner/dealing/legal play with explicit unknown-right waiting, and conservative procedure decisions. Increments10.8–10.9 remain unimplemented.
+**Status: 10.1–10.8 implemented/verified; evidence recorded below.** D006–D012 approve constrained memory, atomic capture, fenced runner/dealing/legal play with explicit unknown-right waiting, and conservative procedure decisions. Increment10.9 remains unimplemented; complete-match liveness under missing knowledge is not claimed.
 
 ### Existing foundations and constraints
 
@@ -1116,6 +1116,10 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 - **Acceptance:** obsolete work cannot survive rollback, handback, writer replacement or successor adoption. Current presence stays live. Failed successor preparation preserves the old runner; successful handoff retires it. No knowledge leaks across branches or games.
 - **Required tests:** rollback to null, nested timer remainder, abandoned-future knowledge exclusion, fresh-process recovery, storage faults, multiple absences and no-human suspension/resume.
 - **Risks:** old epoch reuse, cross-game memory leakage and accidental human-command suppression by bot-specific fences.
+- **Status: verified by integration tests only; no production defect confirmed or production code changed.** Added installed-runner coverage for rollback-to-null/current live presence/abandoned trump exclusion, nested timer remainder across multiple absences and no-human resume, fresh Node-process real host recovery, and failed/successful successor lifetimes. Existing autonomous storage-fault cleanup/handback tests remain part of the full gate. New child host restores durable receipts, starts paused without humans and action-free baseline, then responds exactly once after authenticated human attachment. Successor tests bind new-game memory and observe real runner drawing; trusted finishing is only a lifecycle precondition, never10.9 match evidence.
+- **Verification:** worker focused51 and PostgreSQL host32 pass. Parent normal `npm run check`: **518 pass/nine explicit DB skips**. Final database-enabled `npm run check`: **717 pass/no skips**, format/lint/types/tests/build passed. New disposable PostgreSQL18 tmpfs container `penky-lifecycle-108-test`, loopback55458, database `penky_lifecycle_test` only. No browser/manual or complete autonomous-match acceptance claimed. D010/D011 intentional waits remain unchanged.
+- **Review:** initial read-only review found two weak successor assertions (already-invalid bot admission and early pre-preparation denial). Replaced retirement evidence with ordinary dispatch requiring `closed`; strengthened denial to finished-match transactional `not-ready` admission with unchanged writer/snapshot/open rollback/absent successor and receipt, followed by rollback and real runner draw. Final independent read-only review approved with no issues; full717 gate rerun after fixes.
+- **Next:10.9 only**, Stage10 acceptance. Do not infer complete2/4/8 autonomous matches from these lifecycle fixtures; unknown-right stalls documented in10.6 remain a liveness risk. Stop after10.8.
 
 ### Increment 10.9 — Stage 10 acceptance gate
 
@@ -1130,7 +1134,7 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 
 **Dependency order:** decisions → 10.1 → 10.2 → 10.3 → 10.4 → 10.5 → 10.6 → 10.7 → 10.8 → 10.9. Suggested first increment: **10.1**, after observation-entitlement agreement and explicit authorization to begin.
 
-For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1–10.7 have subsequently been authorized and implemented; later increments retain their explicit decision gates.
+For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1–10.8 have subsequently been authorized and implemented/verified; later increments retain their explicit decision gates.
 
 ### Overall Stage 10 checklist
 

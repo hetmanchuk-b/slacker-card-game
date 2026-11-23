@@ -30,6 +30,10 @@ The runner now composes refusal with `src/bots/dealing.ts`. Policy inputs are on
 
 `src/bots/procedures.ts` maps only eligible unanswered unpaused top-level projected procedures to explicit claim abstention, withdrawal consent or penalty refusal (D012). Suspended ballots and other seats' answers never become decisions; no evidence classifier or hidden-history access is added. Runner preserves queued exact-head/lifecycle cancellation and existing dealing/play. `choosePenaltyRefusal` remains compatible. Nested clocks, FIFO and verdicts remain engine-owned. No contribution strategy, accusations, withdrawal requests or human-only replacement votes are introduced.
 
+## Runner lifecycle verification (10.8)
+
+Integration tests bind existing host-owned runners to rollback, recovery, live presence and successor lifetimes without adding production interfaces. Fresh-process recovery instantiates the real host/runner and restores only durable permitted memory. Rollback excludes abandoned-future knowledge and preserves live connections; multiple absences and no-human suspension retain timer remainder. Trusted match finishing is a successor-test precondition only, not autonomous-match evidence. Existing D010/D011 waits remain; full Stage10 acceptance stays10.9.
+
 ## Agreed implementation seams
 
 The implementation plan and approved architecture establish the test seams:

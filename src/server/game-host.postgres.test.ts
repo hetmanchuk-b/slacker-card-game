@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { Pool } from 'pg';
@@ -110,6 +113,331 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
       reporters,
     };
   }
+
+  async function replaceGuest(context: Awaited<ReturnType<typeof setup>>, pause = false) {
+    const { host, member, joined, request, clock, leaveGuest } = context;
+    await leaveGuest();
+    await clock.advanceBy(30001);
+    await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+      const branch = { branchId: runtime.read().head.branchId };
+      assert.equal(
+        (
+          await runtime.dispatch(
+            {
+              type: 'propose-bot',
+              id: id('command', randomUUID()),
+              actorId: member.seatId,
+              seatId: joined.seatId,
+            },
+            branch,
+          )
+        ).type,
+        'accepted',
+      );
+      const replacing = runtime.dispatch(
+        {
+          type: 'replacement-vote',
+          id: id('command', randomUUID()),
+          actorId: member.seatId,
+          procedureId: runtime.read().replacementVote!.timer.id,
+          vote: 'yes',
+        },
+        branch,
+      );
+      const leaving = pause
+        ? runtime.dispatch({
+            type: 'disconnect',
+            id: id('command', randomUUID()),
+            seatId: member.seatId,
+          })
+        : Promise.resolve();
+      await replacing;
+      await leaving;
+      await runtime.observe(async () => {});
+    });
+  }
+
+  await t.test(
+    'runner rollback to null keeps current presence and excludes abandoned knowledge',
+    async (t) => {
+      const context = await setup(t);
+      const { host, member, joined, request, clock, owner } = context;
+      await replaceGuest(context);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        const stale = runtime.botAdmission(joined.seatId, new AbortController().signal);
+        const old = runtime.read().head;
+        const result = await runtime.dispatch({
+          type: 'rollback',
+          id: id('command', randomUUID()),
+          actorId: member.seatId,
+          expected: old,
+          beforeCommandId: request.id,
+          knowledgeWarningAcknowledged: true,
+        });
+        assert.equal(result.type, 'accepted');
+        await runtime.observe(async () => {});
+        await runtime.dispatch({
+          type: 'disconnect',
+          id: id('command', randomUUID()),
+          seatId: member.seatId,
+        });
+        assert.equal(runtime.read().state, null);
+        assert.notEqual(runtime.read().head.branchId, old.branchId);
+        assert.equal(
+          runtime.read().connections.find((p) => p.seatId === joined.seatId)!.controller,
+          'bot',
+        );
+        assert.equal(
+          runtime.read().connections.find((p) => p.seatId === member.seatId)!.connected,
+          false,
+        );
+        assert.throws(() => runtime.readBotMemory(joined.seatId), /Invalid bot seat/);
+        await assert.rejects(
+          runtime.dispatch(
+            { type: 'draw-card', id: id('command', randomUUID()), actorId: joined.seatId },
+            stale,
+          ),
+          RuntimeAdmissionError,
+        );
+      });
+      await host.attach(await access.membership(owner.token, member.lobbyId, clock.now()));
+      await host.recover(member.lobbyId);
+      const current = (await host.read(member.lobbyId))!.snapshot;
+      assert.equal(current.state, null);
+      assert.equal(current.connections.find((p) => p.seatId === member.seatId)!.connected, true);
+      assert.equal(current.connections.find((p) => p.seatId === joined.seatId)!.controller, 'bot');
+    },
+  );
+
+  await t.test(
+    'runner rollback before reveal forgets abandoned trump and preserves live absence',
+    async (t) => {
+      const context = await setup(t);
+      const { host, member, joined, request, clock } = context;
+      let finalDraw = id('command', randomUUID());
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        for (let i = 0; i < 36; i++) {
+          const phase = runtime.read().state!.phase;
+          if (phase.type !== 'dealing') assert.fail();
+          finalDraw = id('command', randomUUID());
+          await runtime.dispatch({ type: 'draw-card', id: finalDraw, actorId: phase.nextSeatId });
+        }
+        assert.notEqual(runtime.readBotMemory(joined.seatId).trump, null);
+      });
+      await replaceGuest(context);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        assert.equal(
+          (
+            await runtime.dispatch({
+              type: 'rollback',
+              id: id('command', randomUUID()),
+              actorId: member.seatId,
+              expected: runtime.read().head,
+              beforeCommandId: finalDraw,
+              knowledgeWarningAcknowledged: true,
+            })
+          ).type,
+          'accepted',
+        );
+        await runtime.observe(async () => {});
+        await runtime.dispatch({
+          type: 'disconnect',
+          id: id('command', randomUUID()),
+          seatId: member.seatId,
+        });
+        assert.equal(runtime.read().paused, true);
+        assert.equal(runtime.read().state!.phase.type, 'dealing');
+        assert.equal(runtime.read().state!.deck.length, 1);
+        assert.equal(runtime.readBotMemory(joined.seatId).trump, null);
+        assert.equal(runtime.readBotMemory(member.seatId).trump, null);
+        assert.equal(
+          runtime.read().connections.find((p) => p.seatId === joined.seatId)!.controller,
+          'bot',
+        );
+      });
+      await clock.advanceBy(20000);
+      await host.recover(member.lobbyId);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        assert.equal(runtime.read().state!.deck.length, 1);
+        assert.equal(runtime.readBotMemory(joined.seatId).trump, null);
+      });
+    },
+  );
+
+  await t.test(
+    'fresh Node host restores a paused bot and resumes a pending ballot exactly once',
+    async (t) => {
+      const context = await setup(t);
+      const { host, member, joined, request, clock, leaveOwner, owner } = context;
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        assert.equal(
+          (
+            await runtime.dispatch({
+              type: 'submit-claim',
+              id: id('command', randomUUID()),
+              actorId: joined.seatId,
+              accusedId: member.seatId,
+              reason: 'pending across process',
+              incident: { type: 'spoken', key: 'fresh-process' },
+              scope: 'dealing',
+              scopeNumber: 0,
+            })
+          ).type,
+          'accepted',
+        );
+      });
+      await replaceGuest(context, true);
+      await leaveOwner();
+      await host.close();
+      const { stdout } = await promisify(execFile)(
+        process.execPath,
+        [fileURLToPath(new URL('./testing/recover-host-process.ts', import.meta.url))],
+        {
+          env: {
+            ...process.env,
+            PENKY_RECOVERY_LOBBY_ID: member.lobbyId,
+            PENKY_RECOVERY_TOKEN: owner.token,
+            PENKY_RECOVERY_NOW: String(clock.now()),
+          },
+          timeout: 15000,
+        },
+      );
+      const result = JSON.parse(stdout) as {
+        replies: number;
+        vote: string;
+        paused: boolean;
+        trump: unknown;
+      };
+      assert.deepEqual(result, { replies: 1, vote: 'abstain', paused: false, trump: null });
+    },
+  );
+
+  await t.test(
+    'late successor not-ready refusal preserves the writer and runner through rollback to dealing',
+    async (t) => {
+      const context = await setup(t);
+      const { host, member, joined, request, owner, guest, clock } = context;
+      const firstDraw = id('command', randomUUID());
+      const originalRuntime = await host.withCurrent(
+        member.lobbyId,
+        request.gameId,
+        async (runtime) => {
+          // Trusted finishing is only a lifecycle precondition, not autonomous-match evidence.
+          for (let index = 0; index < 36; index++) {
+            const phase = runtime.read().state!.phase;
+            if (phase.type !== 'dealing') assert.fail();
+            assert.equal(
+              (
+                await runtime.dispatch({
+                  type: 'draw-card',
+                  id: index === 0 ? firstDraw : id('command', randomUUID()),
+                  actorId: phase.nextSeatId,
+                })
+              ).type,
+              'accepted',
+            );
+          }
+          await clock.advanceBy(10000);
+          await finishMatch(runtime);
+          return runtime;
+        },
+      );
+      const before = (await host.read(member.lobbyId))!;
+      assert.equal(before.snapshot.state!.phase.type, 'finished');
+      const consent = await access.lobbyState(owner.token, member.lobbyId, clock.now());
+      for (const grant of [owner, guest])
+        await access.setAcceptance(
+          grant.token,
+          member.lobbyId,
+          consent.revision,
+          true,
+          clock.now(),
+        );
+      const next = {
+        ...request,
+        id: id('command', randomUUID()),
+        expectedGameId: request.gameId,
+        expectedHead: before.snapshot.head,
+        gameId: id('game', randomUUID()),
+        branchId: id('branch', randomUUID()),
+      };
+      const startSuccessor = PostgresSession.prototype.startSuccessor;
+      const prepared = t.mock.method(
+        PostgresSession.prototype,
+        'startSuccessor',
+        async function (this: PostgresSession, ...args: Parameters<typeof startSuccessor>) {
+          // This seam is reached only after private successor preparation and queued
+          // handoff admission. Withdraw acceptance before the final transactional gate.
+          await access.setAcceptance(
+            guest.token,
+            member.lobbyId,
+            consent.revision,
+            false,
+            clock.now(),
+          );
+          return Reflect.apply(startSuccessor, this, args);
+        },
+      );
+      try {
+        assert.deepEqual(await host.startMatch(member.lobbyId, next), {
+          type: 'rejected',
+          code: 'not-ready',
+        });
+        assert.equal(prepared.mock.callCount(), 1);
+      } finally {
+        prepared.mock.restore();
+      }
+      const after = (await host.read(member.lobbyId))!;
+      assert.equal(after.epoch, before.epoch);
+      assert.deepEqual(after.snapshot, before.snapshot);
+      assert.equal(
+        await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => runtime),
+        originalRuntime,
+      );
+      assert.equal(
+        await host.observeHistory(member.lobbyId, request.gameId, async (c) => c.closedRollback),
+        false,
+      );
+      assert.equal(
+        (await pool.query('SELECT 1 FROM penky_game_heads WHERE game_id=$1', [next.gameId]))
+          .rowCount,
+        0,
+      );
+      assert.equal(
+        await (await PostgresLobby.open(pool, member.lobbyId)).startReceipt(next.id),
+        null,
+      );
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        assert.equal(
+          (
+            await runtime.dispatch({
+              type: 'rollback',
+              id: id('command', randomUUID()),
+              actorId: member.seatId,
+              expected: runtime.read().head,
+              beforeCommandId: firstDraw,
+              knowledgeWarningAcknowledged: true,
+            })
+          ).type,
+          'accepted',
+        );
+        assert.equal(runtime.read().state!.phase.type, 'dealing');
+        assert.equal(runtime.read().state!.deck.length, 36);
+      });
+      await replaceGuest(context);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        assert.equal(runtime, originalRuntime);
+        await runtime.observe(async () => {});
+        const draws = (await runtime.checkpoint()).receipts.filter(
+          (r) => r.controller === 'bot' && r.command.type === 'draw-card',
+        );
+        assert.equal(draws.length, 1);
+        assert.equal(runtime.read().state!.deck.length, 35);
+        assert.equal(runtime.readBotMemory(joined.seatId).gameId, request.gameId);
+      });
+      assert.equal((await host.read(member.lobbyId))!.epoch, before.epoch);
+    },
+  );
 
   await t.test(
     'live dealing runner commits one draw and recovers permitted seat knowledge',
@@ -1215,7 +1543,13 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   await t.test(
     'atomic successor is adopted without another lease; old routing and stale bindings fail',
     async (t) => {
-      const { host, clock, member, request, guest, owner } = await setup(t);
+      const context = await setup(t);
+      const { host, clock, member, request, guest, owner, joined } = context;
+      const oldRuntime = await host.withCurrent(
+        member.lobbyId,
+        request.gameId,
+        async (runtime) => runtime,
+      );
       await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
         for (let index = 0; index < 36; index++) {
           const phase = runtime.read().state!.phase;
@@ -1273,6 +1607,19 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
       );
       const restored = (await host.read(member.lobbyId))!;
       assert.notEqual(restored.epoch, old.epoch);
+      await assert.rejects(
+        oldRuntime.dispatch({
+          type: 'draw-card',
+          id: id('command', randomUUID()),
+          actorId: joined.seatId,
+        }),
+        /Runtime is faulted/,
+      );
+      const retiringRuntime = await host.withCurrent(
+        member.lobbyId,
+        request.gameId,
+        async (runtime) => runtime,
+      );
       const retry = { ...next, expectedHead: restored.snapshot.head };
       assert.equal((await host.startMatch(member.lobbyId, retry)).type, 'started');
       const current = (await host.read(member.lobbyId))!;
@@ -1286,6 +1633,62 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
       await assert.rejects(host.attach(stale), { message: 'wrong-game' });
       assert.equal((await host.startMatch(member.lobbyId, retry)).type, 'duplicate');
       assert.equal(current.snapshot.connections.length, 3);
+      const retired = await retiringRuntime.dispatch({
+        type: 'draw-card',
+        id: id('command', randomUUID()),
+        actorId: joined.seatId,
+      });
+      assert.equal(retired.type, 'rejected');
+      if (retired.type === 'rejected') assert.equal(retired.code, 'closed');
+      await host.withCurrent(member.lobbyId, next.gameId, async (runtime) => {
+        for (const seatId of next.seatIds) {
+          const memory = runtime.readBotMemory(seatId);
+          assert.equal(memory.gameId, next.gameId);
+          assert.equal(memory.trump, null);
+          assert.equal(memory.opening, null);
+        }
+      });
+      await replaceGuest({ ...context, request: next });
+      await host.withCurrent(member.lobbyId, next.gameId, async (runtime) => {
+        await runtime.dispatch({
+          type: 'replacement-vote',
+          id: id('command', randomUUID()),
+          actorId: newBinding.seatId,
+          procedureId: runtime.read().replacementVote!.timer.id,
+          vote: 'yes',
+        });
+      });
+      await host.withCurrent(member.lobbyId, next.gameId, async (runtime) => {
+        assert.equal(
+          runtime.read().connections.find((p) => p.seatId === joined.seatId)!.controller,
+          'bot',
+        );
+        for (let i = 0; i < 3; i++) {
+          await runtime.observe(async () => {});
+          if (
+            (await runtime.checkpoint()).receipts.some(
+              (r) => r.controller === 'bot' && r.command.type === 'draw-card',
+            )
+          )
+            break;
+          const phase = runtime.read().state!.phase;
+          if (phase.type !== 'dealing') assert.fail();
+          assert.notEqual(phase.nextSeatId, joined.seatId);
+          await runtime.dispatch({
+            type: 'draw-card',
+            id: id('command', randomUUID()),
+            actorId: phase.nextSeatId,
+          });
+        }
+        assert.equal(
+          (await runtime.checkpoint()).receipts.filter(
+            (r) => r.controller === 'bot' && r.command.type === 'draw-card',
+          ).length,
+          1,
+        );
+        assert.ok(runtime.read().state!.deck.length < 36);
+      });
+
       await leaveNewcomer();
       assert.equal((await host.read(member.lobbyId))!.snapshot.paused, true);
     },

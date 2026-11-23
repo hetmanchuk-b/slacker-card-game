@@ -317,3 +317,85 @@ test('multiple bots including claimant abstain once despite exact-head cancellat
     await runtime.dispose();
   }
 });
+
+test('runner rollback restores nested remainder but not historical presence through multiple absences', async () => {
+  const { runtime, seats, clock, options, replace } = await setup();
+  let stop = () => {};
+  try {
+    await replace(seats[2]!);
+    await clock.advanceBy(2000);
+    await runtime.dispatch({
+      type: 'request-withdrawal',
+      id: options.nextCommandId(),
+      actorId: seats[0]!,
+      claimId: runtime.read().state!.claims[0]!.claim.id,
+    });
+    stop = await startBotRunner(runtime, options.nextCommandId);
+    await drain(runtime);
+    await clock.advanceBy(1000);
+    const beforeResponse = options.nextCommandId();
+    await runtime.dispatch({
+      type: 'withdrawal-response',
+      id: beforeResponse,
+      actorId: seats[1]!,
+      procedureId: runtime.read().state!.procedure!.timer.id,
+      approve: false,
+    });
+    await drain(runtime);
+    const stale = runtime.botAdmission(seats[2]!, new AbortController().signal);
+    for (const seatId of [seats[1]!, seats[3]!])
+      await runtime.dispatch({ type: 'disconnect', id: options.nextCommandId(), seatId });
+    await runtime.dispatch({
+      type: 'rollback',
+      id: options.nextCommandId(),
+      actorId: seats[0]!,
+      expected: runtime.read().head,
+      beforeCommandId: beforeResponse,
+      knowledgeWarningAcknowledged: true,
+    });
+    await drain(runtime);
+    const readTimers = () => {
+      const procedure = observeBotCurrent(runtime.read(), seats[2]!, clock.now()).procedure;
+      if (procedure?.type !== 'withdrawal' || !procedure.suspendedVote) assert.fail();
+      return [procedure.timer.remainingMs, procedure.suspendedVote.timer.remainingMs];
+    };
+    assert.deepEqual(readTimers(), [9000, 8000]);
+    assert.equal(runtime.read().paused, true);
+    assert.equal(runtime.read().connections[2]!.controller, 'bot');
+    const count = (await runtime.checkpoint()).receipts.length;
+    await clock.advanceBy(60000);
+    await drain(runtime);
+    assert.deepEqual(readTimers(), [9000, 8000]);
+    assert.equal((await runtime.checkpoint()).receipts.length, count);
+    await runtime.dispatch({ type: 'reconnect', id: options.nextCommandId(), seatId: seats[1]! });
+    assert.equal(runtime.read().paused, true);
+    await runtime.dispatch({ type: 'disconnect', id: options.nextCommandId(), seatId: seats[0]! });
+    await runtime.dispatch({ type: 'disconnect', id: options.nextCommandId(), seatId: seats[1]! });
+    await clock.advanceBy(60000);
+    assert.deepEqual(readTimers(), [9000, 8000]);
+    for (const seatId of [seats[0]!, seats[1]!, seats[3]!])
+      await runtime.dispatch({ type: 'reconnect', id: options.nextCommandId(), seatId });
+    await drain(runtime);
+    assert.equal(runtime.read().paused, false);
+    assert.deepEqual(readTimers(), [9000, 8000]);
+    const procedureId = runtime.read().state!.procedure!.timer.id;
+    await assert.rejects(
+      runtime.dispatch(
+        {
+          type: 'withdrawal-response',
+          id: options.nextCommandId(),
+          actorId: seats[2]!,
+          procedureId,
+          approve: true,
+        },
+        stale,
+      ),
+      RuntimeAdmissionError,
+    );
+    await clock.advanceBy(1000);
+    assert.deepEqual(readTimers(), [8000, 8000]);
+  } finally {
+    stop();
+    await runtime.dispose();
+  }
+});

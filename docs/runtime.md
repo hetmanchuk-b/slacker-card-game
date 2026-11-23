@@ -28,6 +28,12 @@ The payload stores current per-seat memories and at most256 FIFO pre-command kno
 
 Memory lives only in server-private checkpoints, not generic runtime snapshots, publications or network projections. The host's existing checkpoint restoration and atomic successor handoff carry it without a new writer or SQL table. `src/runtime/memory.test.ts`, `src/bots/memory-storage.test.ts` and `src/persistence/bot-memory.test.ts` cover the boundary. Runtime instances without `commit` remain memory-only, not crash durable.
 
+## Conservative legal round play — Stage 10.6
+
+`chooseRoundPlay(view, memory)` receives only permitted own-seat current observations and committed memory at the same game/seat/branch/head. On its own turn, an active bot leads the first hand card, beats with the first card for which `canBeat` is proven, or picks the bottom with a nonempty hand. Unknown trump means comparison under every allowed trump, not known no-trump. With an empty hand it opens only a positively remembered current-round entitlement; unknown rights wait even indefinitely (D011), with no peek/probe or bypass pickup. The server alone normalizes automatic empty-hand pickups and fixed N. No voluntary out-of-turn opening, strategy search or social-policy expansion is added.
+
+All four deterministic2/4/5/8-seat runtime match fixtures reached approved unknown-right waits, not complete matches. Engine/projector scenarios separately verify repetition completion and preserved/consumed rights. The runner retains10.4 admission/lifecycle fences and10.5 dealing. This safety slice does not establish complete-match liveness under missing knowledge.
+
 ## Committed seat memory and dealing — Stage 10.5
 
 `readBotMemory(seatId)` returns detached knowledge for one existing seat from the same successfully persisted publication as `read()`. Draft memory is not visible during blocked commits; failed runtimes reject reads. This is a trusted server seam, not a network endpoint or a whole-checkpoint policy input. It rejects closed runtimes and invalid/null-state seat bindings.
@@ -38,7 +44,7 @@ Memory lives only in server-private checkpoints, not generic runtime snapshots, 
 
 `botAdmission(seatId, signal)` captures this live runtime's exact head, committed publication sequence and process-local controller tenure, returning ordinary bot dispatch options. Its guard runs inside serialized admission before receipt lookup. Cancellation, retirement, pause, changed head/control publication or bot→human→bot tenure rejects stale work without faulting the runtime. Runtime-instance ownership fences recovery/writer replacement; host-owned runner disposal fences lifecycle retirement. These fences are process-local, never persisted or applied to ordinary human commands. Once admitted, the existing atomic action drains even if cancellation arrives later.
 
-`src/bots/runner.ts` subscribes to committed notices and passes only detached seat projections to `choosePenaltyRefusal`. Eligible unanswered unpaused bot penalty contributions are explicitly refused;10.5 separately adds legal dealing as described above. The runner never submits timeout commands, plays cards, votes or accuses. Each new publication cancels unadmitted decisions and reconsiders from fresh observations; duplicate publications are ignored. Stop cancels pending tokens and unsubscribes. No-human suspension remains authoritative. Tests in `src/bots/runner.test.ts` cover stale work, exact-head and tenure fences, handback/ABA, cancellation, pause and already-admitted completion.
+`src/bots/runner.ts` subscribes to committed notices and passes only detached seat projections to `choosePenaltyRefusal`. Eligible unanswered unpaused bot penalty contributions are explicitly refused;10.5 separately adds legal dealing as described above. The runner never submits timeout commands, votes or accuses;10.6 separately adds conservative legal round play. Each new publication cancels unadmitted decisions and reconsiders from fresh observations; duplicate publications are ignored. Stop cancels pending tokens and unsubscribes. No-human suspension remains authoritative. Tests in `src/bots/runner.test.ts` cover stale work, exact-head and tenure fences, handback/ABA, cancellation, pause and already-admitted completion.
 
 ## Optional authenticated queue admission — Stage 8.9
 

@@ -996,7 +996,7 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 
 **Depends on:** Stages 8–9; replacement orchestration is implemented in Stage 6.
 
-**Status: 10.1–10.5 implemented; verification recorded below.** D006–D010 approve seat entitlement, branch-scoped atomic memory, refusal runner, bot-only exact-head admission and legal dealing with wait-on-unknown fallback. Increments10.6–10.9 remain unimplemented; further policies retain their scoped decision gates.
+**Status: 10.1–10.6 implemented; verification recorded below.** D006–D011 approve constrained memory, atomic capture, runner/dealing and conservative legal play with explicit unknown-right waiting. Increments10.7–10.9 remain unimplemented; further policies retain their scoped decision gates.
 
 ### Existing foundations and constraints
 
@@ -1089,6 +1089,11 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 - **Acceptance:** use own cards, public table and approved memory only. Respect spade isolation, six-over-ace and one-use opening rights. Unknown trump permits only provably legal choices and is not treated as no-trump. Preserve fixed N and authoritative automatic consequences.
 - **Required tests:** approved round/stump scenarios, empty hands, automatic pickups, preserved/consumed rights, interrupted turns, penalty-restored hands and repetition completion.
 - **Risks:** inferred rights, mistaking intermediate events for settled state and unnecessary strategy complexity.
+- **Status: verified within D011's approved conservative safety scope.** `src/bots/play.ts` chooses the first permitted lead/beat, otherwise legal bottom pickup with a nonempty hand. Unknown trump requires `canBeat` to hold for every allowed trump (including no-trump). Empty hands open only on own turn with positively remembered current-round entitlement; unknown rights wait, potentially indefinitely, without probing or bypass pickup. Empty turns without entitlement remain engine-normalized. Runner preserves existing dealing/refusal, committed seat-memory inputs and exact-head/cancellation fences. No memory proof expansion, hidden rights/trump hint, social policy or strategy search added.
+- **Coverage:**16 added policy/runtime cases in `play.test.ts`/`runner-play.test.ts` cover spades/six-over-ace/unknown trump, mandatory consumed/preserved rights, penalty-restored hands, interrupted turn, fixed N, automatic pickups, repetition and2/4/5/8-seat deterministic runtime traces. All four runtime match fixtures reached approved unknown-right waits; they are NOT complete matches. Repetition completion is separately engine/projector-tested. One real PostgreSQL host integration verifies live lead, durable receipt, recovery without repeated play and human handback.
+- **Verification:** worker59 bot cases and27 PostgreSQL host cases passed. Parent normal `npm run check`: **510 pass/nine explicit DB skips**. Final database-enabled `npm run check`: **704 pass/no skips**, including format/lint/types/tests/build. New disposable PostgreSQL18 tmpfs container `penky-play-106-test`, loopback55456, database `penky_play_test` only. Independent read-only review found no issues. No browser/manual or complete autonomous-match acceptance claimed.
+- **Failure history:** first parent database gate failed the existing corrupt-recovery host cleanup assertion (backend count1 versus0); isolated host27/27 and fresh final full704/no skips passed without source/assertion changes to that test. Docker Desktop initially was stopped; started before creating the disposable target. Earlier investigation paused before production edits for explicit D011 approval; discarded draft tests had not run.
+- **Next:10.7 only**, requiring explicit claim-ballot and withdrawal policy approval. Complete autonomous-match liveness with unknown rights remains unverified; no private knowledge fallback is authorized.
 
 ### Increment 10.7 — Remaining procedure behavior
 
@@ -1121,7 +1126,7 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 
 **Dependency order:** decisions → 10.1 → 10.2 → 10.3 → 10.4 → 10.5 → 10.6 → 10.7 → 10.8 → 10.9. Suggested first increment: **10.1**, after observation-entitlement agreement and explicit authorization to begin.
 
-For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1–10.5 have subsequently been authorized and implemented; later increments retain their explicit decision gates.
+For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1–10.6 have subsequently been authorized and implemented; later increments retain their explicit decision gates.
 
 ### Overall Stage 10 checklist
 

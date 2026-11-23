@@ -1,5 +1,9 @@
 # Open decisions discovered during implementation
 
+## D011 — Conservative legal play and unknown opening rights (10.6)
+
+**Status:** operator approved waiting when permitted memory cannot prove an opening right, even indefinitely. A bot opens only on its own turn with an empty hand and a positively remembered right for the current round. Unknown rights must never be guessed, probed by a punishable peek or bypassed by a potentially forbidden pickup. Legal hand play continues independently. Unknown trump permits only beats legal for every possible trump, not treating unknown as known no-trump. This slice adds simple leads/beats/pickups and mandatory proven openings, not strategy search, voluntary out-of-turn opening or new social policy. Existing conservative memory is not expanded using authoritative rights or private-history reconstruction. Complete-match liveness with missing knowledge remains explicitly unproven.
+
 ## D010 — Legal dealing and unknown-order fallback (10.5)
 
 **Status:** operator approved drawing only from the seat's private initial notice or remembered successful clockwise draws. If that knowledge is missing, wait without drawing until a fresh permitted observation establishes the order, even if dealing temporarily stalls. Never consult authoritative dealing order, infer card faces from opaque handles, reconstruct missed trump reveals or submit timer-expiry commands. Remember only legitimately permitted reveals, with unknown distinct from known no-trump. Wait through procedures, suspension and final reveal. This authorizes dealing/reveal integration only, not round-play or additional social policy.

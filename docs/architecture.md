@@ -22,6 +22,10 @@ The host owns a runner subscription for each installed live writer and stops it 
 
 The runner now composes refusal with `src/bots/dealing.ts`. Policy inputs are only seat-projected current observations and detached committed own-seat memory. Runtime installs the readable memory copy only after persistence with its published snapshot, preventing draft disclosure during blocked/failed commits. Draws require the private initial notice or remembered successful clockwise draws at the exact head. Missing order waits (D010), including legacy recovery; no authoritative dealing-order/trump lookup is allowed. Existing projected reveal capture supplies legitimate trump memory; pause/procedures/reveal block draws. No round play, permanent recipient hint, expiry command or broader social policy is added.
 
+## Conservative legal play (10.6)
+
+`src/bots/play.ts` uses only committed own-seat permitted views/memory. It chooses first legal leads/beats or a bottom pickup with nonempty hand, reusing `canBeat`. Unknown trump requires legality under every allowed trump. Mandatory own-turn stump opening requires a positively remembered right; unknown rights wait indefinitely if necessary (D011), never probing authoritative legality. Engine automatic consequences and fixed N remain authoritative. Runner admission/handback/fault fences are reused unchanged. No memory proof expansion or social policy is added. Four deterministic runtime match fixtures stall at approved unknown-right boundaries; complete autonomous-match acceptance remains deferred.
+
 ## Agreed implementation seams
 
 The implementation plan and approved architecture establish the test seams:

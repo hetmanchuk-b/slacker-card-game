@@ -156,6 +156,66 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   );
 
   await t.test(
+    'live play runner commits a legal lead, recovers without replay and hands back',
+    async (t) => {
+      const { host, clock, member, joined, request, leaveOwner, owner } = await setup(t);
+      await leaveOwner();
+      await clock.advanceBy(30001);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        await runtime.dispatch({
+          type: 'propose-bot',
+          id: id('command', randomUUID()),
+          actorId: joined.seatId,
+          seatId: member.seatId,
+        });
+        await runtime.dispatch({
+          type: 'replacement-vote',
+          id: id('command', randomUUID()),
+          actorId: joined.seatId,
+          procedureId: runtime.read().replacementVote!.timer.id,
+          vote: 'yes',
+        });
+        for (let i = 0; i < 18; i++) {
+          await runtime.dispatch({
+            type: 'draw-card',
+            id: id('command', randomUUID()),
+            actorId: joined.seatId,
+          });
+          await runtime.observe(async () => {});
+        }
+        assert.equal(runtime.read().state!.phase.type, 'trump-reveal');
+      });
+      await clock.advanceBy(10000);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        await runtime.observe(async () => {});
+        const plays = (await runtime.checkpoint()).receipts.filter(
+          (r) => r.controller === 'bot' && r.command.type === 'play-card',
+        );
+        assert.equal(plays.length, 1);
+        assert.equal(runtime.read().state!.table.length, 1);
+        assert.equal(runtime.read().state!.procedure, null);
+      });
+      await host.recover(member.lobbyId);
+      const binding = await access.membership(owner.token, member.lobbyId, clock.now());
+      await host.attach(binding);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        await runtime.observe(async () => {});
+        assert.equal(
+          (await runtime.checkpoint()).receipts.filter(
+            (r) => r.controller === 'bot' && r.command.type === 'play-card',
+          ).length,
+          1,
+        );
+        assert.equal(runtime.read().state!.table.length, 1);
+        assert.equal(
+          runtime.read().connections.find((p) => p.seatId === member.seatId)!.controller,
+          'human',
+        );
+      });
+    },
+  );
+
+  await t.test(
     'live runner replaces an absent seat, refuses once, recovers and returns human control',
     async (t) => {
       const { host, clock, member, joined, request, leaveGuest, guest } = await setup(t);

@@ -3,6 +3,7 @@ import { RuntimeAdmissionError } from '../runtime/runtime.ts';
 import type { GameRuntime } from '../runtime/runtime.ts';
 import { observeBotCurrent } from './observation.ts';
 import { chooseDealingDraw } from './dealing.ts';
+import { chooseRoundPlay } from './play.ts';
 import type { BotCurrentObservation } from './observation.ts';
 
 /** Explicit refusal, never a timeout or contribution. */
@@ -47,7 +48,11 @@ export async function startBotRunner(
         const draw =
           view.state?.phase.type === 'dealing' &&
           chooseDealingDraw(view, runtime.readBotMemory(seatId));
-        if (procedureId === null && !draw) continue;
+        const play =
+          view.state?.phase.type === 'round' || view.state?.phase.type === 'between-rounds'
+            ? chooseRoundPlay(view, runtime.readBotMemory(seatId))
+            : null;
+        if (procedureId === null && !draw && play === null) continue;
         const token = new AbortController();
         pending.push(token);
         const admission = runtime.botAdmission(seatId, token.signal);
@@ -61,7 +66,11 @@ export async function startBotRunner(
                   procedureId,
                   cardId: null,
                 }
-              : { type: 'draw-card', id: nextCommandId(), actorId: seatId },
+              : {
+                  ...(play ?? { type: 'draw-card' as const }),
+                  id: nextCommandId(),
+                  actorId: seatId,
+                },
             admission,
           )
           .catch((error: unknown) => {

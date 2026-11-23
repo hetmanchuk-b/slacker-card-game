@@ -57,16 +57,23 @@ export function rememberBotObservation(
         : null;
   const phaseKey = `${phase.type}:${round ?? ''}`;
   if (!same && phase.type === 'between-rounds' && memory.phase !== phaseKey) {
-    // Only the observable empty-hand boundary establishes entitlement. If an
-    // intermediate boundary was missed, do not infer rights from later hands.
+    // Final own counts prove eligibility at this exact boundary: plays/pickups
+    // cannot consume the new right. Transfers involving this seat and openings
+    // are projected and excluded; omitted other-seat transfers do not affect it.
     const exactBoundary =
       adjacent &&
-      memory.phase === `round:${phase.nextRoundNumber - 1}` &&
+      (memory.phase === `round:${phase.nextRoundNumber - 1}` ||
+        memory.phase === `between-rounds:${phase.nextRoundNumber - 1}`) &&
       action &&
       action.observations.length > 0 &&
-      action.observations.every((item) => item.type === 'card-played');
+      action.observations.every(
+        (item) => item.type === 'card-played' || item.type === 'bottom-taken',
+      );
     opening =
-      exactBoundary && state.own.hand.length === 0 && state.own.stumps.length > 0
+      exactBoundary &&
+      state.players.some((player) => player.id === memory.seatId && player.status === 'active') &&
+      state.own.hand.length === 0 &&
+      state.own.stumps.length > 0
         ? { head, round: phase.nextRoundNumber, available: true }
         : null;
   }

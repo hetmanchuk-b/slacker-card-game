@@ -8,7 +8,7 @@ import { fixture } from '../runtime/testing/fixtures.ts';
 import { observeBotAction, observeBotCurrent } from './observation.ts';
 import { createBotMemory, rememberBotObservation } from './memory.ts';
 
-test('engine/projector composition grants only the observable play-only boundary', async () => {
+test('engine/projector composition grants the play-only boundary but excludes own transfers', async () => {
   const { options } = fixture('vote');
   const runtime = await GameRuntime.create(options);
   try {
@@ -55,10 +55,10 @@ test('engine/projector composition grants only the observable play-only boundary
         observations: [
           ...action.observations,
           {
-            type: 'bottom-taken',
-            seatId: seat(0),
+            type: 'penalty-transfer',
+            fromSeatId: seat(1),
+            toSeatId: seat(0),
             card: current.state!.own!.hand[0] ?? { id: id('card', 'public'), face: heart(6) },
-            automatic: true,
           },
         ],
       }).opening,

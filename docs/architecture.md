@@ -34,6 +34,12 @@ The runner now composes refusal with `src/bots/dealing.ts`. Policy inputs are on
 
 Integration tests bind existing host-owned runners to rollback, recovery, live presence and successor lifetimes without adding production interfaces. Fresh-process recovery instantiates the real host/runner and restores only durable permitted memory. Rollback excludes abandoned-future knowledge and preserves live connections; multiple absences and no-human suspension retain timer remainder. Trusted match finishing is a successor-test precondition only, not autonomous-match evidence. Existing D010/D011 waits remain; full Stage10 acceptance stays10.9.
 
+## Exact play/pickup opening proof (D013 prerequisite to10.9)
+
+D013 supersedes the earlier simple-play-only knowledge ceiling, not the unknown-waiting policy. The reducer may learn a right at an exact fresh adjacent `round:n`/`between-rounds:n` → `between-rounds:n+1` action with nonempty play/pickup-only projected observations and an active empty-handed own seat with stumps. Final own counts establish the grant because the boundary ends automatic round movement and no suffix can consume/change the new right. Unrelated private transfers may be omitted; the proof does not require a globally event-free hidden suffix. Own transfer/opening/violation observations disqualify it. Gaps, missing/empty captures, same-head repair and unproven transitions remain unknown. No interface/schema/private authority hint changes.
+
+Real engine/projector tests cover manual/automatic/compound boundaries and negative contexts. Existing policy-loop traces now finish but are not installed-runner acceptance. Recovery can still break continuity conservatively; Stage10.9 remains open.
+
 ## Agreed implementation seams
 
 The implementation plan and approved architecture establish the test seams:

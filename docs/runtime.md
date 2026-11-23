@@ -28,6 +28,12 @@ The payload stores current per-seat memories and at most256 FIFO pre-command kno
 
 Memory lives only in server-private checkpoints, not generic runtime snapshots, publications or network projections. The host's existing checkpoint restoration and atomic successor handoff carry it without a new writer or SQL table. `src/runtime/memory.test.ts`, `src/bots/memory-storage.test.ts` and `src/persistence/bot-memory.test.ts` cover the boundary. Runtime instances without `commit` remain memory-only, not crash durable.
 
+## Exact opening-boundary memory — D013 prerequisite
+
+D013 amends the original10.2/10.6 play-only proof: a fresh contiguous numeric boundary from `round:n` or `between-rounds:n` to `between-rounds:n+1`, with nonempty play/pickup-only seat observations, can grant known entitlement to an active own seat with final empty hand and stumps. Own transfers/openings/violations exclude it; omitted unrelated transfers do not affect the seat's boundary counts. This does not authenticate freshness by itself: the runtime still supplies exact newly committed pairs. Missing/duplicate-redacted/gapped evidence and same-head retrospective repair remain forbidden. Recovery/rollback never replay archives to fill knowledge, and suspension may still clear continuity.
+
+The prior deterministic2/4/5/8 policy-driven runtime traces now finish, but remain human-bound policy loops, not installed-runner acceptance evidence. No runtime/checkpoint/projection contract or schema change is added; full10.9 is unverified.
+
 ## Runner lifecycle integration — Stage 10.8
 
 Cross-feature tests exercise the installed runner rather than treating assigned bot controllers as autonomous execution. Coverage combines rollback-to-null/current live presence, exact permitted knowledge exclusion after rollback, nested timer remainder with multiple absences and no-human pause/resume, fresh-process host recovery and existing autonomous storage-fault cleanup. Old writer references and new-game seat memories are checked separately; no abandoned-future observations or cross-game knowledge are used to make a bot progress.

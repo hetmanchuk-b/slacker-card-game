@@ -216,6 +216,89 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   );
 
   await t.test(
+    'live procedure runner persists explicit abstention and withdrawal consent across recovery',
+    async (t) => {
+      const { host, clock, member, joined, request, leaveGuest } = await setup(t);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        assert.equal(
+          (
+            await runtime.dispatch({
+              type: 'submit-claim',
+              id: id('command', randomUUID()),
+              actorId: joined.seatId,
+              accusedId: member.seatId,
+              reason: 'claimant becomes bot',
+              incident: { type: 'spoken', key: 'first' },
+              scope: 'dealing',
+              scopeNumber: 0,
+            })
+          ).type,
+          'accepted',
+        );
+      });
+      await leaveGuest();
+      await clock.advanceBy(30001);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        await runtime.dispatch({
+          type: 'propose-bot',
+          id: id('command', randomUUID()),
+          actorId: member.seatId,
+          seatId: joined.seatId,
+        });
+        await runtime.dispatch({
+          type: 'replacement-vote',
+          id: id('command', randomUUID()),
+          actorId: member.seatId,
+          procedureId: runtime.read().replacementVote!.timer.id,
+          vote: 'yes',
+        });
+        for (let i = 0; i < 8; i++) await runtime.observe(async () => {});
+        assert.equal(runtime.read().state!.claims[0]!.resolution, 'tied');
+        await runtime.dispatch({
+          type: 'submit-claim',
+          id: id('command', randomUUID()),
+          actorId: member.seatId,
+          accusedId: joined.seatId,
+          reason: 'accused consents',
+          incident: { type: 'chat', messageId: 'trusted-fixture-message' },
+          scope: 'dealing',
+          scopeNumber: 0,
+        });
+        await runtime.dispatch({
+          type: 'request-withdrawal',
+          id: id('command', randomUUID()),
+          actorId: member.seatId,
+          claimId: runtime.read().state!.claims[1]!.claim.id,
+        });
+        for (let i = 0; i < 8; i++) await runtime.observe(async () => {});
+        assert.equal(runtime.read().state!.claims[1]!.resolution, 'withdrawn');
+        const commands = (await runtime.checkpoint()).receipts
+          .filter((r) => r.controller === 'bot')
+          .map((r) => r.command);
+        assert.deepEqual(
+          commands
+            .filter((c) => c.type === 'cast-vote' || c.type === 'withdrawal-response')
+            .map((c) => (c.type === 'cast-vote' ? c.vote : c.approve)),
+          ['abstain', true],
+        );
+      });
+      await host.recover(member.lobbyId);
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        assert.deepEqual(
+          runtime.read().state!.claims.map((c) => c.resolution),
+          ['tied', 'withdrawn'],
+        );
+        const responses = (await runtime.checkpoint()).receipts.filter(
+          (r) =>
+            r.controller === 'bot' &&
+            (r.command.type === 'cast-vote' || r.command.type === 'withdrawal-response'),
+        );
+        assert.equal(responses.length, 2);
+      });
+    },
+  );
+
+  await t.test(
     'live runner replaces an absent seat, refuses once, recovers and returns human control',
     async (t) => {
       const { host, clock, member, joined, request, leaveGuest, guest } = await setup(t);

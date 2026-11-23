@@ -26,6 +26,10 @@ The runner now composes refusal with `src/bots/dealing.ts`. Policy inputs are on
 
 `src/bots/play.ts` uses only committed own-seat permitted views/memory. It chooses first legal leads/beats or a bottom pickup with nonempty hand, reusing `canBeat`. Unknown trump requires legality under every allowed trump. Mandatory own-turn stump opening requires a positively remembered right; unknown rights wait indefinitely if necessary (D011), never probing authoritative legality. Engine automatic consequences and fixed N remain authoritative. Runner admission/handback/fault fences are reused unchanged. No memory proof expansion or social policy is added. Four deterministic runtime match fixtures stall at approved unknown-right boundaries; complete autonomous-match acceptance remains deferred.
 
+## Conservative procedure policy (10.7)
+
+`src/bots/procedures.ts` maps only eligible unanswered unpaused top-level projected procedures to explicit claim abstention, withdrawal consent or penalty refusal (D012). Suspended ballots and other seats' answers never become decisions; no evidence classifier or hidden-history access is added. Runner preserves queued exact-head/lifecycle cancellation and existing dealing/play. `choosePenaltyRefusal` remains compatible. Nested clocks, FIFO and verdicts remain engine-owned. No contribution strategy, accusations, withdrawal requests or human-only replacement votes are introduced.
+
 ## Agreed implementation seams
 
 The implementation plan and approved architecture establish the test seams:

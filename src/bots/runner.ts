@@ -5,20 +5,12 @@ import { observeBotCurrent } from './observation.ts';
 import { chooseDealingDraw } from './dealing.ts';
 import { chooseRoundPlay } from './play.ts';
 import type { BotCurrentObservation } from './observation.ts';
+import { chooseProcedureResponse } from './procedures.ts';
 
 /** Explicit refusal, never a timeout or contribution. */
 export function choosePenaltyRefusal(view: BotCurrentObservation): ProcedureId | null {
-  const own = view.state?.own;
-  const procedure = view.procedure;
-  return own &&
-    !view.control.paused &&
-    view.control.connections.some((p) => p.seatId === own.seatId && p.controller === 'bot') &&
-    procedure?.type === 'penalty' &&
-    !procedure.timer.paused &&
-    procedure.eligibleSeatIds.includes(own.seatId) &&
-    procedure.ownResponse === null
-    ? procedure.timer.id
-    : null;
+  const response = chooseProcedureResponse(view);
+  return response?.type === 'penalty-response' ? response.procedureId : null;
 }
 
 /** Trusted live-writer adapter. Raw publications never enter the policy. */
@@ -44,7 +36,7 @@ export async function startBotRunner(
         if (presence.controller !== 'bot') continue;
         const seatId: SeatId = presence.seatId;
         const view = observeBotCurrent(publication.snapshot, seatId, publication.nowMs);
-        const procedureId = choosePenaltyRefusal(view);
+        const response = chooseProcedureResponse(view);
         const draw =
           view.state?.phase.type === 'dealing' &&
           chooseDealingDraw(view, runtime.readBotMemory(seatId));
@@ -52,19 +44,17 @@ export async function startBotRunner(
           view.state?.phase.type === 'round' || view.state?.phase.type === 'between-rounds'
             ? chooseRoundPlay(view, runtime.readBotMemory(seatId))
             : null;
-        if (procedureId === null && !draw && play === null) continue;
+        if (response === null && !draw && play === null) continue;
         const token = new AbortController();
         pending.push(token);
         const admission = runtime.botAdmission(seatId, token.signal);
         void runtime
           .dispatch(
-            procedureId !== null
+            response !== null
               ? {
-                  type: 'penalty-response',
+                  ...response,
                   id: nextCommandId(),
                   actorId: seatId,
-                  procedureId,
-                  cardId: null,
                 }
               : {
                   ...(play ?? { type: 'draw-card' as const }),

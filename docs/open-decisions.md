@@ -1,5 +1,9 @@
 # Open decisions discovered during implementation
 
+## D012 — Conservative bot procedure decisions (10.7)
+
+**Status:** operator approved explicit abstention on every eligible unanswered claim ballot, without evidence-type inference; explicit approval on every eligible unanswered withdrawal consent; and continued explicit refusal for penalty contributions, without a card-contribution strategy. Withdrawal approval is consent, not ballot abstention or silence. Bots never originate accusations, withdrawal requests or human-only replacement votes. Only the currently active eligible unanswered procedure is acted on; suspended ballots, pauses, nested timer semantics and existing stale-work fences remain authoritative. No new evidence projection or gameplay rules are authorized.
+
 ## D011 — Conservative legal play and unknown opening rights (10.6)
 
 **Status:** operator approved waiting when permitted memory cannot prove an opening right, even indefinitely. A bot opens only on its own turn with an empty hand and a positively remembered right for the current round. Unknown rights must never be guessed, probed by a punishable peek or bypassed by a potentially forbidden pickup. Legal hand play continues independently. Unknown trump permits only beats legal for every possible trump, not treating unknown as known no-trump. This slice adds simple leads/beats/pickups and mandatory proven openings, not strategy search, voluntary out-of-turn opening or new social policy. Existing conservative memory is not expanded using authoritative rights or private-history reconstruction. Complete-match liveness with missing knowledge remains explicitly unproven.

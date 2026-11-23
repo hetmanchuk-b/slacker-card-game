@@ -996,7 +996,7 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 
 **Depends on:** Stages 8–9; replacement orchestration is implemented in Stage 6.
 
-**Status: 10.1–10.6 implemented; verification recorded below.** D006–D011 approve constrained memory, atomic capture, runner/dealing and conservative legal play with explicit unknown-right waiting. Increments10.7–10.9 remain unimplemented; further policies retain their scoped decision gates.
+**Status: 10.1–10.7 implemented; verification recorded below.** D006–D012 approve constrained memory, atomic capture, fenced runner/dealing/legal play with explicit unknown-right waiting, and conservative procedure decisions. Increments10.8–10.9 remain unimplemented.
 
 ### Existing foundations and constraints
 
@@ -1013,7 +1013,7 @@ Queued-procedure presentation remains explicitly fixture-based, complemented by 
 | Observation entitlement     | Resolved: committed observations legitimately available to the seat, not confirmed network deliveries. Neither proves the human saw them. See D006.                                                                                                                                                                                                                               |
 | Rollback knowledge | Resolved in D007: restore exact previously captured permitted memory at the rollback target; missing checkpoints stay unknown. Never reconstruct abandoned-future secrets or enrich from private authoritative history. |
 | Durability and legacy games | Resolved in D008: runtime-owned memory in the existing atomic frame transaction, explicit versions with legacy unknown knowledge, exact prior checkpoint rollback, corrupt/unsupported memory fails recovery. No private-history enrichment. |
-| Claim/withdrawal policy | Current visible claims do not identify spoken/chat/action evidence. Abstaining on all claim ballots is the proposed conservative initial policy, not an approved evidence classifier. Explicitly choose withdrawal behavior; silence is not approval. Resolve before the corresponding policy slice. Replacement proposals/ballots remain human-only under current runtime rules. |
+| Claim/withdrawal policy | Resolved D012: explicitly abstain on all eligible unanswered claim ballots without evidence inference; explicitly approve eligible unanswered withdrawal consent; retain penalty refusal without contribution strategy. Never originate claims/withdrawal requests or human-only replacement votes. |
 | Unknown knowledge | D010 resolves dealing fallback: wait when order is unknown until fresh permitted observation establishes it, even if stalled. Unknown trump stays distinct from known no-trump; no authoritative next-recipient/trump shortcut. |
 
 These are approval gates, not permission to invent game rules. Add the chosen decisions to the existing decision workflow when resolved; significant interfaces and persistence changes still require explicit approval.
@@ -1103,6 +1103,10 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 - **Acceptance:** never originate spoken accusations; abstain as approved. Respond only to eligible unanswered procedures. If contribution choices are included, use only own cards and preserve last-card protection/reservations. Do not conflate withdrawal consent, claim votes and human-only replacement voting.
 - **Required tests:** claimant/accused electorates, sequential claims, abstention, withdrawal unanimity semantics, nested timers, contribution/refusal completion and stale procedure IDs.
 - **Risks:** treating unlike procedures identically or inventing evidence classification. No new claim-evidence projection is implicitly authorized.
+- **Status: verified.** `src/bots/procedures.ts` consumes only permitted current seat projections. Eligible unanswered unpaused top-level claim ballots get explicit abstention, withdrawal gets explicit true consent, penalties get explicit refusal. Suspended claim ballots are not independently acted on; strict null checks preserve answered false approvals. Existing `choosePenaltyRefusal` contract remains compatible. Runner retains exact-head/tenure/cancellation fences, dealing/play, no-human suspension and host fault cleanup. No evidence classifier/projection, contributions, accusations, withdrawal requests or replacement voting added.
+- **Coverage:** seven new policy/runtime cases in `procedures.test.ts`/`runner-procedures.test.ts` cover own-only answers, claimant/accused eligibility, explicit consent, nested pause/resume remainder, FIFO ballots, stale procedure commands, multiple bots, evidence-independent abstention and false-claim penalty refusal completion. Real PostgreSQL host integration adds consent/abstention and durable recovery without duplicate replies.
+- **Verification:** worker test-first focused31/31, PostgreSQL host28/28, types/lint/format passed. Parent normal `npm run check`: **517 pass/nine explicit DB skips**. Final database-enabled `npm run check`: **712 pass/no skips**, including format/lint/types/tests/build. New disposable PostgreSQL18 tmpfs container `penky-procedures-107-test`, loopback55457, database `penky_procedures_test` only. Docker Desktop started before target creation. Independent read-only review found no issues. No browser/manual or full autonomous-match acceptance claimed; approved unknown-order/right waits remain.
+- **Next:10.8 only**, lifecycle/rollback/successor cross-feature verification. Stop after10.7; complete-match liveness remains for10.9 and is not implied here.
 
 ### Increment 10.8 — Lifecycle, rollback and successor integration
 
@@ -1126,7 +1130,7 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 
 **Dependency order:** decisions → 10.1 → 10.2 → 10.3 → 10.4 → 10.5 → 10.6 → 10.7 → 10.8 → 10.9. Suggested first increment: **10.1**, after observation-entitlement agreement and explicit authorization to begin.
 
-For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1–10.6 have subsequently been authorized and implemented; later increments retain their explicit decision gates.
+For each increment, write failing observable tests first, implement the smallest complete slice, obtain independent review, and run relevant tests plus `npm run check`. Persistence slices require disposable real PostgreSQL verification; final acceptance requires genuine orchestration evidence, not mocks alone. Update materially affected documentation, commit and push each verified increment, then stop. Only 10.1–10.7 have subsequently been authorized and implemented; later increments retain their explicit decision gates.
 
 ### Overall Stage 10 checklist
 

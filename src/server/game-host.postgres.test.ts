@@ -729,7 +729,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
       const invalidated = new Promise<void>((resolve) => {
         invalidate = resolve;
       });
-      const stop = await host.subscribe(member.lobbyId, (notice) => {
+      const stop = await host.subscribeCommittedCapture(member.lobbyId, (notice) => {
         notices.push(notice);
         if (notice.type === 'invalidated') invalidate();
       });
@@ -951,7 +951,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
         async (capture) => capture,
       );
       const notices: HostPublication[] = [];
-      await host.subscribe(member.lobbyId, (notice) => {
+      await host.subscribeCommittedCapture(member.lobbyId, (notice) => {
         notices.push(notice);
       });
       const input = {
@@ -987,7 +987,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
     async (t) => {
       const { host, member, joined, request } = await setup(t);
       const notices: HostPublication[] = [];
-      await host.subscribe(member.lobbyId, (notice) => {
+      await host.subscribeCommittedCapture(member.lobbyId, (notice) => {
         notices.push(notice);
       });
       const capture = await host.observeHistory(
@@ -1022,6 +1022,20 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
       assert.equal(fresh.length, 1);
       if (fresh[0]!.type !== 'publication') assert.fail();
       assert.equal(fresh[0]!.rollback!.target.beforeActionVersion, 1);
+      assert.ok(Object.isFrozen(fresh[0]!.rollback!.target.expected));
+      assert.ok(Object.isFrozen(fresh[0]!.rollback!.target));
+      assert.ok(Object.isFrozen(fresh[0]!.rollback!.head));
+      const frozenTarget = fresh[0]!.rollback!.target.expected;
+      assert.throws(() => Object.assign(frozenTarget, { version: -1 }));
+      const late: HostPublication[] = [];
+      await host.subscribeCommittedCapture(member.lobbyId, (n) => {
+        late.push(n);
+      });
+      const baseline = late[0]!;
+      if (baseline.type !== 'publication') assert.fail();
+      assert.equal(baseline.rollback, undefined);
+      assert.deepEqual(baseline.publication.actions, []);
+
       assert.deepEqual(await host.rollback(member.lobbyId, request.gameId, rollback), {
         ...first,
         duplicate: true,
@@ -1045,11 +1059,132 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   );
 
   await t.test(
+    'shared capture owner fans out frozen graphs while legacy observers remain detached',
+    async (t) => {
+      const { host, member, request } = await setup(t);
+      const a: HostPublication[] = [],
+        b: HostPublication[] = [],
+        legacy: HostPublication[] = [];
+      const stopA = await host.subscribeCommittedCapture(member.lobbyId, (n) => {
+        a.push(n);
+      });
+      await host.subscribeCommittedCapture(member.lobbyId, (n) => {
+        b.push(n);
+      });
+      await host.subscribe(member.lobbyId, (n) => {
+        legacy.push(n);
+      });
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {
+        const phase = runtime.read().state!.phase;
+        if (phase.type !== 'dealing') assert.fail();
+        await runtime.dispatch({
+          type: 'draw-card',
+          id: id('command', randomUUID()),
+          actorId: phase.nextSeatId,
+        });
+      });
+      const first = a.at(-1)!,
+        second = b.at(-1)!,
+        detached = legacy.at(-1)!;
+      assert.equal(first, second);
+      assert.notEqual(first, detached);
+      if (first.type !== 'publication' || detached.type !== 'publication') assert.fail();
+      assert.ok(Object.isFrozen(first.publication.snapshot.state));
+      assert.throws(() => {
+        Object.assign(first.publication.snapshot.head, { version: -1 });
+      });
+      Object.assign(detached.publication.snapshot.head, { version: -1 });
+      assert.notEqual(first.publication.snapshot.head.version, -1);
+      const late: HostPublication[] = [];
+      await host.subscribeCommittedCapture(member.lobbyId, (n) => {
+        late.push(n);
+      });
+      const baseline = late[0]!;
+      if (baseline.type !== 'publication') assert.fail();
+      assert.equal(baseline.publication.kind, 'initial');
+      assert.equal(baseline.publication.snapshot, first.publication.snapshot);
+      assert.deepEqual(baseline.publication.actions, []);
+      stopA();
+      stopA();
+      const count = a.length;
+      await host.recover(member.lobbyId);
+      assert.equal(a.length, count);
+      assert.ok(b.some((n) => n.type === 'invalidated'));
+      const sharedInvalidation = b.find((n) => n.type === 'invalidated')!;
+      const legacyInvalidation = legacy.find((n) => n.type === 'invalidated')!;
+      assert.ok(Object.isFrozen(sharedInvalidation));
+      assert.equal(Object.isFrozen(legacyInvalidation), false);
+      Object.assign(legacyInvalidation, { epoch: 'mutable-legacy' });
+      assert.notEqual(sharedInvalidation.epoch, 'mutable-legacy');
+      const recovered = b.at(-1)!;
+      if (recovered.type !== 'publication') assert.fail();
+      assert.notEqual(recovered.epoch, first.epoch);
+      assert.equal(recovered.publication.kind, 'initial');
+      assert.deepEqual(recovered.publication.actions, []);
+    },
+  );
+
+  await t.test(
+    'shared registration is runtime ordered and does not add runtime subscriptions',
+    async (t) => {
+      const { host, member, request } = await setup(t);
+      const runtime = await host.withCurrent(member.lobbyId, request.gameId, async (r) => r);
+      // Entry ownership is already installed. Late observers must use its capture.
+      runtime.subscribeCommittedCapture = () => {
+        throw new Error('extra owner');
+      };
+      const early: HostPublication[] = [],
+        late: HostPublication[] = [];
+      await host.subscribeCommittedCapture(member.lobbyId, (n) => {
+        early.push(n);
+      });
+      const entered = Promise.withResolvers<void>(),
+        release = Promise.withResolvers<void>();
+      const barrier = runtime.observe(async () => {
+        entered.resolve();
+        await release.promise;
+      });
+      await entered.promise;
+      const queued = Promise.withResolvers<void>();
+      const observe = runtime.observe.bind(runtime);
+      runtime.observe = (operation) => {
+        const result = observe(operation);
+        queued.resolve();
+        return result;
+      };
+      const registration = host.subscribeCommittedCapture(member.lobbyId, (n) => {
+        late.push(n);
+      });
+      await queued.promise;
+      runtime.observe = observe;
+      const phase = runtime.read().state!.phase;
+      if (phase.type !== 'dealing') assert.fail();
+      const command = runtime.dispatch({
+        type: 'draw-card',
+        id: id('command', randomUUID()),
+        actorId: phase.nextSeatId,
+      });
+      release.resolve();
+      await barrier;
+      await registration;
+      await command;
+      assert.equal(late.length, 2);
+      const baseline = late[0]!,
+        update = late[1]!;
+      if (baseline.type !== 'publication' || update.type !== 'publication') assert.fail();
+      assert.equal(baseline.publication.kind, 'initial');
+      assert.deepEqual(baseline.publication.actions, []);
+      assert.equal(update, early.at(-1));
+      assert.ok(update.publication.sequence > baseline.publication.sequence);
+    },
+  );
+
+  await t.test(
     'lobby subscriptions invalidate retired writers and rebind state-only after recovery without action replay',
     async (t) => {
       const { host, member, request } = await setup(t);
       const notices: HostPublication[] = [];
-      const stop = await host.subscribe(member.lobbyId, (notice) => {
+      const stop = await host.subscribeCommittedCapture(member.lobbyId, (notice) => {
         notices.push(notice);
       });
       assert.equal(notices[0]!.type, 'publication');
@@ -1070,6 +1205,8 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
       await host.recover(member.lobbyId);
       const invalidated = notices.find((notice) => notice.type === 'invalidated');
       assert.equal(invalidated?.epoch, first.epoch);
+      assert.ok(Object.isFrozen(invalidated));
+      assert.throws(() => Object.assign(invalidated!, { epoch: 'mutated' }));
       const baseline = notices.at(-1)!;
       if (baseline.type !== 'publication') assert.fail();
       assert.notEqual(baseline.epoch, first.epoch);
@@ -1084,11 +1221,84 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   );
 
   await t.test(
+    'owner capture failure reports to every bound observer without undoing the commit',
+    async (t) => {
+      const { host, member, request } = await setup(t);
+      const runtime = await host.withCurrent(member.lobbyId, request.gameId, async (r) => r);
+      const capture = await host.observeHistory(
+        member.lobbyId,
+        request.gameId,
+        async (value) => value,
+      );
+      const reports: string[] = [];
+      const seen: HostPublication[] = [];
+      await host.subscribeCommittedCapture(
+        member.lobbyId,
+        () => {},
+        () => {
+          reports.push('throwing');
+          throw new Error('reporter failure');
+        },
+      );
+      await host.subscribeCommittedCapture(
+        member.lobbyId,
+        () => {},
+        () => {
+          reports.push('rejecting');
+          return Promise.reject(new Error('async reporter failure'));
+        },
+      );
+      await host.subscribe(
+        member.lobbyId,
+        (notice) => {
+          seen.push(notice);
+        },
+        () => {
+          reports.push('legacy');
+        },
+      );
+      const stop = await host.subscribeCommittedCapture(
+        member.lobbyId,
+        () => {},
+        () => {
+          reports.push('unsubscribed');
+        },
+      );
+      stop();
+      // Only the owner history capture reads this public method during direct rollback.
+      const read = t.mock.method(runtime, 'read', () => {
+        throw new Error('injected capture failure');
+      });
+      try {
+        const result = await runtime.dispatch({
+          type: 'rollback',
+          id: id('command', randomUUID()),
+          actorId: member.seatId,
+          expected: capture.active.head,
+          beforeCommandId: capture.active.actions.at(-1)!.commandId,
+          knowledgeWarningAcknowledged: true,
+        });
+        assert.equal(result.type, 'accepted');
+      } finally {
+        read.mock.restore();
+      }
+      assert.deepEqual(reports, ['throwing', 'rejecting', 'legacy']);
+      assert.equal(seen.length, 1); // Failure precedes fanout; no partial rollback delivery.
+      assert.notEqual(
+        (await host.read(member.lobbyId))!.snapshot.head.branchId,
+        capture.active.head.branchId,
+      );
+      await host.recover(member.lobbyId);
+      assert.equal(seen.at(-1)!.type, 'publication');
+    },
+  );
+
+  await t.test(
     'host listener and reporter failures cannot block commits, recovery or other subscriptions',
     async (t) => {
       const { host, member, request } = await setup(t);
       const seen: HostPublication[] = [];
-      const stopBad = await host.subscribe(
+      const stopBad = await host.subscribeCommittedCapture(
         member.lobbyId,
         async () => {
           throw new Error('private listener failure');
@@ -1097,7 +1307,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           return Promise.reject(new Error('private reporter failure'));
         },
       );
-      const stopGood = await host.subscribe(member.lobbyId, (notice) => {
+      const stopGood = await host.subscribeCommittedCapture(member.lobbyId, (notice) => {
         seen.push(notice);
       });
       await host.withCurrent(member.lobbyId, request.gameId, async (runtime) => {

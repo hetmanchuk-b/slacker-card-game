@@ -1208,10 +1208,10 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
       const cancellation = new Promise<void>((resolve) => {
         cancelled = resolve;
       });
-      const subscribe = context.host.subscribe.bind(context.host);
+      const subscribe = context.host.subscribeCommittedCapture.bind(context.host);
       const subscription = t.mock.method(
         context.host,
-        'subscribe',
+        'subscribeCommittedCapture',
         async (...args: Parameters<typeof subscribe>) => {
           const stop = await subscribe(...args);
           return () => {
@@ -1636,10 +1636,10 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
       const cancelled = new Promise<void>((resolve) => {
         invalidated = resolve;
       });
-      const subscribe = context.host.subscribe.bind(context.host);
+      const subscribe = context.host.subscribeCommittedCapture.bind(context.host);
       const subscription = t.mock.method(
         context.host,
-        'subscribe',
+        'subscribeCommittedCapture',
         async (...args: Parameters<typeof subscribe>) => {
           const stop = await subscribe(...args);
           return () => {

@@ -1332,7 +1332,7 @@ export class PenkyTransport {
         return;
       }
       peer.seatId = binding.seatId;
-      const stop = await this.#options.host.subscribe(
+      const stop = await this.#options.host.subscribeCommittedCapture(
         lobbyId,
         (notice) => {
           if (watch === peer.watch) this.#publication(peer, notice);

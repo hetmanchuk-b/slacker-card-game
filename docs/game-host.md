@@ -2,6 +2,14 @@
 
 `src/server/game-host.ts` implements `PostgresGameHost`, a server-private, single-process registry over the existing PostgreSQL leases, runtime and lobby transition APIs. It is not a running server, an authentication boundary, a projection or a network delivery service. No schema, engine rule, runtime/checkpoint contract or dependency changes are required.
 
+## Shared capture fanout — migration increment2
+
+Each installed live entry owns one `runtime.subscribeCommittedCapture` subscription and its latest immutable capture. New host `subscribeCommittedCapture(lobbyId, receive, report?, expectedGameId?)` listeners share frozen publication/rollback/invalidation envelopes; legacy `subscribe` retains detached mutable notice delivery. Transport adopts the new seam and holds per-peer references, not per-peer raw graph clones. Authorization/projection and each peer's generation/receipt state remain independent.
+
+Registration is serialized with runtime work: an action-free baseline uses the latest owned snapshot, current observation time and no historical rollback metadata; later same-head/control/gameplay publications remain ordered. Owner failures report to matching-epoch observers with isolated reporter failures, preserving transport fail-closed handling. Release stops owner/runner and clears the entry capture before invalidation/disposal; recovered/successor entries acquire a new owner. Listener failures and unsubscribe cannot disturb other observers.
+
+Existing peer capture/jobs/outbound bounds remain unchanged. Latest-capture retention, baseline `runtime.observe` snapshot allocation, repetition growth and per-peer JSON sizing are not solved by this increment; no root interning/global accounting/fair scheduler or capacity claim. See `transport-capture-adr.md` for verified progress and deferred steps.
+
 ## Interface
 
 Construct with a configured `pg` pool. Default inputs use `systemInputs`; tests inject clock/randomness/command IDs through the optional `inputs(onError)` factory. The host wraps scheduled tasks to check runtime health after settlement: runtime deadline failures are consumed internally and cannot be detected solely through a clock rejection reporter.

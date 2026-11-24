@@ -80,6 +80,12 @@ A new claim passes current controller/presence/suspension checks, then invokes a
 
 Resolver exceptions become headless `RuntimeAdmissionError('unavailable')`, with no receipt, commit, publication or timer change and no runtime fault. Semantic rejections retain ordinary dispatch rejection/checkpoint behavior. Once admission succeeds, the operation drains atomically even if its peer departs; delivery is suppressed by final transport authentication. All captures remain server-private. `claim-admission.test.ts` covers retry ordering, recovery, queue ordering, fresh admission before duplicates and sanitized failure/health.
 
+## Immutable committed-capture seam — transport migration increment1
+
+`subscribeCommittedCapture(receive, report?)` is an additive server-private subscription, not authorization or a wire/bot payload. Registration shares the existing runtime queue: one action-free baseline at that committed point, then ordered committed updates including same-head controls. Baselines are separately owned; each update is cloned once, transitively frozen across records/arrays, and shared only among this seam's listeners. Authority/history/caller graphs are never frozen. `read()` and existing `subscribe()` still return mutable isolated clones.
+
+Callbacks/reporters preserve existing nonblocking failure isolation and immediate unsubscribe semantics. Registration rejects closed/faulted runtimes; rejected storage commits publish no capture. Recovery/resync baselines replay no action observations. `src/runtime/committed-capture.test.ts` tests ownership, mutation attempts and registration across awaited commits, timeout, control and rollback work. No host/transport adoption, state-root intern, quotas or performance claim is included; see `transport-capture-adr.md` for the staged migration.
+
 ## Committed publication subscriptions — Stage 8.6
 
 Subscribe only after obtaining a **live** runtime from `create`, `restore` or a successfully completed `PostgresLobby.startMatch`. No callback is installed through construction options: private successor preparation must never notify before its atomic database transition. Subscriptions do not modify checkpoints, frames, runtime options or existing result/snapshot contracts.

@@ -1,6 +1,12 @@
 # Proposed ADR — Shared immutable transport captures
 
-**Status: proposed; implementation requires approval.** Compression investigations are closed under the current ownership model. Stage10.9 remains incomplete; Stage11 is untouched. Existing acceptance-test drafts remain uncommitted.
+**Status: architectural direction approved; staged implementation only.** Approved sequence: (1) immutable committed-capture contract/race-free registration; (2) entry-level fanout/per-peer handles; (3) state-root sharing/accounting/lifetimes; (4) fairness/preparation/backpressure/resets; (5) genuine acceptance/capacity. Complete and independently review each increment before proceeding. Resource quotas below remain provisional. Compression investigations are closed under the current ownership model. Stage10.9 remains incomplete; Stage11 is untouched. Existing acceptance-test drafts remain uncommitted.
+
+## Verified migration progress
+
+**Increment1 complete:** additive server-private `GameRuntime.subscribeCommittedCapture` supplies serialized action-free baselines and ordered committed updates. Each update is cloned once into an owned graph, transitively frozen, and shared only among new-seam listeners. Existing `read`/`subscribe` isolation remains unchanged. Nine new regressions cover mutation, registration across queued command/timeout/same-head control/rollback commits, failed commits, listener failures, unsubscribe/disposal and no replay of private observations. Independent review approved.
+
+Verification against the committed baseline plus increment1: normal `npm run check`534pass/nine DBskips; disposable PostgreSQL-enabled733pass/no skips, including format/lint/types/build. The two unfinished10.9 test drafts were excluded temporarily and restored byte-for-byte. No browser, fanout, resource-accounting or capacity claim; freezing cost remains unmeasured. **Stop here; increment2 is next.**
 
 ## Root cause
 

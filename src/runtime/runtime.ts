@@ -65,8 +65,32 @@ export type RuntimePublication = Readonly<{
   snapshot: RuntimeSnapshot;
   actions: readonly RuntimeActionPair[];
 }>;
+/** Owned, transitively frozen server-private graph. Never a wire or bot payload.
+ * Shared only by committed-capture listeners; detached APIs remain mutable.
+ */
+export type RuntimeCommittedCapture = RuntimePublication;
+
+// Captures contain only plain records, arrays and primitives. Freeze only the
+// owned clone, never history, runtime controls or a caller-owned action graph.
+function immutableCapture(publication: RuntimePublication): RuntimeCommittedCapture {
+  const capture = structuredClone(publication);
+  const pending: object[] = [capture];
+  const seen = new Set<object>();
+  while (pending.length) {
+    const value = pending.pop()!;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    for (const child of Object.values(value)) {
+      if (child !== null && typeof child === 'object') pending.push(child);
+    }
+    Object.freeze(value);
+  }
+  return capture;
+}
+
 type Subscription = Readonly<{
   receive: (publication: RuntimePublication) => void | Promise<void>;
+  shared: boolean;
   report: ((sequence: number) => void | Promise<void>) | undefined;
 }>;
 
@@ -457,20 +481,41 @@ export class GameRuntime {
     receive: Subscription['receive'],
     report?: Subscription['report'],
   ): Promise<() => void> {
+    return this.#subscribe(receive, report, false);
+  }
+
+  /** Serialized action-free baseline followed by ordered committed captures.
+   * All listeners on this seam share one frozen owned graph per update. Delivery
+   * is nonblocking and best-effort with the same failure/unsubscribe semantics
+   * as subscribe(); it confers no authorization to expose private data.
+   */
+  subscribeCommittedCapture(
+    receive: (capture: RuntimeCommittedCapture) => void | Promise<void>,
+    report?: Subscription['report'],
+  ): Promise<() => void> {
+    return this.#subscribe(receive, report, true);
+  }
+
+  #subscribe(
+    receive: Subscription['receive'],
+    report: Subscription['report'],
+    shared: boolean,
+  ): Promise<() => void> {
     return this.#enqueue(
       () => {
         if (this.#closed || this.#fault !== null || this.#published === null)
           throw new Error('Runtime subscription unavailable');
         if (typeof receive !== 'function') throw new Error('Invalid runtime subscription');
-        const subscription: Subscription = { receive, report };
+        const subscription: Subscription = { receive, report, shared };
         this.#subscriptions.add(subscription);
-        this.#deliver(subscription, {
+        const baseline: RuntimePublication = {
           sequence: this.#publicationSequence,
           kind: 'initial',
           nowMs: this.#options.clock.now(),
           snapshot: this.#published,
           actions: [],
-        });
+        };
+        this.#deliver(subscription, shared ? immutableCapture(baseline) : baseline);
         return () => {
           this.#subscriptions.delete(subscription);
         };
@@ -491,7 +536,9 @@ export class GameRuntime {
       }
     };
     try {
-      void Promise.resolve(subscription.receive(structuredClone(publication))).catch(report);
+      void Promise.resolve(
+        subscription.receive(subscription.shared ? publication : structuredClone(publication)),
+      ).catch(report);
     } catch {
       report();
     }
@@ -1054,8 +1101,12 @@ export class GameRuntime {
         const publication = this.#pendingPublication;
         this.#pendingPublication = null;
         if (publication) {
-          for (const subscription of [...this.#subscriptions])
-            this.#deliver(subscription, publication);
+          const subscriptions = [...this.#subscriptions];
+          const capture = subscriptions.some((subscription) => subscription.shared)
+            ? immutableCapture(publication)
+            : null;
+          for (const subscription of subscriptions)
+            this.#deliver(subscription, subscription.shared ? capture! : publication);
         }
         return value;
       } catch (error) {

@@ -1137,6 +1137,7 @@ These are approval gates, not permission to invent game rules. Add the chosen de
 - **Acceptance:** bots complete legal turns at 2/4/8 seats, preserve N, relinquish control correctly and never continue without a connected active human. Policies never receive privileged state.
 - **Required tests:** complete matches; replacement during dealing/play/procedures; reconnect races, rollback/recovery, successor transition and adversarial privacy checks. Real bot execution must not be substituted by trusted match finishers or test drivers.
 - **Risks:** test harnesses accidentally doing bot work; unit passes mistaken for live orchestration evidence. Record executed browser/database/manual boundaries accurately.
+- **Current boundary:** incomplete. Genuine mixed2/4-seat drafts finished;8-seat delivery hit raw-capture retention overflow. Compression investigations are closed under the existing ownership model; isolated buffer/headroom experiments did not validate production capacity or no-gap semantics. [Proposed shared immutable capture ADR](docs/transport-capture-adr.md) reviews the root cause, alternatives, candidate quotas and migration; it is NOT implementation approval or acceptance evidence. Existing acceptance/browser drafts remain uncommitted; no Stage11 work.
 
 ### Order, verification and implementation stop boundary
 

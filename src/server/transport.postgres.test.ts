@@ -16,6 +16,7 @@ import { FakeClock } from '../runtime/testing/fake-clock.ts';
 import { GameRuntime } from '../runtime/runtime.ts';
 import { finishMatch } from '../runtime/testing/match.ts';
 import { GUEST_COOKIE_NAME, GUEST_TTL_MS, guestTokenHash } from './guest-session.ts';
+import { CaptureStore } from './capture-store.ts';
 import { PenkyTransport } from './transport.ts';
 import type { TransportOptions } from './transport.ts';
 import type { OwnerHistoryCursor, ServerMessage } from '../protocol/contracts.ts';
@@ -175,7 +176,9 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
     let now = Date.now();
     const access = new PostgresGuestAccess(pool);
     const clock = new FakeClock(now);
+    const captures = new CaptureStore();
     const host = new PostgresGameHost(pool, {
+      captures,
       inputs: () => ({
         clock,
         randomInt: (upper) => upper - 1,
@@ -252,6 +255,7 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
     }
     return {
       access,
+      captures,
       host,
       clock,
       acceptAll,
@@ -2613,6 +2617,137 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
     },
   );
 
+  for (const stage of ['authorization', 'runtime-observation'] as const) {
+    await t.test(
+      `cancelled ${stage} retains the active capture until its awaited work settles`,
+      async (t) => {
+        const context = await fixture(t, 2, 60000);
+        const sockets = await Promise.all([context.connect(), context.connect(1)]);
+        for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
+        await until(async () => context.captures.stats().handles === 1);
+        const runtime = await context.host.withCurrent(
+          context.members[0]!.lobbyId,
+          context.start.gameId,
+          async (runtime) => runtime,
+        );
+        const entered = Promise.withResolvers<void>(),
+          release = Promise.withResolvers<void>();
+        let delayed = false;
+        let restore: () => void;
+        if (stage === 'authorization') {
+          const inspect = context.access.inspectSeat.bind(context.access);
+          const mock = t.mock.method(
+            context.access,
+            'inspectSeat',
+            async (...args: Parameters<typeof inspect>) => {
+              if (!delayed && args[0] === context.grants[0]!.token) {
+                delayed = true;
+                entered.resolve();
+                await release.promise;
+              }
+              return inspect(...args);
+            },
+          );
+          restore = () => mock.mock.restore();
+        } else {
+          const observe = runtime.observe.bind(runtime);
+          runtime.observe = (operation) =>
+            observe(async (...args) => {
+              if (!delayed) {
+                delayed = true;
+                entered.resolve();
+                await release.promise;
+              }
+              return operation(...args);
+            });
+          restore = () => {
+            runtime.observe = observe;
+          };
+        }
+        try {
+          const phase = runtime.read().state!.phase;
+          if (phase.type !== 'dealing') assert.fail();
+          assert.equal(
+            (
+              await runtime.dispatch({
+                type: 'draw-card',
+                id: id('command', randomUUID()),
+                actorId: phase.nextSeatId,
+              })
+            ).type,
+            'accepted',
+          );
+          await entered.promise;
+          sockets.forEach((socket) => socket.disconnect());
+          // With the runtime queue held, another peer can already be awaiting
+          // that same observation lock. Both active handles must remain charged.
+          await until(async () => {
+            const retained = context.captures.stats();
+            return retained.publications === 1 && retained.handles >= 1 && retained.roots >= 2;
+          });
+          assert.equal(context.captures.stats().games, 1);
+          assert.ok(context.captures.stats().bytes > 0);
+          assert.ok(context.captures.stats().roots >= 2);
+        } finally {
+          restore();
+          release.resolve();
+        }
+        await until(async () => context.captures.stats().bytes === 0);
+        assert.equal(context.captures.stats().roots, 0);
+        assert.equal(context.captures.stats().games, 0);
+        const returned = await context.connect();
+        const baseline = await message(returned, resync(context.members[0]!.lobbyId));
+        assert.equal(baseline.type, 'state');
+      },
+    );
+  }
+
+  await t.test(
+    'resync keeps invalidated receipt work charged until acknowledgment settles, then drains roots',
+    async (t) => {
+      const context = await fixture(t, 2, 60000);
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      for (const socket of sockets) await message(socket, resync(context.members[0]!.lobbyId));
+      await until(async () => context.captures.stats().handles === 1);
+      const emitted = Promise.withResolvers<void>();
+      let acknowledgeHeld: (() => void) | undefined;
+      receiptEnabled.set(sockets[0]!, false);
+      sockets[0]!.on(
+        'server-message',
+        (_message: ServerMessage, receipt: string, ack: (value: string) => void) => {
+          if (!acknowledgeHeld) {
+            acknowledgeHeld = () => ack(receipt);
+            emitted.resolve();
+          }
+        },
+      );
+      await context.host.withCurrent(
+        context.members[0]!.lobbyId,
+        context.start.gameId,
+        async (runtime) => {
+          const phase = runtime.read().state!.phase;
+          if (phase.type !== 'dealing') assert.fail();
+          await runtime.dispatch({
+            type: 'draw-card',
+            id: id('command', randomUUID()),
+            actorId: phase.nextSeatId,
+          });
+        },
+      );
+      await emitted.promise;
+      const baseline = message(sockets[0]!, resync(context.members[0]!.lobbyId));
+      await until(async () => context.captures.stats().handles === 3);
+      assert.ok(context.captures.stats().roots >= 2);
+      receiptEnabled.set(sockets[0]!, true);
+      acknowledgeHeld!();
+      assert.equal((await baseline).type, 'state');
+      await until(async () => context.captures.stats().handles === 1);
+      assert.equal(context.captures.stats().roots, 1);
+      sockets.forEach((socket) => socket.disconnect());
+      await until(async () => context.captures.stats().bytes === 0);
+    },
+  );
+
   await t.test(
     'a non-acknowledging recipient is disconnected without blocking another socket or game deadlines',
     async (t) => {
@@ -2669,6 +2804,22 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
         (await context.host.read(context.members[0]!.lobbyId))!.snapshot.state!.deck.length,
         36,
       );
+    },
+  );
+
+  await t.test(
+    'logical capture debt refusal disconnects only delivery and releases the idle owner',
+    async (t) => {
+      const context = await fixture(t, 2, 60000, { captureBytes: 1 });
+      const socket = await context.connect();
+      const ended = once(socket, 'disconnect');
+      const before = await context.host.read(context.members[0]!.lobbyId);
+      socket.emit('client-message', resync(context.members[0]!.lobbyId));
+      await ended;
+      await until(async () => context.captures.stats().bytes === 0);
+      const after = await context.host.read(context.members[0]!.lobbyId);
+      assert.equal(after!.epoch, before!.epoch);
+      assert.equal(after!.snapshot.state!.phase.type, 'dealing');
     },
   );
 

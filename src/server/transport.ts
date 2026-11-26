@@ -1,3 +1,4 @@
+import type { CaptureHandle } from './capture-store.ts';
 import { makeOwnerHistoryPage } from '../protocol/history-page.ts';
 import { projectOwnerHistory } from '../projections/history.ts';
 import { randomUUID } from 'node:crypto';
@@ -144,6 +145,7 @@ type Peer = {
   branch: BranchId | null;
   seatId: SeatId | null;
   publications: {
+    capture: CaptureHandle;
     publication: RuntimePublication;
     rollback?: RollbackNotice;
     epoch: string;
@@ -1089,7 +1091,10 @@ export class PenkyTransport {
     peer.streamId = randomUUID();
     peer.sequence = 0;
     peer.outbound.invalidate(peer.generation);
-    for (const item of peer.publications) peer.publicationBytes -= item.bytes;
+    for (const item of peer.publications) {
+      peer.publicationBytes -= item.bytes;
+      item.capture.release();
+    }
     peer.publications = [];
   }
 
@@ -1123,7 +1128,11 @@ export class PenkyTransport {
       this.#discardStream(peer);
     peer.epoch = notice.epoch;
     peer.branch = branch;
-    const bytes = Buffer.byteLength(JSON.stringify({ publication, rollback: notice.rollback }));
+    if (!notice.capture) {
+      this.#stop(peer);
+      return;
+    }
+    const bytes = notice.capture.bytes;
     if (
       peer.publications.length + Number(peer.publishing) >= this.#delivery.jobs ||
       peer.publicationBytes + bytes > this.#delivery.captureBytes
@@ -1131,8 +1140,16 @@ export class PenkyTransport {
       this.#stop(peer);
       return;
     }
+    let capture: CaptureHandle;
+    try {
+      capture = notice.capture.retain();
+    } catch {
+      this.#stop(peer);
+      return;
+    }
     peer.publicationBytes += bytes;
     peer.publications.push({
+      capture,
       publication,
       ...(notice.rollback ? { rollback: notice.rollback } : {}),
       epoch: notice.epoch,
@@ -1211,8 +1228,10 @@ export class PenkyTransport {
                         if (item.publication.kind === 'initial') {
                           // The authorized baseline starts here, not before slow SQL.
                           // Earlier queued observations are never replayed by resync.
-                          for (const queued of peer.publications)
+                          for (const queued of peer.publications) {
                             peer.publicationBytes -= queued.bytes;
+                            queued.capture.release();
+                          }
                           peer.publications = [];
                         }
                         message = makeStateMessage(
@@ -1249,6 +1268,7 @@ export class PenkyTransport {
           if (item.generation === peer.generation && this.#live(peer)) this.#stop(peer);
         } finally {
           peer.publicationBytes -= item.bytes;
+          item.capture.release();
         }
       }
     } catch {

@@ -1,3 +1,5 @@
+import { CaptureStore } from './capture-store.ts';
+import type { CaptureHandle, CaptureWriter } from './capture-store.ts';
 import { startBotRunner } from '../bots/runner.ts';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -37,6 +39,8 @@ export type OwnerRollbackRequest = Readonly<{
   knowledgeWarningAcknowledged: boolean;
 }>;
 
+const hostedCaptures = new CaptureStore();
+
 type Inputs = Omit<RuntimeOptions, 'history' | 'commit' | 'connectedSeatIds'>;
 type Entry = LiveMatch & {
   gameId: GameId;
@@ -44,7 +48,8 @@ type Entry = LiveMatch & {
   epoch: string;
   stopBots?: () => void;
   stopCapture?: () => void;
-  capture?: RuntimePublication;
+  capture?: CaptureHandle;
+  captureWriter?: CaptureWriter;
 };
 type Connection = Pick<GuestMembership, 'lobbyId' | 'seatId'>;
 export type HostedSnapshot = Readonly<{ epoch: string; snapshot: RuntimeSnapshot }>;
@@ -55,6 +60,8 @@ export type HostPublication =
       epoch: string;
       publication: RuntimePublication;
       rollback?: RollbackNotice;
+      /** Borrowed for this callback only; retain synchronously for async work. */
+      capture?: CaptureHandle;
     }>
   | Readonly<{ type: 'invalidated'; epoch: string }>;
 type Observer = {
@@ -77,6 +84,7 @@ export class GameHostError extends Error {
  */
 export class PostgresGameHost {
   readonly #pool: Pool;
+  readonly #captures: CaptureStore;
   readonly #inputs: (onError: (error: unknown) => void) => Inputs;
   #tail: Promise<void> = Promise.resolve();
   #entries = new Map<GameId, Entry>();
@@ -87,9 +95,13 @@ export class PostgresGameHost {
 
   constructor(
     pool: Pool,
-    options: { inputs?: (onError: (error: unknown) => void) => Inputs } = {},
+    options: {
+      inputs?: (onError: (error: unknown) => void) => Inputs;
+      captures?: CaptureStore;
+    } = {},
   ) {
     this.#pool = pool;
+    this.#captures = options.captures ?? hostedCaptures;
     this.#inputs = options.inputs ?? systemInputs;
   }
 
@@ -140,7 +152,14 @@ export class PostgresGameHost {
         observer.active = false;
         observer.epoch = null;
         observers.delete(observer);
-        if (!observers.size) this.#observers.delete(lobbyId);
+        if (!observers.size) {
+          this.#observers.delete(lobbyId);
+          for (const current of this.#entries.values())
+            if (current.lobbyId === lobbyId) {
+              current.capture?.release();
+              delete current.capture;
+            }
+        }
       };
       try {
         if (entry) await this.#bind(observer, entry);
@@ -165,37 +184,81 @@ export class PostgresGameHost {
     const report = () => this.#report(observer);
     try {
       void Promise.resolve(
-        observer.receive(observer.shared ? notice : structuredClone(notice)),
+        observer.receive(
+          observer.shared
+            ? notice
+            : structuredClone(
+                notice.type === 'publication'
+                  ? {
+                      type: notice.type,
+                      epoch: notice.epoch,
+                      publication: notice.publication,
+                      ...(notice.rollback ? { rollback: notice.rollback } : {}),
+                    }
+                  : notice,
+              ),
+        ),
       ).catch(report);
     } catch {
       report();
     }
   }
 
+  #baseline(publication: RuntimePublication, nowMs = publication.nowMs): RuntimePublication {
+    return Object.freeze({ ...publication, kind: 'initial', nowMs, actions: Object.freeze([]) });
+  }
+
+  #dropCapture(entry: Entry): void {
+    entry.capture?.release();
+    delete entry.capture;
+  }
+
   async #ownCapture(entry: Entry): Promise<void> {
+    entry.captureWriter = this.#captures.writer(entry.epoch, entry.gameId);
     entry.stopCapture = await entry.runtime.subscribeCommittedCapture(
       (publication) => {
-        if (this.#entries.get(entry.gameId) !== entry) return;
-        entry.capture = publication;
-        const rollback =
-          publication.kind === 'rollback' ? projectRollbackNotice(this.#history(entry)) : undefined;
-        if (rollback) {
-          Object.freeze(rollback.target.expected);
-          Object.freeze(rollback.target);
-          Object.freeze(rollback.head);
-          Object.freeze(rollback);
+        if (this.#entries.get(entry.gameId) !== entry || !this.#observers.get(entry.lobbyId)?.size)
+          return;
+        let full: CaptureHandle | undefined;
+        let owner: CaptureHandle | undefined;
+        try {
+          const rollback =
+            publication.kind === 'rollback'
+              ? projectRollbackNotice(this.#history(entry))
+              : undefined;
+          if (rollback) {
+            Object.freeze(rollback.target.expected);
+            Object.freeze(rollback.target);
+            Object.freeze(rollback.head);
+            Object.freeze(rollback);
+          }
+          full = entry.captureWriter!.capture(publication, rollback);
+          owner = entry.captureWriter!.capture(this.#baseline(full.value.publication));
+          this.#dropCapture(entry);
+          entry.capture = owner;
+          owner = undefined;
+          const notice: HostPublication = Object.freeze({
+            type: 'publication',
+            ...full.value,
+            capture: full,
+          });
+          for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])])
+            if (observer.epoch === entry.epoch) this.#notify(observer, notice);
+        } catch {
+          // Delivery admission is not a failed authoritative commit. Never keep
+          // a stale baseline or propagate store pressure into the writer queue.
+          this.#dropCapture(entry);
+          for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])])
+            if (observer.epoch === entry.epoch) this.#report(observer);
+        } finally {
+          owner?.release();
+          full?.release();
+          if (!this.#observers.get(entry.lobbyId)?.size) this.#dropCapture(entry);
         }
-        const notice: HostPublication = Object.freeze({
-          type: 'publication',
-          epoch: entry.epoch,
-          publication,
-          ...(rollback ? { rollback } : {}),
-        });
-        for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])])
-          if (observer.epoch === entry.epoch) this.#notify(observer, notice);
       },
       () => {
         if (this.#entries.get(entry.gameId) !== entry) return;
+        this.#dropCapture(entry);
         for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])])
           if (observer.epoch === entry.epoch) this.#report(observer);
       },
@@ -203,31 +266,55 @@ export class PostgresGameHost {
   }
 
   async #bind(observer: Observer, entry: Entry): Promise<void> {
+    if (!entry.capture) {
+      // Registration must be outside observe: both serialize on the same queue.
+      // This temporary listener only installs its action-free baseline. A later
+      // committed update must never be replaced by an older baseline.
+      const stop = await entry.runtime.subscribeCommittedCapture((publication) => {
+        if (
+          publication.kind !== 'initial' ||
+          !observer.active ||
+          this.#entries.get(entry.gameId) !== entry ||
+          entry.capture
+        )
+          return;
+        try {
+          entry.capture = entry.captureWriter!.capture(publication);
+        } catch {
+          /* fail closed below */
+        }
+      });
+      stop();
+    }
     await entry.runtime.observe(async (_snapshot, nowMs) => {
       if (!observer.active || this.#entries.get(entry.gameId) !== entry) return;
-      const capture = entry.capture;
-      if (!capture) throw new GameHostError('game-unavailable');
-      observer.epoch = entry.epoch;
-      this.#notify(
-        observer,
-        Object.freeze({
-          type: 'publication',
-          epoch: entry.epoch,
-          publication: Object.freeze({
-            ...capture,
-            kind: 'initial',
-            nowMs,
-            actions: Object.freeze([]),
-          }),
-        }),
+      if (!entry.capture) throw new GameHostError('game-unavailable');
+      const baseline = entry.captureWriter!.capture(
+        this.#baseline(entry.capture.value.publication, nowMs),
       );
+      try {
+        observer.epoch = entry.epoch;
+        this.#notify(
+          observer,
+          Object.freeze({ type: 'publication', ...baseline.value, capture: baseline }),
+        );
+      } finally {
+        baseline.release();
+      }
     });
   }
 
   async #bindObservers(entry: Entry): Promise<void> {
     await this.#ownCapture(entry);
     for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])])
-      if (observer.active) await this.#bind(observer, entry);
+      if (observer.active) {
+        try {
+          await this.#bind(observer, entry);
+        } catch (error) {
+          if (!this.#healthy(entry)) throw error;
+          this.#report(observer);
+        }
+      }
   }
 
   /** expectedGameId prevents an old intent from silently reaching a successor.
@@ -734,7 +821,8 @@ export class PostgresGameHost {
     entry.stopBots?.();
     entry.stopCapture?.();
     delete entry.stopCapture;
-    delete entry.capture;
+    this.#dropCapture(entry);
+    delete entry.captureWriter;
     if (this.#entries.get(entry.gameId) === entry) this.#entries.delete(entry.gameId);
     for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])]) {
       if (observer.epoch !== entry.epoch) continue;

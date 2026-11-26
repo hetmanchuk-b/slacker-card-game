@@ -10,6 +10,14 @@ Registration is serialized with runtime work: an action-free baseline uses the l
 
 Existing peer capture/jobs/outbound bounds remain unchanged. Latest-capture retention, baseline `runtime.observe` snapshot allocation, repetition growth and per-peer JSON sizing are not solved by this increment; no root interning/global accounting/fair scheduler or capacity claim. See `transport-capture-adr.md` for verified progress and deferred steps.
 
+## Canonical capture ownership — migration increment3
+
+The host's process-shared `CaptureStore` issues writer-scoped capabilities per live entry epoch. Store admission validates game/branch/version and deep content consistency before reusing full state roots; same-head controls remain separate metadata. A state-only owner handle retains the latest admitted baseline, not a raw fallback publication. Shared callbacks receive a borrowed `capture` handle valid during the callback; asynchronous consumers must synchronously retain and later release their own handle. Legacy detached notices omit that capability.
+
+Last-observer removal releases owner retention; active peer references continue to occupy quotas until settlement. Admission denial drops stale ownership and reports affected delivery without faulting the committed writer. A later registration can retry an action-free baseline through a short-lived runtime subscription outside `observe`, with entry/liveness/owner checks; no prior actions are replayed. Roots/game slots disappear after final handle release. Trusted tests can inject a store; production defaults share process quotas.
+
+Provisional store quotas and conservative weights are not a physical-memory/capacity guarantee. Upstream runtime clone/freeze remains outside the store ledger; scheduling, preparation fairness and construction timing are deferred. See the ADR and synthetic long-repetition profile before interpreting the2MiB publication or4MiB peer debt as adequate for long matches.
+
 ## Interface
 
 Construct with a configured `pg` pool. Default inputs use `systemInputs`; tests inject clock/randomness/command IDs through the optional `inputs(onError)` factory. The host wraps scheduled tasks to check runtime health after settlement: runtime deadline failures are consumed internally and cannot be detected solely through a clock rejection reporter.

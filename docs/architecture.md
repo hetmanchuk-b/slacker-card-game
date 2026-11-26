@@ -40,6 +40,12 @@ D013 supersedes the earlier simple-play-only knowledge ceiling, not the unknown-
 
 Real engine/projector tests cover manual/automatic/compound boundaries and negative contexts. Existing policy-loop traces now finish but are not installed-runner acceptance. Recovery can still break continuity conservatively; Stage10.9 remains open.
 
+## Shared capture migration — verified through increment3
+
+The approved `transport-capture-adr.md` now has an immutable runtime seam, entry-owned fanout and a process-shared host `CaptureStore`. Writer capabilities bind canonical full-state roots to epoch/game/branch/version and reject inconsistent content. Cached conservative weights distinguish retained-root charges from each peer's publication debt. Borrowed callback handles must be retained synchronously for asynchronous use; queued and active references release at distinct lifetime boundaries. Idle ownership and game slots drain; delivery admission failures do not fault committed games. Complete replay and detached APIs remain unchanged.
+
+Provisional quotas are logical bounds, not heap/capacity guarantees. Synthetic repetition profiles expose2MiB publication/4MiB debt failure points. Upstream synchronous runtime clone/freeze is outside this ledger; construction scheduling, fair preparation and genuine acceptance remain future increments. No compression, deltas or persistent-map redesign was added.
+
 ## Agreed implementation seams
 
 The implementation plan and approved architecture establish the test seams:

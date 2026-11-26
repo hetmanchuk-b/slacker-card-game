@@ -15,6 +15,8 @@ import { PostgresGuestAccess } from './guest-access.ts';
 import { PostgresGameHost } from './game-host.ts';
 import { PostgresLobby } from '../persistence/lobby.ts';
 import { RuntimeAdmissionError } from '../runtime/runtime.ts';
+import { CaptureStore } from './capture-store.ts';
+import type { CaptureHandle } from './capture-store.ts';
 import type { HostPublication } from './game-host.ts';
 
 const url = process.env.PENKY_TEST_DATABASE_URL;
@@ -52,10 +54,11 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
     }
     assert.fail('Disposed writer backend did not exit');
   }
-  async function setup(t: TestContext) {
+  async function setup(t: TestContext, captures?: CaptureStore) {
     const clock = new FakeClock(1000);
     const reporters: ((error: unknown) => void)[] = [];
     const host = new PostgresGameHost(pool, {
+      ...(captures ? { captures } : {}),
       inputs: (onError) => {
         reporters.push(onError);
         return {
@@ -1059,6 +1062,110 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   );
 
   await t.test(
+    'idle capture owners release ninth-game admission while live in-flight handles still pin slots',
+    async (t) => {
+      const captures = new CaptureStore();
+      const games = [];
+      for (let i = 0; i < 9; i++) games.push(await setup(t, captures));
+      let pinned: CaptureHandle | undefined;
+      const stops = [];
+      for (let i = 0; i < 8; i++) {
+        const game = games[i]!;
+        stops.push(
+          await game.host.subscribeCommittedCapture(game.member.lobbyId, (notice) => {
+            if (i === 0 && notice.type === 'publication') pinned = notice.capture!.retain();
+          }),
+        );
+      }
+      assert.equal(captures.stats().games, 8);
+      const ninth = games[8]!;
+      const before = await ninth.host.read(ninth.member.lobbyId);
+      await assert.rejects(
+        ninth.host.subscribeCommittedCapture(ninth.member.lobbyId, () => {}),
+        /game-unavailable/,
+      );
+      stops[0]!();
+      stops[0]!();
+      assert.equal(captures.stats().games, 8);
+      await assert.rejects(
+        ninth.host.subscribeCommittedCapture(ninth.member.lobbyId, () => {}),
+        /game-unavailable/,
+      );
+      pinned!.release();
+      assert.equal(captures.stats().games, 7);
+      const notices: HostPublication[] = [];
+      const stopNinth = await ninth.host.subscribeCommittedCapture(
+        ninth.member.lobbyId,
+        (notice) => {
+          notices.push(notice);
+        },
+      );
+      const notice = notices[0]!;
+      if (notice.type !== 'publication') assert.fail();
+      assert.equal(notice.epoch, before!.epoch);
+      assert.equal(notice.publication.kind, 'initial');
+      assert.deepEqual(notice.publication.actions, []);
+      assert.deepEqual(notice.publication.snapshot.head, before!.snapshot.head);
+      stops.forEach((stop) => stop());
+      stopNinth();
+      assert.equal(captures.stats().games, 0);
+      assert.equal(captures.stats().handles, 0);
+      assert.equal(
+        (await games[0]!.host.read(games[0]!.member.lobbyId))!.snapshot.state!.phase.type,
+        'dealing',
+      );
+    },
+  );
+
+  await t.test(
+    'capture admission refusal clears ownership without rejecting committed play or replacing its writer',
+    async (t) => {
+      const captures = new CaptureStore({ handles: 3 });
+      const { host, member, request } = await setup(t, captures);
+      let pinned: CaptureHandle | undefined;
+      let reports = 0;
+      const stop = await host.subscribeCommittedCapture(
+        member.lobbyId,
+        (notice) => {
+          if (notice.type === 'publication') pinned = notice.capture!.retain();
+        },
+        () => {
+          reports++;
+        },
+      );
+      const before = await host.read(member.lobbyId);
+      const result = await host.withCurrent(member.lobbyId, request.gameId, (runtime) => {
+        const phase = runtime.read().state!.phase;
+        if (phase.type !== 'dealing') assert.fail();
+        return runtime.dispatch({
+          type: 'draw-card',
+          id: id('command', randomUUID()),
+          actorId: phase.nextSeatId,
+        });
+      });
+      assert.equal(result.type, 'accepted');
+      assert.equal(reports, 1);
+      assert.equal((await host.read(member.lobbyId))!.epoch, before!.epoch);
+      assert.equal(captures.stats().handles, 1); // only the old active consumer
+      stop();
+      pinned!.release();
+      const baseline: HostPublication[] = [];
+      const stopFresh = await host.subscribeCommittedCapture(member.lobbyId, (notice) => {
+        baseline.push(notice);
+      });
+      if (baseline[0]!.type !== 'publication') assert.fail();
+      assert.equal(baseline[0]!.publication.kind, 'initial');
+      assert.deepEqual(baseline[0]!.publication.actions, []);
+      assert.equal(
+        baseline[0]!.publication.snapshot.head.version,
+        before!.snapshot.head.version + 1,
+      );
+      stopFresh();
+      assert.equal(captures.stats().bytes, 0);
+    },
+  );
+
+  await t.test(
     'shared capture owner fans out frozen graphs while legacy observers remain detached',
     async (t) => {
       const { host, member, request } = await setup(t);
@@ -1125,19 +1232,20 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   );
 
   await t.test(
-    'shared registration is runtime ordered and does not add runtime subscriptions',
+    'shared late registration is runtime ordered and reuses the admitted owner',
     async (t) => {
       const { host, member, request } = await setup(t);
       const runtime = await host.withCurrent(member.lobbyId, request.gameId, async (r) => r);
-      // Entry ownership is already installed. Late observers must use its capture.
-      runtime.subscribeCommittedCapture = () => {
-        throw new Error('extra owner');
-      };
       const early: HostPublication[] = [],
         late: HostPublication[] = [];
       await host.subscribeCommittedCapture(member.lobbyId, (n) => {
         early.push(n);
       });
+      // First observer reactivates the idle owner through a temporary baseline;
+      // subsequent observers reuse that owner without another subscription.
+      runtime.subscribeCommittedCapture = () => {
+        throw new Error('extra owner');
+      };
       const entered = Promise.withResolvers<void>(),
         release = Promise.withResolvers<void>();
       const barrier = runtime.observe(async () => {

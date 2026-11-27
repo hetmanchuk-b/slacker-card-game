@@ -1,3 +1,4 @@
+import { captureSource, defaultCaptureConstruction } from './capture-construction.ts';
 import { createBotMemory, rememberBotObservation, restoreBotMemory } from '../bots/memory.ts';
 import type { BotMemory } from '../bots/memory.ts';
 import { observeBotCurrent, observeBotAction } from '../bots/observation.ts';
@@ -70,27 +71,23 @@ export type RuntimePublication = Readonly<{
  */
 export type RuntimeCommittedCapture = RuntimePublication;
 
-// Captures contain only plain records, arrays and primitives. Freeze only the
-// owned clone, never history, runtime controls or a caller-owned action graph.
-function immutableCapture(publication: RuntimePublication): RuntimeCommittedCapture {
-  const capture = structuredClone(publication);
-  const pending: object[] = [capture];
-  const seen = new Set<object>();
-  while (pending.length) {
-    const value = pending.pop()!;
-    if (seen.has(value)) continue;
-    seen.add(value);
-    for (const child of Object.values(value)) {
-      if (child !== null && typeof child === 'object') pending.push(child);
-    }
-    Object.freeze(value);
-  }
-  return capture;
-}
+export type CaptureConstruction = (
+  source: RuntimePublication,
+  deliver: (capture: RuntimeCommittedCapture) => void,
+) => Promise<void>;
+export type CaptureSubscriptionOptions = Readonly<{
+  construct?: CaptureConstruction;
+  /** Synchronous committed-point hook; never retain the raw source here. */
+  committed?: (notice: Pick<RuntimePublication, 'kind' | 'sequence'>) => void;
+}>;
+const defaultConstruction: CaptureConstruction = async (source, deliver) => {
+  deliver(await defaultCaptureConstruction(source.snapshot.head.gameId, source));
+};
 
 type Subscription = Readonly<{
   receive: (publication: RuntimePublication) => void | Promise<void>;
   shared: boolean;
+  captureOptions?: CaptureSubscriptionOptions;
   report: ((sequence: number) => void | Promise<void>) | undefined;
 }>;
 
@@ -250,6 +247,7 @@ export class GameRuntime {
   #receipts = new Map<CommandId, StoredReceipt>();
   #subscriptions = new Set<Subscription>();
   #publicationSequence = 0;
+  #captureTail: Promise<void> = Promise.resolve();
   #controllerTenures = new Map<SeatId, number>();
   #pendingActions: RuntimeActionPair[] = [];
   #pendingPublication: RuntimePublication | null = null;
@@ -492,21 +490,42 @@ export class GameRuntime {
   subscribeCommittedCapture(
     receive: (capture: RuntimeCommittedCapture) => void | Promise<void>,
     report?: Subscription['report'],
+    captureOptions?: CaptureSubscriptionOptions,
   ): Promise<() => void> {
-    return this.#subscribe(receive, report, true);
+    return this.#subscribe(receive, report, true, captureOptions);
+  }
+
+  /** Wait for already admitted immutable deliveries, never listener promises. */
+  flushCommittedCaptures(): Promise<void> {
+    return this.#captureTail;
   }
 
   #subscribe(
     receive: Subscription['receive'],
     report: Subscription['report'],
     shared: boolean,
+    captureOptions?: CaptureSubscriptionOptions,
   ): Promise<() => void> {
+    let baselineDelivery: Promise<void> = Promise.resolve();
+    let registered: Subscription | undefined;
+    let baselineInvoked = false;
     return this.#enqueue(
       () => {
         if (this.#closed || this.#fault !== null || this.#published === null)
           throw new Error('Runtime subscription unavailable');
         if (typeof receive !== 'function') throw new Error('Invalid runtime subscription');
-        const subscription: Subscription = { receive, report, shared };
+        const subscription: Subscription = {
+          receive: shared
+            ? (publication) => {
+                if (publication.kind === 'initial') baselineInvoked = true;
+                return receive(publication);
+              }
+            : receive,
+          report,
+          shared,
+          ...(captureOptions ? { captureOptions } : {}),
+        };
+        registered = subscription;
         this.#subscriptions.add(subscription);
         const baseline: RuntimePublication = {
           sequence: this.#publicationSequence,
@@ -515,14 +534,76 @@ export class GameRuntime {
           snapshot: this.#published,
           actions: [],
         };
-        this.#deliver(subscription, shared ? immutableCapture(baseline) : baseline);
+        if (shared) baselineDelivery = this.#scheduleCapture(baseline, [subscription]);
+        else this.#deliver(subscription, baseline);
         return () => {
           this.#subscriptions.delete(subscription);
         };
       },
       false,
       false,
-    );
+    ).then(async (stop) => {
+      try {
+        await baselineDelivery;
+        if (
+          shared &&
+          (!baselineInvoked ||
+            !registered ||
+            !this.#subscriptions.has(registered) ||
+            this.#closed ||
+            this.#fault !== null)
+        )
+          throw new Error('Runtime subscription unavailable');
+        return stop;
+      } catch (error) {
+        stop();
+        throw error;
+      }
+    });
+  }
+
+  #scheduleCapture(publication: RuntimePublication, subscriptions: Subscription[]): Promise<void> {
+    publication = captureSource(publication);
+    const groups = new Map<CaptureConstruction, Subscription[]>();
+    for (const subscription of subscriptions) {
+      try {
+        subscription.captureOptions?.committed?.(
+          Object.freeze({ kind: publication.kind, sequence: publication.sequence }),
+        );
+        const construct = subscription.captureOptions?.construct ?? defaultConstruction;
+        const group = groups.get(construct) ?? [];
+        group.push(subscription);
+        groups.set(construct, group);
+      } catch {
+        this.#captureFailed(subscription, publication.sequence);
+      }
+    }
+    const work = [...groups].map(([construct, listeners]) => {
+      try {
+        return construct(publication, (capture) => {
+          for (const listener of listeners) this.#deliver(listener, capture);
+        }).catch(() => {
+          for (const listener of listeners) this.#captureFailed(listener, publication.sequence);
+          throw new Error('Runtime capture unavailable');
+        });
+      } catch {
+        for (const listener of listeners) this.#captureFailed(listener, publication.sequence);
+        return Promise.reject(new Error('Runtime capture unavailable'));
+      }
+    });
+    const completion = Promise.all(work).then(() => undefined);
+    this.#captureTail = Promise.allSettled([this.#captureTail, completion]).then(() => undefined);
+    void completion.catch(() => {});
+    return completion;
+  }
+
+  #captureFailed(subscription: Subscription, sequence: number): void {
+    if (!this.#subscriptions.delete(subscription)) return;
+    try {
+      void Promise.resolve(subscription.report?.(sequence)).catch(() => {});
+    } catch {
+      /* isolated */
+    }
   }
 
   #deliver(subscription: Subscription, publication: RuntimePublication): void {
@@ -1102,11 +1183,10 @@ export class GameRuntime {
         this.#pendingPublication = null;
         if (publication) {
           const subscriptions = [...this.#subscriptions];
-          const capture = subscriptions.some((subscription) => subscription.shared)
-            ? immutableCapture(publication)
-            : null;
+          const shared = subscriptions.filter((subscription) => subscription.shared);
+          if (shared.length) void this.#scheduleCapture(publication, shared);
           for (const subscription of subscriptions)
-            this.#deliver(subscription, subscription.shared ? capture! : publication);
+            if (!subscription.shared) this.#deliver(subscription, publication);
         }
         return value;
       } catch (error) {

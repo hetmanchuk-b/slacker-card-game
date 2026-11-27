@@ -46,6 +46,12 @@ The approved `transport-capture-adr.md` now has an immutable runtime seam, entry
 
 Provisional quotas are logical bounds, not heap/capacity guarantees. Synthetic repetition profiles expose2MiB publication/4MiB debt failure points. Upstream synchronous runtime clone/freeze is outside this ledger; construction scheduling, fair preparation and genuine acceptance remain future increments. No compression, deltas or persistent-map redesign was added.
 
+## Scheduled capture/delivery — verified increment4
+
+The approved private timing amendment permits dispatch completion before new-seam capture delivery. One process-wide constructor admits sources before retention and incrementally copies/freezes supported owned graphs; exact head/content proof removes the duplicate final-state root only from the new source. Registration requires an invoked, live baseline/owner barrier. Narrow rollback sidecars are captured at commit, not reconstructed later. Legacy runtime and host subscriptions preserve synchronous detached behavior via a separate lazy compatibility lane.
+
+Pool-shared game/peer preparation releases before ACK waits; active capture/output ownership stays charged. Monotonic queued-age deadlines rearm per packet and are distinct from receipts/gameplay clocks; local pressure uses oldest original pin age. Quotas remain provisional. Synchronous bounded admission/equality and wide-object enumeration/freeze still have residual event-loop cost; no physical-memory or multi-match capacity claim. Independent review and baseline-plus-increment gates passed556normal/nine skips and772database/no skips. Increment5/Stage10.9 acceptance remains open.
+
 ## Agreed implementation seams
 
 The implementation plan and approved architecture establish the test seams:

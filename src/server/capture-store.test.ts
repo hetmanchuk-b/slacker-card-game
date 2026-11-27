@@ -31,6 +31,8 @@ async function publications() {
       procedureId: runtime.read().state!.procedure!.timer.id,
       vote: 'yes',
     });
+  await runtime.flushCommittedCaptures();
+  await runtime.flushCommittedCaptures();
   await runtime.dispose();
   return notices;
 }
@@ -252,5 +254,47 @@ test('the provisional 2MiB publication boundary accepts exactly the limit and re
     () => writer.capture(freeze({ ...initial!, diagnosticPadding: 'x'.repeat(padding + 1) })),
     /Capture unavailable/,
   );
+  assert.equal(store.stats().bytes, 0);
+});
+
+test('pending source reservation shares quotas through fanout settlement; local pressure evicts oldest stable peer only', async () => {
+  const [initial] = await publications();
+  const bytes = 2 * 1024 * 1024;
+  const store = new CaptureStore({ gameBytes: bytes, globalBytes: bytes });
+  let delivered = 0;
+  const pending = store.construct(initial!, () => {
+    delivered++;
+    assert.equal(store.stats().bytes, bytes);
+  });
+  assert.equal(store.stats().bytes, bytes);
+  assert.equal(store.stats().handles, 1);
+  const evicted: string[] = [];
+  store.watchPressure(
+    initial!.snapshot.head.gameId,
+    'b',
+    () => 1,
+    () => {
+      evicted.push('b');
+    },
+  );
+  store.watchPressure(
+    initial!.snapshot.head.gameId,
+    'a',
+    () => 1,
+    () => {
+      evicted.push('a');
+    },
+  );
+  store.watchPressure(
+    id('game', 'unrelated'),
+    'other',
+    () => 0,
+    () => assert.fail('unrelated eviction'),
+  );
+  assert.throws(() => store.construct(initial!, () => assert.fail()), /Capture unavailable/);
+  assert.deepEqual(evicted, ['a']);
+  assert.equal(store.stats().bytes, bytes, 'active reservation cannot be credited by eviction');
+  await pending;
+  assert.equal(delivered, 1);
   assert.equal(store.stats().bytes, 0);
 });

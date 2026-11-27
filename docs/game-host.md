@@ -18,6 +18,14 @@ Last-observer removal releases owner retention; active peer references continue 
 
 Provisional store quotas and conservative weights are not a physical-memory/capacity guarantee. Upstream runtime clone/freeze remains outside the store ledger; scheduling, preparation fairness and construction timing are deferred. See the ADR and synthetic long-repetition profile before interpreting the2MiB publication or4MiB peer debt as adequate for long matches.
 
+## Scheduled capture and preparation lifetimes — migration increment4
+
+Shared capture ownership is acquired lazily for observers, not unconditionally while loading an authoritative game. Store saturation can deny/reset delivery without making a healthy ninth writer unroutable. Shared registration obtains a current action-free construction barrier even when an older owner capture exists, and fences both delivery and completion against the exact live owner. An owner lost during a pending registration makes that registration fail; later explicit registration may recover. Legacy `subscribe` has a separate lazy runtime-legacy fanout so its synchronous committed callbacks and detached isolation are preserved.
+
+Rollback metadata is captured synchronously at commit using a narrow hook, then carried through scheduled immutable delivery; no later raw-history reread is used. Idle/released/failed paths clear sidecars and subscriptions. Capture admission/finalization failure reports affected streams and drops stale ownership, without faulting gameplay. Tests cover saturation, late owner loss, baseline cancellation, same-head controls, two rollbacks and null rollback.
+
+Preparation scheduling is shared by hosts using the same `pg` pool: ready games/peers rotate, one preparation per peer, capacity computed from pool max minus checked-out clients minus2 control/recovery headroom. This bounds delivery preparation; it is not an exclusive connection reservation against arbitrary external SQL. A preparation permit ends after projection/emission submission, before receipt waiting. Existing active capture/output charges survive until settlement. Construction/preparation quotas remain provisional, not a deployment-capacity certificate.
+
 ## Interface
 
 Construct with a configured `pg` pool. Default inputs use `systemInputs`; tests inject clock/randomness/command IDs through the optional `inputs(onError)` factory. The host wraps scheduled tasks to check runtime health after settlement: runtime deadline failures are consumed internally and cannot be detected solely through a clock rejection reporter.

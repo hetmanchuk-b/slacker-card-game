@@ -44,6 +44,7 @@ test('committed captures share one transitively frozen detached graph; legacy re
       procedureId: runtime.read().state!.procedure!.timer.id,
       vote: 'yes',
     });
+    await runtime.flushCommittedCaptures();
     assert.equal(result.type, 'accepted');
     const capture = first.at(-1)!;
     assert.equal(capture, second.at(-1));
@@ -91,6 +92,7 @@ for (const operation of ['command', 'timeout', 'control', 'rollback'] as const) 
           id: id('command', 'prepare-absence'),
           seatId: seats[1]!,
         });
+        await runtime.flushCommittedCaptures();
         await clock.advanceBy(30001);
       }
       const initialCount = early.length;
@@ -148,6 +150,7 @@ for (const operation of ['command', 'timeout', 'control', 'rollback'] as const) 
         id: id('command', 'next-absence'),
         seatId: seats[2]!,
       });
+      await runtime.flushCommittedCaptures();
       assert.equal(late.length, 2);
       assert.equal(late[1]!.sequence, late[0]!.sequence + 1);
       assert.equal(late[1], early.at(-1));
@@ -158,6 +161,7 @@ for (const operation of ['command', 'timeout', 'control', 'rollback'] as const) 
         id: id('command', 'next-return'),
         seatId: seats[2]!,
       });
+      await runtime.flushCommittedCaptures();
       assert.equal(late.length, 2);
     } finally {
       release.resolve();
@@ -182,6 +186,7 @@ for (const controlOnly of [false, true]) {
         id: id('command', 'prepare-failed-control'),
         seatId: seats[1]!,
       });
+      await runtime.flushCommittedCaptures();
       await clock.advanceBy(30001);
     }
     const notices: RuntimePublication[] = [];
@@ -294,6 +299,7 @@ test('late and restored immutable baselines never replay historical private peek
       cardId: runtime.read().state!.players[0]!.stumps[0]!,
     };
     assert.equal((await runtime.dispatch(command)).type, 'accepted');
+    await runtime.flushCommittedCaptures();
     assert.ok(captures.at(-1)!.actions.length > 0);
     verifyFrozen(captures.at(-1));
     assert.ok(Object.keys(captures.at(-1)!.snapshot.state!.repetitions).length > 0);
@@ -304,6 +310,7 @@ test('late and restored immutable baselines never replay historical private peek
     });
     assert.deepEqual(late[0]!.actions, []);
     assert.equal((await runtime.dispatch(command)).type, 'accepted');
+    await runtime.flushCommittedCaptures();
     assert.equal(late.length, 1);
     const checkpoint = await runtime.checkpoint();
     await runtime.dispose();
@@ -321,3 +328,138 @@ test('late and restored immutable baselines never replay historical private peek
     await restored?.dispose();
   }
 });
+
+test('held immutable construction never blocks authority; committed hook is narrow and registration is a delivery barrier', async () => {
+  const { options, seats } = fixture('vote', 4);
+  const runtime = await GameRuntime.create(options);
+  const gate = Promise.withResolvers<void>();
+  const captures: RuntimePublication[] = [];
+  const hooks: unknown[] = [];
+  const construct = async (
+    source: RuntimePublication,
+    deliver: (capture: RuntimePublication) => void,
+  ) => {
+    if (source.kind !== 'initial') await gate.promise;
+    // The test controls delivery timing, production constructor freezes/slices.
+    deliver(source);
+  };
+  try {
+    await runtime.subscribeCommittedCapture(
+      (capture) => {
+        captures.push(capture);
+      },
+      undefined,
+      {
+        construct,
+        committed: (notice) => {
+          assert.deepEqual(Object.keys(notice).sort(), ['kind', 'sequence']);
+          assert.equal(Object.isFrozen(notice), true);
+          assert.equal(Reflect.set(notice, 'snapshot', null), false);
+          hooks.push(notice);
+        },
+      },
+    );
+    await runtime.dispatch({
+      type: 'cast-vote',
+      id: id('command', 'held-capture'),
+      actorId: seats[0]!,
+      procedureId: runtime.read().state!.procedure!.timer.id,
+      vote: 'yes',
+    });
+    assert.equal(captures.length, 1);
+    assert.equal(hooks.length, 2, 'hook ran at commit before later authority work');
+    gate.resolve();
+    await runtime.flushCommittedCaptures();
+    assert.equal(captures.length, 2);
+    const late: RuntimePublication[] = [];
+    await runtime.subscribeCommittedCapture((capture) => {
+      late.push(capture);
+    });
+    assert.equal(late.length, 1);
+    assert.deepEqual(late[0]!.actions, []);
+    assert.equal(late[0]!.sequence, captures[1]!.sequence);
+  } finally {
+    gate.resolve();
+    await runtime.dispose();
+  }
+});
+
+test('pending construction overflow fails delivery closed without blocking commits or legacy subscriptions', async () => {
+  const { options, seats } = fixture('vote', 4);
+  const runtime = await GameRuntime.create(options);
+  let reports = 0;
+  const captures: RuntimePublication[] = [],
+    legacy: RuntimePublication[] = [];
+  try {
+    await runtime.subscribeCommittedCapture(
+      (capture) => {
+        captures.push(capture);
+      },
+      () => {
+        reports++;
+      },
+    );
+    await runtime.subscribe((notice) => {
+      legacy.push(notice);
+    });
+    for (let i = 0; i < 10; i++) {
+      const result = await runtime.dispatch({
+        type: i % 2 ? 'reconnect' : 'disconnect',
+        id: id('command', `pending-overflow-${i}`),
+        seatId: seats[1]!,
+      });
+      assert.equal(result.type, 'accepted');
+    }
+    assert.equal(reports, 1);
+    await runtime.flushCommittedCaptures();
+    assert.equal(captures.length, 1, 'failed stream never resumes with a gap');
+    assert.equal(legacy.length, 11, 'legacy notices still precede dispatch completion');
+    const fresh: RuntimePublication[] = [];
+    await runtime.subscribeCommittedCapture((capture) => {
+      fresh.push(capture);
+    });
+    assert.equal(fresh.length, 1);
+    assert.deepEqual(fresh[0]!.actions, []);
+    assert.deepEqual(fresh[0]!.snapshot, runtime.read());
+  } finally {
+    await runtime.dispose();
+  }
+});
+
+for (const reason of ['dispose', 'overflow'] as const) {
+  test(`held baseline registration rejects if ${reason} removes it before invocation`, async () => {
+    const { options, seats } = fixture('vote', 4);
+    const runtime = await GameRuntime.create(options);
+    const held = Promise.withResolvers<void>(),
+      entered = Promise.withResolvers<void>();
+    let invoked = 0;
+    const registration = runtime.subscribeCommittedCapture(
+      () => {
+        invoked++;
+      },
+      undefined,
+      {
+        construct: async (source, deliver) => {
+          if (source.kind !== 'initial') throw new Error('construction refusal');
+          entered.resolve();
+          await held.promise;
+          deliver(source);
+        },
+      },
+    );
+    const rejected = assert.rejects(registration, /subscription unavailable|capture unavailable/i);
+    await entered.promise;
+    if (reason === 'dispose') await runtime.dispose();
+    else
+      await runtime.dispatch({
+        type: 'disconnect',
+        id: id('command', 'baseline-overflow'),
+        seatId: seats[1]!,
+      });
+    held.resolve();
+    await rejected;
+    assert.equal(invoked, 0);
+    await runtime.flushCommittedCaptures();
+    await runtime.dispose();
+  });
+}

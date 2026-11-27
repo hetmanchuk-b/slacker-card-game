@@ -13,6 +13,7 @@ type Packet = {
 export class AcknowledgedOutbound {
   readonly #send: (message: ServerMessage) => Promise<void>;
   readonly #fail: () => void;
+  readonly #prepare: (work: () => Promise<void>) => Promise<void>;
   readonly #limits: { messages: number; bytes: number };
   #queue: Packet[] = [];
   #bytes = 0;
@@ -24,7 +25,9 @@ export class AcknowledgedOutbound {
     send: (message: ServerMessage) => Promise<void>,
     fail: () => void,
     limits = { messages: 32, bytes: 262144 },
+    prepare: (work: () => Promise<void>) => Promise<void> = (work) => work(),
   ) {
+    this.#prepare = prepare;
     this.#send = send;
     this.#fail = fail;
     this.#limits = limits;
@@ -95,16 +98,18 @@ export class AcknowledgedOutbound {
         const packet = this.#queue.shift()!;
         let receipt: Promise<void> | null = null;
         try {
-          await packet.work((message) => {
-            if (
-              this.#closed ||
-              (packet.generation !== undefined && packet.generation !== this.#generation)
-            )
-              return;
-            if (receipt || Buffer.byteLength(JSON.stringify(message)) + 128 > packet.bytes)
-              throw new Error('Outbound bound exceeded');
-            receipt = this.#send(message);
-            void receipt.catch(() => {});
+          await this.#prepare(async () => {
+            await packet.work((message) => {
+              if (
+                this.#closed ||
+                (packet.generation !== undefined && packet.generation !== this.#generation)
+              )
+                return;
+              if (receipt || Buffer.byteLength(JSON.stringify(message)) + 128 > packet.bytes)
+                throw new Error('Outbound bound exceeded');
+              receipt = this.#send(message);
+              void receipt.catch(() => {});
+            });
           });
           if (receipt) await receipt;
         } finally {

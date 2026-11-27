@@ -1,3 +1,5 @@
+import { CAPTURE_LIMITS, constructCapture, sourceWeight } from '../runtime/capture-construction.ts';
+import type { CaptureConstruction } from '../runtime/runtime.ts';
 import { isDeepStrictEqual } from 'node:util';
 import type { GameId } from '../game/ids.ts';
 import type { BranchHead } from '../game/contracts.ts';
@@ -5,16 +7,9 @@ import type { GameState } from '../game/model.ts';
 import type { RollbackNotice } from '../projections/history.ts';
 import type { RuntimePublication } from '../runtime/runtime.ts';
 
-// Provisional logical payload quotas, NOT a V8/native/RSS ceiling. Runtime's
-// existing clone/freeze and detached legacy consumers are outside this ledger.
-export const CAPTURE_LIMITS = Object.freeze({
-  publicationBytes: 2 * 1024 * 1024,
-  gameBytes: 8 * 1024 * 1024,
-  globalBytes: 64 * 1024 * 1024,
-  games: 8,
-  publicationsPerGame: 64,
-  handles: 2048,
-});
+// Provisional logical payload quotas, NOT a V8/native/RSS ceiling. Hosted
+// pending shared sources are charged here; detached legacy work is not.
+export { CAPTURE_LIMITS } from '../runtime/capture-construction.ts';
 type Limits = { [Key in keyof typeof CAPTURE_LIMITS]: number };
 type Root = { state: GameState | null; bytes: number; refs: number };
 type Game = { bytes: number; publications: number };
@@ -79,6 +74,32 @@ export class CaptureStore {
   #publications = 0;
   #handles = 0;
   #constructing = 0;
+  readonly #readers = new Map<
+    GameId,
+    Map<string, { oldest: () => number | null; evict: () => void }>
+  >();
+  watchPressure(
+    gameId: GameId,
+    peerId: string,
+    oldest: () => number | null,
+    evict: () => void,
+  ): () => void {
+    const readers = this.#readers.get(gameId) ?? new Map();
+    const reader = { oldest, evict };
+    readers.set(peerId, reader);
+    this.#readers.set(gameId, readers);
+    return () => {
+      if (readers.get(peerId) === reader) readers.delete(peerId);
+      if (!readers.size) this.#readers.delete(gameId);
+    };
+  }
+  #evictOldest(gameId: GameId): void {
+    const candidates = [...(this.#readers.get(gameId) ?? [])]
+      .map(([peer, reader]) => ({ peer, reader, age: reader.oldest() }))
+      .filter((item): item is typeof item & { age: number } => item.age !== null)
+      .sort((a, b) => a.age - b.age || (a.peer < b.peer ? -1 : a.peer > b.peer ? 1 : 0));
+    candidates[0]?.reader.evict();
+  }
   constructor(limits: Partial<Limits> = {}) {
     this.#limits = { ...CAPTURE_LIMITS, ...limits };
   }
@@ -92,15 +113,53 @@ export class CaptureStore {
       constructing: this.#constructing,
     };
   }
+  /** Reserve before retaining a source; retain overlap through synchronous fanout. */
+  readonly construct: CaptureConstruction = (source, deliver) => {
+    const gameId = source.snapshot.head.gameId;
+    const limits = this.#limits;
+    sourceWeight(source, limits.publicationBytes);
+    const bytes = limits.publicationBytes;
+    const denied = () => {
+      const game = this.#games.get(gameId);
+      return (
+        this.#handles >= limits.handles ||
+        (!game && this.#games.size >= limits.games) ||
+        (game?.publications ?? 0) >= limits.publicationsPerGame ||
+        this.#bytes + bytes > limits.globalBytes ||
+        (game?.bytes ?? 0) + bytes > limits.gameBytes
+      );
+    };
+    // One local victim only. Active work may release nothing until settlement;
+    // never manufacture credit or cascade eviction into healthy readers.
+    if (denied()) this.#evictOldest(gameId);
+    if (denied()) unavailable();
+    const game = this.#games.get(gameId);
+    const retained = game ?? { bytes: 0, publications: 0 };
+    this.#games.set(gameId, retained);
+    retained.bytes += bytes;
+    retained.publications++;
+    this.#bytes += bytes;
+    this.#publications++;
+    this.#handles++;
+    return constructCapture(gameId, source)
+      .then(deliver)
+      .finally(() => {
+        retained.bytes -= bytes;
+        retained.publications--;
+        if (!retained.publications) this.#games.delete(gameId);
+        this.#bytes -= bytes;
+        this.#publications--;
+        this.#handles--;
+      });
+  };
   writer(epoch: string, gameId: GameId): CaptureWriter {
     const registry = new Map<string, Root>();
     return Object.freeze({
       capture: (publication: RuntimePublication, rollback?: RollbackNotice) => {
         const limits = this.#limits;
         const game = this.#games.get(gameId);
-        // Reserve one synchronous construction allowance before making wrappers.
-        // No pending raw-source queue: refusal retains nothing. Upstream runtime
-        // clone/freeze is unchanged; scheduled construction is a later increment.
+        // Finalize wrappers under the already retained source reservation when
+        // called by construct(). Direct frozen callers have no pending source.
         if (
           this.#constructing ||
           this.#handles >= limits.handles ||

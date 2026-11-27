@@ -1,3 +1,4 @@
+import { PreparationScheduler } from './preparation-scheduler.ts';
 import { CaptureStore } from './capture-store.ts';
 import type { CaptureHandle, CaptureWriter } from './capture-store.ts';
 import { startBotRunner } from '../bots/runner.ts';
@@ -40,6 +41,23 @@ export type OwnerRollbackRequest = Readonly<{
 }>;
 
 const hostedCaptures = new CaptureStore();
+const poolPreparations = new WeakMap<Pool, PreparationScheduler>();
+function preparations(pool: Pool): PreparationScheduler {
+  let scheduler = poolPreparations.get(pool);
+  if (!scheduler) {
+    if (!Number.isSafeInteger(pool.options.max) || pool.options.max! < 1)
+      throw new Error('Invalid database preparation capacity');
+    // All checked-out connections (including writer leases and other SQL users)
+    // reduce capacity. Two connections remain reserved for control/recovery.
+    scheduler = new PreparationScheduler(() =>
+      Math.max(0, pool.options.max! - (pool.totalCount - pool.idleCount) - 2),
+    );
+    const current = scheduler;
+    pool.on('release', () => current.wake());
+    poolPreparations.set(pool, scheduler);
+  }
+  return scheduler;
+}
 
 type Inputs = Omit<RuntimeOptions, 'history' | 'commit' | 'connectedSeatIds'>;
 type Entry = LiveMatch & {
@@ -48,6 +66,7 @@ type Entry = LiveMatch & {
   epoch: string;
   stopBots?: () => void;
   stopCapture?: () => void;
+  stopLegacy?: () => void;
   capture?: CaptureHandle;
   captureWriter?: CaptureWriter;
 };
@@ -105,6 +124,24 @@ export class PostgresGameHost {
     this.#inputs = options.inputs ?? systemInputs;
   }
 
+  watchDeliveryPressure(
+    gameId: GameId,
+    peerId: string,
+    oldest: () => number | null,
+    evict: () => void,
+  ): () => void {
+    return this.#captures.watchPressure(gameId, peerId, oldest, evict);
+  }
+
+  prepareDelivery(
+    game: string,
+    peer: string,
+    work: () => Promise<void>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    return preparations(this.#pool).run(game, peer, work, signal);
+  }
+
   read(lobbyId: LobbyId): Promise<HostedSnapshot | null> {
     return this.#enqueue(async () => {
       const entry = await this.#current(lobbyId);
@@ -152,6 +189,19 @@ export class PostgresGameHost {
         observer.active = false;
         observer.epoch = null;
         observers.delete(observer);
+        if (![...observers].some((item) => item.shared))
+          for (const current of this.#entries.values())
+            if (current.lobbyId === lobbyId) {
+              current.stopCapture?.();
+              delete current.stopCapture;
+              this.#dropCapture(current);
+            }
+        if (![...observers].some((item) => !item.shared))
+          for (const current of this.#entries.values())
+            if (current.lobbyId === lobbyId) {
+              current.stopLegacy?.();
+              delete current.stopLegacy;
+            }
         if (!observers.size) {
           this.#observers.delete(lobbyId);
           for (const current of this.#entries.values())
@@ -214,98 +264,179 @@ export class PostgresGameHost {
   }
 
   async #ownCapture(entry: Entry): Promise<void> {
-    entry.captureWriter = this.#captures.writer(entry.epoch, entry.gameId);
-    entry.stopCapture = await entry.runtime.subscribeCommittedCapture(
-      (publication) => {
-        if (this.#entries.get(entry.gameId) !== entry || !this.#observers.get(entry.lobbyId)?.size)
-          return;
-        let full: CaptureHandle | undefined;
-        let owner: CaptureHandle | undefined;
-        try {
-          const rollback =
-            publication.kind === 'rollback'
-              ? projectRollbackNotice(this.#history(entry))
-              : undefined;
-          if (rollback) {
+    entry.captureWriter ??= this.#captures.writer(entry.epoch, entry.gameId);
+    const sidecars = new Map<number, RollbackNotice>();
+    let failed = false;
+    let stop: (() => void) | undefined;
+    const fail = () => {
+      if (failed) return;
+      failed = true;
+      sidecars.clear();
+      stop?.();
+      delete entry.stopCapture;
+      if (this.#entries.get(entry.gameId) !== entry) return;
+      this.#dropCapture(entry);
+      for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])])
+        if (observer.shared && observer.epoch === entry.epoch) {
+          observer.epoch = null;
+          this.#report(observer);
+        }
+    };
+    try {
+      stop = await entry.runtime.subscribeCommittedCapture(
+        (publication) => {
+          const rollback = sidecars.get(publication.sequence);
+          sidecars.delete(publication.sequence);
+          if (
+            this.#entries.get(entry.gameId) !== entry ||
+            !this.#observers.get(entry.lobbyId)?.size
+          )
+            return;
+          let full: CaptureHandle | undefined;
+          let owner: CaptureHandle | undefined;
+          try {
+            full = entry.captureWriter!.capture(publication, rollback);
+            owner = entry.captureWriter!.capture(this.#baseline(full.value.publication));
+            this.#dropCapture(entry);
+            entry.capture = owner;
+            owner = undefined;
+            const notice: HostPublication = Object.freeze({
+              type: 'publication',
+              ...full.value,
+              capture: full,
+            });
+            for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])])
+              if (observer.shared && observer.epoch === entry.epoch) this.#notify(observer, notice);
+          } catch {
+            // Delivery pressure cannot fault a committed authoritative writer.
+            fail();
+          } finally {
+            owner?.release();
+            full?.release();
+            if (!this.#observers.get(entry.lobbyId)?.size) this.#dropCapture(entry);
+          }
+        },
+        fail,
+        {
+          construct: this.#captures.construct,
+          committed: (notice) => {
+            if (notice.kind !== 'rollback') return;
+            const rollback = projectRollbackNotice(this.#history(entry));
             Object.freeze(rollback.target.expected);
             Object.freeze(rollback.target);
             Object.freeze(rollback.head);
             Object.freeze(rollback);
-          }
-          full = entry.captureWriter!.capture(publication, rollback);
-          owner = entry.captureWriter!.capture(this.#baseline(full.value.publication));
-          this.#dropCapture(entry);
-          entry.capture = owner;
-          owner = undefined;
-          const notice: HostPublication = Object.freeze({
+            sidecars.set(notice.sequence, rollback);
+          },
+        },
+      );
+    } catch {
+      fail();
+      throw new GameHostError('game-unavailable');
+    }
+    if (
+      failed ||
+      this.#entries.get(entry.gameId) !== entry ||
+      ![...(this.#observers.get(entry.lobbyId) ?? [])].some(
+        (observer) => observer.active && observer.shared,
+      )
+    ) {
+      stop();
+      throw new GameHostError('game-unavailable');
+    }
+    const registeredStop = stop;
+    entry.stopCapture = () => {
+      failed = true;
+      sidecars.clear();
+      registeredStop();
+    };
+  }
+
+  async #bindLegacy(observer: Observer, entry: Entry): Promise<void> {
+    if (!entry.stopLegacy) {
+      entry.stopLegacy = await entry.runtime.subscribe(
+        (publication) => {
+          if (publication.kind === 'initial' || this.#entries.get(entry.gameId) !== entry) return;
+          const rollback =
+            publication.kind === 'rollback'
+              ? projectRollbackNotice(this.#history(entry))
+              : undefined;
+          const notice: HostPublication = {
             type: 'publication',
-            ...full.value,
-            capture: full,
-          });
-          for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])])
-            if (observer.epoch === entry.epoch) this.#notify(observer, notice);
-        } catch {
-          // Delivery admission is not a failed authoritative commit. Never keep
-          // a stale baseline or propagate store pressure into the writer queue.
-          this.#dropCapture(entry);
-          for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])])
-            if (observer.epoch === entry.epoch) this.#report(observer);
-        } finally {
-          owner?.release();
-          full?.release();
-          if (!this.#observers.get(entry.lobbyId)?.size) this.#dropCapture(entry);
-        }
-      },
-      () => {
-        if (this.#entries.get(entry.gameId) !== entry) return;
-        this.#dropCapture(entry);
-        for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])])
-          if (observer.epoch === entry.epoch) this.#report(observer);
-      },
-    );
+            epoch: entry.epoch,
+            publication,
+            ...(rollback ? { rollback } : {}),
+          };
+          for (const current of [...(this.#observers.get(entry.lobbyId) ?? [])])
+            if (!current.shared && current.epoch === entry.epoch) this.#notify(current, notice);
+        },
+        () => {
+          for (const current of [...(this.#observers.get(entry.lobbyId) ?? [])])
+            if (!current.shared && current.epoch === entry.epoch) this.#report(current);
+        },
+      );
+    }
+    const stop = await entry.runtime.subscribe((publication) => {
+      if (
+        publication.kind !== 'initial' ||
+        !observer.active ||
+        this.#entries.get(entry.gameId) !== entry
+      )
+        return;
+      observer.epoch = entry.epoch;
+      this.#notify(observer, { type: 'publication', epoch: entry.epoch, publication });
+    });
+    stop();
   }
 
   async #bind(observer: Observer, entry: Entry): Promise<void> {
-    if (!entry.capture) {
-      // Registration must be outside observe: both serialize on the same queue.
-      // This temporary listener only installs its action-free baseline. A later
-      // committed update must never be replaced by an older baseline.
-      const stop = await entry.runtime.subscribeCommittedCapture((publication) => {
-        if (
-          publication.kind !== 'initial' ||
-          !observer.active ||
-          this.#entries.get(entry.gameId) !== entry ||
-          entry.capture
-        )
-          return;
-        try {
-          entry.capture = entry.captureWriter!.capture(publication);
-        } catch {
-          /* fail closed below */
-        }
-      });
-      stop();
-    }
-    await entry.runtime.observe(async (_snapshot, nowMs) => {
-      if (!observer.active || this.#entries.get(entry.gameId) !== entry) return;
-      if (!entry.capture) throw new GameHostError('game-unavailable');
-      const baseline = entry.captureWriter!.capture(
-        this.#baseline(entry.capture.value.publication, nowMs),
+    if (!observer.shared) return this.#bindLegacy(observer, entry);
+    if (!entry.stopCapture) await this.#ownCapture(entry);
+    const owner = entry.stopCapture;
+    if (!owner) throw new GameHostError('game-unavailable');
+    // This registration's own serialized action-free baseline is the barrier,
+    // even when an older owner exists. Never await this from runtime.observe.
+    let delivered = false;
+    let stop: () => void;
+    try {
+      stop = await entry.runtime.subscribeCommittedCapture(
+        (publication) => {
+          if (
+            publication.kind !== 'initial' ||
+            !observer.active ||
+            this.#entries.get(entry.gameId) !== entry ||
+            entry.stopCapture !== owner
+          )
+            return;
+          const source =
+            entry.capture?.value.publication.sequence === publication.sequence
+              ? this.#baseline(entry.capture.value.publication, publication.nowMs)
+              : publication;
+          const baseline = entry.captureWriter!.capture(source);
+          try {
+            this.#dropCapture(entry);
+            entry.capture = baseline.retain();
+            observer.epoch = entry.epoch;
+            delivered = true;
+            this.#notify(
+              observer,
+              Object.freeze({ type: 'publication', ...baseline.value, capture: baseline }),
+            );
+          } finally {
+            baseline.release();
+          }
+        },
+        undefined,
+        { construct: this.#captures.construct },
       );
-      try {
-        observer.epoch = entry.epoch;
-        this.#notify(
-          observer,
-          Object.freeze({ type: 'publication', ...baseline.value, capture: baseline }),
-        );
-      } finally {
-        baseline.release();
-      }
-    });
+    } catch {
+      throw new GameHostError('game-unavailable');
+    }
+    stop();
+    if (!delivered || entry.stopCapture !== owner) throw new GameHostError('game-unavailable');
   }
 
   async #bindObservers(entry: Entry): Promise<void> {
-    await this.#ownCapture(entry);
     for (const observer of [...(this.#observers.get(entry.lobbyId) ?? [])])
       if (observer.active) {
         try {
@@ -820,7 +951,9 @@ export class PostgresGameHost {
   async #release(entry: Entry, save: boolean): Promise<void> {
     entry.stopBots?.();
     entry.stopCapture?.();
+    entry.stopLegacy?.();
     delete entry.stopCapture;
+    delete entry.stopLegacy;
     this.#dropCapture(entry);
     delete entry.captureWriter;
     if (this.#entries.get(entry.gameId) === entry) this.#entries.delete(entry.gameId);

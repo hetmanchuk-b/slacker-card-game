@@ -1,3 +1,4 @@
+import { QueuedDeadline } from './queued-deadline.ts';
 import type { CaptureHandle } from './capture-store.ts';
 import { makeOwnerHistoryPage } from '../protocol/history-page.ts';
 import { projectOwnerHistory } from '../projections/history.ts';
@@ -146,6 +147,8 @@ type Peer = {
   seatId: SeatId | null;
   publications: {
     capture: CaptureHandle;
+    pinnedAt: number;
+    deadline: QueuedDeadline;
     publication: RuntimePublication;
     rollback?: RollbackNotice;
     epoch: string;
@@ -154,6 +157,9 @@ type Peer = {
   }[];
   publicationBytes: number;
   publishing: boolean;
+  activePublication: Peer['publications'][number] | null;
+  pressureGame: string | null;
+  stopPressure: (() => void) | null;
 };
 const DELIVERY = {
   jobs: 64,
@@ -161,6 +167,7 @@ const DELIVERY = {
   messages: 32,
   bytes: 262144,
   ackTimeoutMs: 2000,
+  queuedAgeMs: 2000,
 };
 export type TransportOptions = Readonly<{
   tls: Pick<ServerOptions, 'key' | 'cert'>;
@@ -633,6 +640,15 @@ export class PenkyTransport {
         },
         () => this.#stop(peer),
         this.#delivery,
+        (work) =>
+          peer.closed
+            ? work()
+            : this.#options.host.prepareDelivery(
+                peer.lobbyId ?? peer.socket.id,
+                peer.socket.id,
+                work,
+                peer.cancellation.signal,
+              ),
       ),
       watch: 0,
       stopWatch: null,
@@ -643,6 +659,9 @@ export class PenkyTransport {
       publications: [],
       publicationBytes: 0,
       publishing: false,
+      activePublication: null,
+      pressureGame: null,
+      stopPressure: null,
     };
     this.#peers.add(peer);
     socket.conn.once('close', () => this.#stop(peer));
@@ -1087,12 +1106,14 @@ export class PenkyTransport {
   }
 
   #discardStream(peer: Peer): void {
+    peer.activePublication?.deadline.started();
     peer.generation++;
     peer.streamId = randomUUID();
     peer.sequence = 0;
     peer.outbound.invalidate(peer.generation);
     for (const item of peer.publications) {
       peer.publicationBytes -= item.bytes;
+      item.deadline.started();
       item.capture.release();
     }
     peer.publications = [];
@@ -1102,6 +1123,9 @@ export class PenkyTransport {
     peer.watch++;
     peer.stopWatch?.();
     peer.stopWatch = null;
+    peer.stopPressure?.();
+    peer.stopPressure = null;
+    peer.pressureGame = null;
     this.#discardStream(peer);
     peer.epoch = null;
     peer.branch = null;
@@ -1118,6 +1142,23 @@ export class PenkyTransport {
       return;
     }
     const publication = notice.publication;
+    const gameId = publication.snapshot.head.gameId;
+    if (peer.pressureGame !== gameId) {
+      peer.stopPressure?.();
+      peer.pressureGame = gameId;
+      peer.stopPressure = this.#options.host.watchDeliveryPressure(
+        gameId,
+        peer.socket.id,
+        () => {
+          const times = [
+            ...peer.publications.map((item) => item.pinnedAt),
+            ...(peer.activePublication ? [peer.activePublication.pinnedAt] : []),
+          ];
+          return times.length ? Math.min(...times) : null;
+        },
+        () => this.#stop(peer),
+      );
+    }
     if (publication.kind === 'handoff') {
       this.#discardStream(peer);
       peer.epoch = null;
@@ -1148,8 +1189,13 @@ export class PenkyTransport {
       return;
     }
     peer.publicationBytes += bytes;
+    const deadline = new QueuedDeadline(this.#delivery.queuedAgeMs, () => {
+      if (this.#live(peer)) this.#stop(peer);
+    });
     peer.publications.push({
       capture,
+      pinnedAt: deadline.since,
+      deadline,
       publication,
       ...(notice.rollback ? { rollback: notice.rollback } : {}),
       epoch: notice.epoch,
@@ -1164,13 +1210,19 @@ export class PenkyTransport {
     try {
       while (this.#live(peer) && peer.publications.length) {
         const item = peer.publications.shift()!;
+        peer.activePublication = item;
         try {
           const actions = item.publication.kind === 'initial' ? [] : item.publication.actions;
           const noticeCount = item.rollback ? 1 : 0;
           for (let index = 0; index <= actions.length + noticeCount; index++) {
             if (item.generation !== peer.generation || !this.#live(peer)) break;
+            if (index > 0)
+              item.deadline = new QueuedDeadline(this.#delivery.queuedAgeMs, () => {
+                if (item.generation === peer.generation && this.#live(peer)) this.#stop(peer);
+              });
             await peer.outbound.prepare(
               async (emit) => {
+                item.deadline.started();
                 if (item.generation !== peer.generation || !this.#live(peer)) return;
                 const binding = await this.#options.access.inspectSeat(
                   peer.token,
@@ -1230,6 +1282,7 @@ export class PenkyTransport {
                           // Earlier queued observations are never replayed by resync.
                           for (const queued of peer.publications) {
                             peer.publicationBytes -= queued.bytes;
+                            queued.deadline.started();
                             queued.capture.release();
                           }
                           peer.publications = [];
@@ -1268,7 +1321,9 @@ export class PenkyTransport {
           if (item.generation === peer.generation && this.#live(peer)) this.#stop(peer);
         } finally {
           peer.publicationBytes -= item.bytes;
+          item.deadline.started();
           item.capture.release();
+          peer.activePublication = null;
         }
       }
     } catch {

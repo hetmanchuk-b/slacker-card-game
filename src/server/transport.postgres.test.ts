@@ -18,6 +18,7 @@ import { finishMatch } from '../runtime/testing/match.ts';
 import { GUEST_COOKIE_NAME, GUEST_TTL_MS, guestTokenHash } from './guest-session.ts';
 import { CaptureStore } from './capture-store.ts';
 import { PenkyTransport } from './transport.ts';
+import { PreparationScheduler } from './preparation-scheduler.ts';
 import type { TransportOptions } from './transport.ts';
 import type { OwnerHistoryCursor, ServerMessage } from '../protocol/contracts.ts';
 
@@ -2820,6 +2821,178 @@ test('HTTPS and Socket.IO authenticated resync', { skip: !url, timeout: 240000 }
       const after = await context.host.read(context.members[0]!.lobbyId);
       assert.equal(after!.epoch, before!.epoch);
       assert.equal(after!.snapshot.state!.phase.type, 'dealing');
+    },
+  );
+
+  await t.test(
+    'concurrent matches progress while another match awaits a slow receipt',
+    async (t) => {
+      const slow = await fixture(t, 2, 60000, { ackTimeoutMs: 1500 });
+      const healthy = await fixture(t, 2, 60000);
+      const slowSockets = await Promise.all([slow.connect(), slow.connect(1)]);
+      const healthySockets = await Promise.all([healthy.connect(), healthy.connect(1)]);
+      const slowSocket = slowSockets[0]!,
+        healthySocket = healthySockets[0]!;
+      for (const socket of slowSockets) await message(socket, resync(slow.members[0]!.lobbyId));
+      for (const socket of healthySockets)
+        await message(socket, resync(healthy.members[0]!.lobbyId));
+      receiptEnabled.set(slowSocket, false);
+      const submitted = once(slowSocket, 'server-message');
+      await slow.host.withCurrent(slow.members[0]!.lobbyId, slow.start.gameId, async (runtime) => {
+        const phase = runtime.read().state!.phase;
+        if (phase.type !== 'dealing') assert.fail();
+        await runtime.dispatch({
+          type: 'draw-card',
+          id: id('command', randomUUID()),
+          actorId: phase.nextSeatId,
+        });
+      });
+      await submitted;
+      accepted(await play(healthy, healthySocket, { type: 'draw-card' }), 'violation');
+      assert.equal(
+        slowSocket.connected,
+        true,
+        'healthy progress does not await the other receipt timeout',
+      );
+      assert.equal(healthySocket.connected, true);
+    },
+  );
+
+  await t.test(
+    'queued age resets an idle reader before its independent receipt deadline',
+    async (t) => {
+      const context = await fixture(t, 2, 60000, { queuedAgeMs: 40, ackTimeoutMs: 1500 });
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      const socket = sockets[0]!;
+      for (const current of sockets) await message(current, resync(context.members[0]!.lobbyId));
+      receiptEnabled.set(socket, false);
+      const submitted = once(socket, 'server-message');
+      const draw = async () =>
+        context.host.withCurrent(
+          context.members[0]!.lobbyId,
+          context.start.gameId,
+          async (runtime) => {
+            const phase = runtime.read().state!.phase;
+            if (phase.type !== 'dealing') assert.fail();
+            await runtime.dispatch({
+              type: 'draw-card',
+              id: id('command', randomUUID()),
+              actorId: phase.nextSeatId,
+            });
+          },
+        );
+      await draw();
+      await submitted;
+      const ended = once(socket, 'disconnect');
+      const started = performance.now();
+      await draw();
+      await ended;
+      assert.ok(
+        performance.now() - started < 1000,
+        'queue-age timer, not the 1500ms receipt timeout',
+      );
+      assert.ok(
+        context.captures.stats().handles > 0,
+        'uncertain active receipt still pins its capture',
+      );
+      sockets[1]!.disconnect();
+      await until(async () => context.captures.stats().bytes === 0);
+    },
+  );
+
+  await t.test(
+    'each later packet gets a queued-age deadline after the previous receipt settles',
+    async (t) => {
+      const context = await fixture(t, 2, 60000, { ackTimeoutMs: 5000 });
+      const sockets = await Promise.all([context.connect(), context.connect(1)]);
+      const socket = sockets[0]!;
+      for (const current of sockets) await message(current, resync(context.members[0]!.lobbyId));
+      await until(async () => context.captures.stats().handles === 1);
+      let capacity = 1,
+        blockFinal = false;
+      const scheduler = new PreparationScheduler(() => capacity);
+      const prepare = context.host.prepareDelivery.bind(context.host);
+      const queued = Promise.withResolvers<void>(),
+        settling = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      t.mock.method(context.host, 'prepareDelivery', (...args: Parameters<typeof prepare>) => {
+        const [game, peer, work, signal] = args;
+        if (peer !== socket.id) return prepare(...args);
+        const pending = scheduler.run(game, peer, work, signal);
+        if (!blockFinal) return pending;
+        queued.resolve();
+        return pending.then(async () => {
+          settling.resolve();
+          await release.promise;
+        });
+      });
+      const firstAction = Promise.withResolvers<void>();
+      let acknowledgeHeld: (() => void) | undefined;
+      const emitted: ServerMessage[] = [];
+      receiptEnabled.set(socket, false);
+      socket.on(
+        'server-message',
+        (value: ServerMessage, receipt: string, ack: (value: string) => void) => {
+          emitted.push(value);
+          if (value.type === 'action' && !acknowledgeHeld) {
+            acknowledgeHeld = () => ack(receipt);
+            firstAction.resolve();
+          }
+        },
+      );
+      try {
+        const result = await context.host.withCurrent(
+          context.members[0]!.lobbyId,
+          context.start.gameId,
+          async (runtime) => {
+            const phase = runtime.read().state!.phase;
+            if (phase.type !== 'dealing') assert.fail();
+            return runtime.dispatch({
+              type: 'draw-card',
+              id: id('command', randomUUID()),
+              actorId: phase.nextSeatId,
+            });
+          },
+        );
+        assert.equal(result.type, 'accepted');
+        await firstAction.promise;
+        await until(async () => scheduler.active === 0 && context.captures.stats().handles === 2);
+        capacity = 0;
+        blockFinal = true;
+        const waitingSince = performance.now();
+        acknowledgeHeld!();
+        await queued.promise;
+        assert.deepEqual(
+          emitted.map((value) => value.type),
+          ['action'],
+        );
+        assert.equal(socket.connected, true, 'packet preparation is queued without an emission');
+        await until(async () => !socket.connected);
+        await settling.promise;
+        assert.ok(
+          performance.now() - waitingSince >= 1900,
+          'queued wait uses the two-second bound',
+        );
+        assert.deepEqual(
+          emitted.map((value) => value.type),
+          ['action'],
+          'no state emission or receipt timer was needed',
+        );
+        sockets[1]!.disconnect();
+        await until(async () => context.captures.stats().handles === 1);
+        assert.ok(
+          context.captures.stats().bytes > 0,
+          'active publication remains charged until preparation settlement',
+        );
+        release.resolve();
+        await until(async () => context.captures.stats().bytes === 0);
+        assert.equal(context.captures.stats().roots, 0);
+      } finally {
+        sockets.forEach((current) => current.disconnect());
+        release.resolve();
+        capacity = 1;
+        scheduler.wake();
+      }
     },
   );
 

@@ -98,3 +98,37 @@ test('outbound invalidation drops unsent stream packets but preserves non-stream
   await queue.drained();
   assert.deepEqual(sent, ['unavailable', 'invalid-message', 'unauthorized']);
 });
+
+test('shared preparation slot releases after emission submission before delayed receipt', async () => {
+  const receipt = Promise.withResolvers<void>();
+  let preparations = 0;
+  let sent = 0;
+  const queue = new AcknowledgedOutbound(
+    async () => {
+      sent++;
+      await receipt.promise;
+    },
+    () => assert.fail(),
+    { messages: 4, bytes: 4096 },
+    async (work) => {
+      preparations++;
+      try {
+        await work();
+      } finally {
+        preparations--;
+      }
+    },
+  );
+  const pending = queue.prepare((emit) => emit(protocolError('unavailable')), 4096);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sent, 1);
+  assert.equal(preparations, 0);
+  let settled = false;
+  void pending.then(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  receipt.resolve();
+  await pending;
+});

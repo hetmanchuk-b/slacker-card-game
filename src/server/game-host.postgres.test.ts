@@ -177,6 +177,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           beforeCommandId: request.id,
           knowledgeWarningAcknowledged: true,
         });
+        await runtime.flushCommittedCaptures();
         assert.equal(result.type, 'accepted');
         await runtime.observe(async () => {});
         await runtime.dispatch({
@@ -184,6 +185,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           id: id('command', randomUUID()),
           seatId: member.seatId,
         });
+        await runtime.flushCommittedCaptures();
         assert.equal(runtime.read().state, null);
         assert.notEqual(runtime.read().head.branchId, old.branchId);
         assert.equal(
@@ -224,6 +226,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           if (phase.type !== 'dealing') assert.fail();
           finalDraw = id('command', randomUUID());
           await runtime.dispatch({ type: 'draw-card', id: finalDraw, actorId: phase.nextSeatId });
+          await runtime.flushCommittedCaptures();
         }
         assert.notEqual(runtime.readBotMemory(joined.seatId).trump, null);
       });
@@ -248,6 +251,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           id: id('command', randomUUID()),
           seatId: member.seatId,
         });
+        await runtime.flushCommittedCaptures();
         assert.equal(runtime.read().paused, true);
         assert.equal(runtime.read().state!.phase.type, 'dealing');
         assert.equal(runtime.read().state!.deck.length, 1);
@@ -455,6 +459,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           actorId: member.seatId,
           seatId: joined.seatId,
         });
+        await runtime.flushCommittedCaptures();
         await runtime.dispatch({
           type: 'replacement-vote',
           id: id('command', randomUUID()),
@@ -462,6 +467,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           procedureId: runtime.read().replacementVote!.timer.id,
           vote: 'yes',
         });
+        await runtime.flushCommittedCaptures();
         await runtime.observe(async () => {});
         const checkpoint = await runtime.checkpoint();
         const draws = checkpoint.receipts.filter(
@@ -499,6 +505,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           actorId: joined.seatId,
           seatId: member.seatId,
         });
+        await runtime.flushCommittedCaptures();
         await runtime.dispatch({
           type: 'replacement-vote',
           id: id('command', randomUUID()),
@@ -506,12 +513,14 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           procedureId: runtime.read().replacementVote!.timer.id,
           vote: 'yes',
         });
+        await runtime.flushCommittedCaptures();
         for (let i = 0; i < 18; i++) {
           await runtime.dispatch({
             type: 'draw-card',
             id: id('command', randomUUID()),
             actorId: joined.seatId,
           });
+          await runtime.flushCommittedCaptures();
           await runtime.observe(async () => {});
         }
         assert.equal(runtime.read().state!.phase.type, 'trump-reveal');
@@ -576,6 +585,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           actorId: member.seatId,
           seatId: joined.seatId,
         });
+        await runtime.flushCommittedCaptures();
         await runtime.dispatch({
           type: 'replacement-vote',
           id: id('command', randomUUID()),
@@ -583,6 +593,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           procedureId: runtime.read().replacementVote!.timer.id,
           vote: 'yes',
         });
+        await runtime.flushCommittedCaptures();
         for (let i = 0; i < 8; i++) await runtime.observe(async () => {});
         assert.equal(runtime.read().state!.claims[0]!.resolution, 'tied');
         await runtime.dispatch({
@@ -595,12 +606,14 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           scope: 'dealing',
           scopeNumber: 0,
         });
+        await runtime.flushCommittedCaptures();
         await runtime.dispatch({
           type: 'request-withdrawal',
           id: id('command', randomUUID()),
           actorId: member.seatId,
           claimId: runtime.read().state!.claims[1]!.claim.id,
         });
+        await runtime.flushCommittedCaptures();
         for (let i = 0; i < 8; i++) await runtime.observe(async () => {});
         assert.equal(runtime.read().state!.claims[1]!.resolution, 'withdrawn');
         const commands = (await runtime.checkpoint()).receipts
@@ -652,6 +665,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
             id: id('command', randomUUID()),
             actorId: phase.nextSeatId,
           });
+          await runtime.flushCommittedCaptures();
         }
         await clock.advanceBy(10000);
         assert.equal(runtime.read().state!.procedure?.type, 'penalty');
@@ -665,6 +679,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           actorId: member.seatId,
           seatId: joined.seatId,
         });
+        await runtime.flushCommittedCaptures();
         await runtime.dispatch({
           type: 'replacement-vote',
           id: id('command', randomUUID()),
@@ -672,6 +687,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           procedureId: runtime.read().replacementVote!.timer.id,
           vote: 'yes',
         });
+        await runtime.flushCommittedCaptures();
         await runtime.observe(async () => {});
         assert.equal(runtime.read().state!.procedure, null);
         const checkpoint = await runtime.checkpoint();
@@ -713,6 +729,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           id: id('command', randomUUID()),
           actorId: member.seatId,
         });
+        await runtime.flushCommittedCaptures();
         for (let index = 0; index < 36; index++) {
           const phase = runtime.read().state!.phase;
           if (phase.type !== 'dealing') assert.fail();
@@ -721,6 +738,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
             id: id('command', randomUUID()),
             actorId: phase.nextSeatId,
           });
+          await runtime.flushCommittedCaptures();
         }
         await clock.advanceBy(10000);
       });
@@ -753,6 +771,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
             actorId: member.seatId,
             seatId: joined.seatId,
           });
+          await runtime.flushCommittedCaptures();
           await runtime.dispatch({
             type: 'replacement-vote',
             id: id('command', randomUUID()),
@@ -760,6 +779,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
             procedureId: runtime.read().replacementVote!.timer.id,
             vote: 'yes',
           });
+          await runtime.flushCommittedCaptures();
         });
         // The host operation is now finished. Only the autonomous commit remains;
         // SQL holds its failure until no host request can discover the fault.
@@ -822,6 +842,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
             id: id('command', randomUUID()),
             actorId: phase.nextSeatId,
           });
+          await runtime.flushCommittedCaptures();
         }
         await clock.advanceBy(10000);
         await finishMatch(runtime);
@@ -910,6 +931,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
             id: id('command', randomUUID()),
             actorId: phase.nextSeatId,
           });
+          await runtime.flushCommittedCaptures();
         }
         await clock.advanceBy(10000);
         await finishMatch(runtime);
@@ -1062,6 +1084,137 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   );
 
   await t.test(
+    'loading a ninth writer after capture saturation preserves authoritative routing',
+    async (t) => {
+      const captures = new CaptureStore();
+      const stops = [];
+      for (let i = 0; i < 8; i++) {
+        const game = await setup(t, captures);
+        stops.push(await game.host.subscribeCommittedCapture(game.member.lobbyId, () => {}));
+      }
+      assert.equal(captures.stats().games, 8);
+      const ninth = await setup(t, captures);
+      const before = await ninth.host.read(ninth.member.lobbyId);
+      assert.ok(before);
+      await assert.rejects(
+        ninth.host.subscribeCommittedCapture(ninth.member.lobbyId, () => {}),
+        /game-unavailable/,
+      );
+      const result = await ninth.host.withCurrent(
+        ninth.member.lobbyId,
+        ninth.request.gameId,
+        async (runtime) => {
+          const phase = runtime.read().state!.phase;
+          if (phase.type !== 'dealing') assert.fail();
+          return runtime.dispatch({
+            type: 'draw-card',
+            id: id('command', randomUUID()),
+            actorId: phase.nextSeatId,
+          });
+        },
+      );
+      assert.equal(result.type, 'accepted');
+      assert.equal((await ninth.host.read(ninth.member.lobbyId))!.epoch, before.epoch);
+      stops.forEach((stop) => stop());
+      const notices: HostPublication[] = [];
+      const stop = await ninth.host.subscribeCommittedCapture(ninth.member.lobbyId, (notice) => {
+        notices.push(notice);
+      });
+      assert.equal(notices.length, 1);
+      stop();
+      assert.equal(captures.stats().bytes, 0);
+    },
+  );
+
+  await t.test(
+    'failed pending owner baseline cannot reinstall a dead owner before fresh registration',
+    async (t) => {
+      const captures = new CaptureStore();
+      const construct = captures.construct;
+      const gate = Promise.withResolvers<void>(),
+        entered = Promise.withResolvers<void>();
+      let blocked = true,
+        denyUpdates = true;
+      t.mock.method(captures, 'construct', (...[source, deliver]: Parameters<typeof construct>) => {
+        if (denyUpdates && source.kind !== 'initial') throw new Error('construction refused');
+        return construct(source, async (capture) => {
+          if (blocked) {
+            entered.resolve();
+            await gate.promise;
+          }
+          deliver(capture);
+        });
+      });
+      t.after(() => gate.resolve());
+      const { host, member, request } = await setup(t, captures);
+      const runtime = await host.withCurrent(member.lobbyId, request.gameId, async (r) => r);
+      const registration = host.subscribeCommittedCapture(member.lobbyId, () =>
+        assert.fail('cancelled baseline'),
+      );
+      const rejected = assert.rejects(registration, /game-unavailable/);
+      await entered.promise;
+      await runtime.dispatch({
+        type: 'disconnect',
+        id: id('command', randomUUID()),
+        seatId: request.seatIds[1]!,
+      });
+      gate.resolve();
+      await rejected;
+      await runtime.flushCommittedCaptures();
+      assert.equal(captures.stats().bytes, 0);
+      blocked = false;
+      denyUpdates = false;
+      const notices: HostPublication[] = [];
+      const stop = await host.subscribeCommittedCapture(member.lobbyId, (notice) => {
+        notices.push(notice);
+      });
+      await runtime.dispatch({
+        type: 'reconnect',
+        id: id('command', randomUUID()),
+        seatId: request.seatIds[1]!,
+      });
+      await runtime.flushCommittedCaptures();
+      assert.equal(notices.length, 2, 'fresh registration has a live update owner');
+      stop();
+      assert.equal(captures.stats().bytes, 0);
+    },
+  );
+
+  await t.test(
+    'last shared unsubscribe stops idle ownership before paced rollback captures',
+    async (t) => {
+      const captures = new CaptureStore();
+      const construct = t.mock.method(captures, 'construct');
+      const { host, member, request } = await setup(t, captures);
+      const runtime = await host.withCurrent(member.lobbyId, request.gameId, async (r) => r);
+      const stop = await host.subscribeCommittedCapture(member.lobbyId, () => {});
+      stop();
+      const calls = construct.mock.callCount();
+      for (let i = 0; i < 3; i++) {
+        const phase = runtime.read().state!.phase;
+        if (phase.type !== 'dealing') assert.fail();
+        const commandId = id('command', randomUUID());
+        await runtime.dispatch({ type: 'draw-card', id: commandId, actorId: phase.nextSeatId });
+        await runtime.dispatch({
+          type: 'rollback',
+          id: id('command', randomUUID()),
+          actorId: member.seatId,
+          expected: runtime.read().head,
+          beforeCommandId: commandId,
+          knowledgeWarningAcknowledged: true,
+        });
+        await runtime.flushCommittedCaptures();
+      }
+      assert.equal(
+        construct.mock.callCount(),
+        calls,
+        'no idle source or rollback-sidecar owner remains',
+      );
+      assert.equal(captures.stats().bytes, 0);
+    },
+  );
+
+  await t.test(
     'idle capture owners release ninth-game admission while live in-flight handles still pin slots',
     async (t) => {
       const captures = new CaptureStore();
@@ -1120,7 +1273,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   await t.test(
     'capture admission refusal clears ownership without rejecting committed play or replacing its writer',
     async (t) => {
-      const captures = new CaptureStore({ handles: 3 });
+      const captures = new CaptureStore({ handles: 4 });
       const { host, member, request } = await setup(t, captures);
       let pinned: CaptureHandle | undefined;
       let reports = 0;
@@ -1143,6 +1296,9 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           actorId: phase.nextSeatId,
         });
       });
+      await host.withCurrent(member.lobbyId, request.gameId, async (runtime) =>
+        runtime.flushCommittedCaptures(),
+      );
       assert.equal(result.type, 'accepted');
       assert.equal(reports, 1);
       assert.equal((await host.read(member.lobbyId))!.epoch, before!.epoch);
@@ -1189,6 +1345,9 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           id: id('command', randomUUID()),
           actorId: phase.nextSeatId,
         });
+        assert.equal(legacy.length, 2, 'legacy host callback precedes dispatch resolution');
+        assert.equal(a.length, 1, 'shared host construction remains scheduled');
+        await runtime.flushCommittedCaptures();
       });
       const first = a.at(-1)!,
         second = b.at(-1)!,
@@ -1232,58 +1391,163 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
   );
 
   await t.test(
-    'shared late registration is runtime ordered and reuses the admitted owner',
+    'late baseline rejects when its existing owner loses finalization before delivery',
     async (t) => {
-      const { host, member, request } = await setup(t);
+      const captures = new CaptureStore();
+      const construct = captures.construct;
+      const writer = captures.writer.bind(captures);
+      const ownerEntered = Promise.withResolvers<void>(),
+        ownerGate = Promise.withResolvers<void>();
+      const baselineEntered = Promise.withResolvers<void>(),
+        baselineGate = Promise.withResolvers<void>();
+      const ownerFailed = Promise.withResolvers<void>();
+      let holdUpdate = false,
+        holdBaseline = false,
+        refuseUpdate = false;
+      t.mock.method(captures, 'construct', (...[source, deliver]: Parameters<typeof construct>) =>
+        construct(source, async (capture) => {
+          if (holdUpdate && capture.kind === 'update') {
+            ownerEntered.resolve();
+            await ownerGate.promise;
+          }
+          if (holdBaseline && capture.kind === 'initial') {
+            baselineEntered.resolve();
+            await baselineGate.promise;
+          }
+          deliver(capture);
+        }),
+      );
+      t.mock.method(captures, 'writer', (...args: Parameters<typeof writer>) => {
+        const actual = writer(...args);
+        return Object.freeze({
+          capture: (...input: Parameters<typeof actual.capture>) => {
+            if (refuseUpdate && input[0].kind === 'update') {
+              refuseUpdate = false;
+              throw new Error('injected owner finalization refusal');
+            }
+            return actual.capture(...input);
+          },
+        });
+      });
+      t.after(() => {
+        ownerGate.resolve();
+        baselineGate.resolve();
+      });
+      const { host, member, request } = await setup(t, captures);
       const runtime = await host.withCurrent(member.lobbyId, request.gameId, async (r) => r);
-      const early: HostPublication[] = [],
-        late: HostPublication[] = [];
-      await host.subscribeCommittedCapture(member.lobbyId, (n) => {
-        early.push(n);
-      });
-      // First observer reactivates the idle owner through a temporary baseline;
-      // subsequent observers reuse that owner without another subscription.
-      runtime.subscribeCommittedCapture = () => {
-        throw new Error('extra owner');
-      };
-      const entered = Promise.withResolvers<void>(),
-        release = Promise.withResolvers<void>();
-      const barrier = runtime.observe(async () => {
-        entered.resolve();
-        await release.promise;
-      });
-      await entered.promise;
-      const queued = Promise.withResolvers<void>();
-      const observe = runtime.observe.bind(runtime);
-      runtime.observe = (operation) => {
-        const result = observe(operation);
-        queued.resolve();
-        return result;
-      };
-      const registration = host.subscribeCommittedCapture(member.lobbyId, (n) => {
-        late.push(n);
-      });
-      await queued.promise;
-      runtime.observe = observe;
+      const stopEarly = await host.subscribeCommittedCapture(
+        member.lobbyId,
+        () => {},
+        () => ownerFailed.resolve(),
+      );
+      t.after(stopEarly);
+      holdUpdate = true;
       const phase = runtime.read().state!.phase;
       if (phase.type !== 'dealing') assert.fail();
-      const command = runtime.dispatch({
+      const result = await runtime.dispatch({
         type: 'draw-card',
         id: id('command', randomUUID()),
         actorId: phase.nextSeatId,
       });
-      release.resolve();
-      await barrier;
+      assert.equal(result.type, 'accepted');
+      await ownerEntered.promise;
+      holdBaseline = true;
+      const late: HostPublication[] = [];
+      const registration = host.subscribeCommittedCapture(member.lobbyId, (notice) => {
+        late.push(notice);
+      });
+      const rejected = assert.rejects(registration, /game-unavailable/);
+      await baselineEntered.promise;
+      refuseUpdate = true;
+      ownerGate.resolve();
+      await ownerFailed.promise;
+      assert.equal(late.length, 0);
+      baselineGate.resolve();
+      await rejected;
+      await runtime.flushCommittedCaptures();
+      assert.equal(
+        late.length,
+        0,
+        'lost owner cannot be replaced by a successful-looking baseline',
+      );
+      holdUpdate = false;
+      holdBaseline = false;
+      const fresh: HostPublication[] = [];
+      const stopFresh = await host.subscribeCommittedCapture(member.lobbyId, (notice) => {
+        fresh.push(notice);
+      });
+      const next = runtime.read().state!.phase;
+      if (next.type !== 'dealing') assert.fail();
+      await runtime.dispatch({
+        type: 'draw-card',
+        id: id('command', randomUUID()),
+        actorId: next.nextSeatId,
+      });
+      await runtime.flushCommittedCaptures();
+      assert.equal(fresh.length, 2, 'only explicit fresh registration obtains a live update owner');
+      assert.equal(late.length, 0);
+      stopFresh();
+      stopEarly();
+      assert.equal(captures.stats().bytes, 0);
+    },
+  );
+
+  await t.test(
+    'shared late registration waits for scheduled current baseline even with an older owner',
+    async (t) => {
+      const captures = new CaptureStore();
+      const construct = captures.construct;
+      const gate = Promise.withResolvers<void>(),
+        entered = Promise.withResolvers<void>();
+      let blocked = false;
+      t.mock.method(captures, 'construct', (...[source, deliver]: Parameters<typeof construct>) =>
+        construct(source, async (capture) => {
+          if (blocked) {
+            entered.resolve();
+            await gate.promise;
+          }
+          deliver(capture);
+        }),
+      );
+      t.after(() => gate.resolve());
+      const { host, member, request } = await setup(t, captures);
+      const runtime = await host.withCurrent(member.lobbyId, request.gameId, async (r) => r);
+      const early: HostPublication[] = [],
+        late: HostPublication[] = [];
+      await host.subscribeCommittedCapture(member.lobbyId, (notice) => {
+        early.push(notice);
+      });
+      blocked = true;
+      const phase = runtime.read().state!.phase;
+      if (phase.type !== 'dealing') assert.fail();
+      await runtime.dispatch({
+        type: 'draw-card',
+        id: id('command', randomUUID()),
+        actorId: phase.nextSeatId,
+      });
+      await entered.promise;
+      assert.equal(early.length, 1, 'dispatch does not wait for construction');
+      let registered = false;
+      const registration = host
+        .subscribeCommittedCapture(member.lobbyId, (notice) => {
+          late.push(notice);
+        })
+        .then(() => {
+          registered = true;
+        });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(registered, false, 'registration waits for its own baseline, not an old owner');
+      gate.resolve();
       await registration;
-      await command;
-      assert.equal(late.length, 2);
+      await runtime.flushCommittedCaptures();
+      assert.equal(registered, true);
       const baseline = late[0]!,
-        update = late[1]!;
+        update = early.at(-1)!;
       if (baseline.type !== 'publication' || update.type !== 'publication') assert.fail();
       assert.equal(baseline.publication.kind, 'initial');
       assert.deepEqual(baseline.publication.actions, []);
-      assert.equal(update, early.at(-1));
-      assert.ok(update.publication.sequence > baseline.publication.sequence);
+      assert.equal(baseline.publication.sequence, update.publication.sequence);
+      assert.deepEqual(baseline.publication.snapshot, runtime.read());
     },
   );
 
@@ -1308,6 +1572,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           id: id('command', randomUUID()),
           actorId: phase.nextSeatId,
         });
+        await runtime.flushCommittedCaptures();
       });
       assert.equal(notices.at(-1)!.type, 'publication');
       await host.recover(member.lobbyId);
@@ -1325,6 +1590,78 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
       const count = notices.length;
       await host.recover(member.lobbyId);
       assert.equal(notices.length, count);
+    },
+  );
+
+  await t.test(
+    'held rollback captures retain their original synchronous metadata across a second rollback to null',
+    async (t) => {
+      const captures = new CaptureStore();
+      const construct = captures.construct;
+      const gate = Promise.withResolvers<void>();
+      let blocked = false;
+      t.mock.method(captures, 'construct', (...[source, deliver]: Parameters<typeof construct>) =>
+        construct(source, async (capture) => {
+          if (blocked) await gate.promise;
+          deliver(capture);
+        }),
+      );
+      t.after(() => gate.resolve());
+      const { host, member, request } = await setup(t, captures);
+      const runtime = await host.withCurrent(member.lobbyId, request.gameId, async (r) => r);
+      const seen: HostPublication[] = [];
+      await host.subscribeCommittedCapture(member.lobbyId, (notice) => {
+        seen.push(notice);
+      });
+      const phase = runtime.read().state!.phase;
+      if (phase.type !== 'dealing') assert.fail();
+      await runtime.dispatch({
+        type: 'draw-card',
+        id: id('command', randomUUID()),
+        actorId: phase.nextSeatId,
+      });
+      await runtime.flushCommittedCaptures();
+      const history = await host.observeHistory(
+        member.lobbyId,
+        request.gameId,
+        async (value) => value,
+      );
+      const targets = [history.active.actions.at(-1)!, history.active.actions[0]!];
+      blocked = true;
+      const results = [];
+      for (const action of targets) {
+        const result = await runtime.dispatch({
+          type: 'rollback',
+          id: id('command', randomUUID()),
+          actorId: member.seatId,
+          expected: runtime.read().head,
+          beforeCommandId: action.commandId,
+          knowledgeWarningAcknowledged: true,
+        });
+        assert.equal(result.type, 'accepted');
+        results.push(result.head);
+      }
+      assert.equal(runtime.read().state, null);
+      assert.equal(
+        seen.filter((notice) => notice.type === 'publication' && notice.rollback).length,
+        0,
+      );
+      gate.resolve();
+      await runtime.flushCommittedCaptures();
+      const rollbacks = seen.filter((notice) => notice.type === 'publication' && notice.rollback);
+      assert.equal(rollbacks.length, 2);
+      for (let i = 0; i < 2; i++) {
+        const notice = rollbacks[i]!;
+        if (notice.type !== 'publication') assert.fail();
+        assert.deepEqual(notice.publication.snapshot.head, results[i]);
+        assert.equal(notice.rollback!.head.version, results[i]!.version);
+        assert.equal(
+          notice.rollback!.target.beforeActionVersion,
+          i === 0 ? history.active.actions.length : 1,
+        );
+        assert.equal(notice.rollback!.actorId, member.seatId);
+        assert.equal(Object.isFrozen(notice.rollback!.target.expected), true);
+      }
     },
   );
 
@@ -1386,6 +1723,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           beforeCommandId: capture.active.actions.at(-1)!.commandId,
           knowledgeWarningAcknowledged: true,
         });
+        await runtime.flushCommittedCaptures();
         assert.equal(result.type, 'accepted');
       } finally {
         read.mock.restore();
@@ -1591,6 +1929,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
             id: id('command', randomUUID()),
             seatId: member.seatId,
           });
+          await runtime.flushCommittedCaptures();
           await pool.query(
             'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name=$1',
             [`penky-game:${request.gameId}`],
@@ -1707,6 +2046,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
             id: id('command', randomUUID()),
             actorId: phase.nextSeatId,
           });
+          await runtime.flushCommittedCaptures();
         }
       });
       const before = (await host.read(member.lobbyId))!;
@@ -1834,6 +2174,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           scope: 'dealing',
           scopeNumber: 0,
         });
+        await runtime.flushCommittedCaptures();
         await clock.advanceBy(4000);
         await runtime.dispatch({
           type: 'request-withdrawal',
@@ -1841,6 +2182,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           actorId: member.seatId,
           claimId: runtime.read().state!.claims[0]!.claim.id,
         });
+        await runtime.flushCommittedCaptures();
         await clock.advanceBy(1000);
         await runtime.checkpoint();
       });
@@ -1877,6 +2219,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
             id: id('command', randomUUID()),
             actorId: phase.nextSeatId,
           });
+          await runtime.flushCommittedCaptures();
         }
         await clock.advanceBy(10000);
         await finishMatch(runtime);
@@ -1975,6 +2318,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
           procedureId: runtime.read().replacementVote!.timer.id,
           vote: 'yes',
         });
+        await runtime.flushCommittedCaptures();
       });
       await host.withCurrent(member.lobbyId, next.gameId, async (runtime) => {
         assert.equal(
@@ -1997,6 +2341,7 @@ test('PostgreSQL single-runtime game host', { skip: !url }, async (t) => {
             id: id('command', randomUUID()),
             actorId: phase.nextSeatId,
           });
+          await runtime.flushCommittedCaptures();
         }
         assert.equal(
           (await runtime.checkpoint()).receipts.filter(
